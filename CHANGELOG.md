@@ -9,11 +9,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Roadmap
 
-- **v0.3.0** — Modular refactor (`cwt/` package) + pytest suite + TypedDicts
-  for `Device` / `WireRoute` / `SymbolType`.
-- **v1.0.0** — Killer features: cable types + BOM, FOV/DORI overlays, A*
-  auto-routing, multi-floor with anchor-point alignment + risers.
-- **v1.1.0** — PDF/CSV export, settings dialog, About dialog.
+- **v1.1.0** — Auto-detected wall opening; route-quality slider per cable
+  run; persistent FOV defaults per camera type; per-room reports.
+- **v1.2.0** — 3D riser-stack diagram view; cloud sync; per-installer
+  field app for checkoff & photos.
+
+## [1.0.0] - 2026-05-07
+
+### Added
+
+- **`cwt/` package** for pure-logic modules:
+  - `cwt.models` — TypedDicts for Device / WireRoute / SymbolType / Floor / Riser
+  - `cwt.bom` — cable catalog defaults, BOM rollup, CSV writer
+  - `cwt.fov` — IEC 62676-4 DORI math (Detection / Observation / Recognition / Identification)
+  - `cwt.lenses` — sensor + lens + resolution + install-preset databases
+  - `cwt.routing` — soft-A* on a downsampled obstacle grid (8-direction, diagonal-penalized, wall-penalty for soft mode)
+  - `cwt.multifloor` — project file v2 schema, anchor-point alignment math, v1→v2 migration
+  - `cwt.export` — multi-page PDF report (reportlab) + CSV bundle (BOM, devices, wires)
+- **`tests/`** — 37 pytest tests covering BOM rollup, FOV/DORI math, A*
+  pathfinding, alignment math, project file round-trips
+- **Cable types + BOM**:
+  - Default catalog (Cat6, Cat5e, RG59, OM4, Speaker, Alarm) with cost/ft
+  - 4th side-panel tab with sortable BOM table, waste multiplier, tax,
+    currency, grand-total breakdown
+  - Cable Types editor dialog (add/edit/delete cables)
+  - Per-route `cable_type` override; falls back to symbol-type cable;
+    falls back to category default
+- **Camera FOV / DORI overlays**:
+  - Per-camera lens / sensor / resolution / mount-height / tilt / azimuth
+  - Live DORI distances (D/O/R/I) computed from IEC 62676-4 thresholds
+  - Semi-transparent cones rendered on the map (View menu toggle)
+  - "Show DORI rings" sub-toggle (off → only outermost detection cone)
+  - Quick presets: Lobby, Hallway, Reception desk, Parking, Loading dock,
+    Long corridor, Server room
+  - Right-click camera → Edit FOV…
+- **A\* auto-routing**:
+  - Wall detection from background-image threshold (lazy-built obstacle grid)
+  - Soft-walls A* (walls penalized 8× rather than impassable — matches
+    real cable behavior through ceiling/conduit penetrations)
+  - 8-direction movement with diagonal penalty so paths prefer orthogonal
+  - Auto-route mode (segmented control + `A` shortcut + right-click
+    "Auto-route from here…")
+  - Path simplification collapses colinear runs to ~5–20 waypoints
+- **Multi-floor + anchor-point alignment**:
+  - Project file format upgraded to v2 (auto-migrates v1 single-floor)
+  - Floors menu: Add Floor, switch active floor, alignment dialog,
+    floor manager
+  - Anchor-point alignment: click 2 corresponding points on each floor,
+    similarity transform (translation + rotation + uniform scale)
+    computed and stored
+  - Manual nudge dialog for fine-tuning alignment
+  - Risers (cross-floor cables) included in BOM rollup
+- **Export**:
+  - File → Export → BOM (CSV) — single CSV
+  - File → Export → All CSVs — bundle of 3 (BOM, devices, wires)
+  - File → Export → Project PDF Report — multi-page with cover, BOM
+    table, riser list, per-device listing
+- **Right-click context menu** on canvas:
+  - For cameras: Edit FOV, toggle FOV cone, auto-route from, delete
+  - For empty canvas: fit, toggle device IDs, toggle FOV
+- **`A` keyboard shortcut** for auto-route mode
+
+### Changed
+
+- Project file format is now v2 by default (single-floor still works
+  identically; v1 files auto-upgrade on first save)
+- Wire routes can carry an optional `cable_type` field (preserved across
+  save/load)
+- Symbol types can declare a default `cable_type` (used by all instances)
+
+## [0.2.0] - 2026-05-07
+
+### Added
 
 ## [0.2.0] - 2026-05-07
 

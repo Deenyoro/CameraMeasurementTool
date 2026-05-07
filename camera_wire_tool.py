@@ -52,6 +52,26 @@ try:
 except ImportError:
     _HAS_SVTTK = False
 
+# cwt support package (always available — sits next to this script)
+from cwt import bom as bom_mod
+from cwt import fov as fov_mod
+from cwt import lenses as lenses_mod
+from cwt import multifloor as mf_mod
+
+try:
+    from cwt import routing as routing_mod
+    _HAS_ROUTING = True
+except ImportError:        # numpy missing
+    _HAS_ROUTING = False
+    routing_mod = None  # type: ignore
+
+try:
+    from cwt import export as export_mod
+    _HAS_EXPORT = True
+except ImportError:
+    _HAS_EXPORT = False
+    export_mod = None  # type: ignore
+
 
 # ============================================================ Constants
 @dataclass(frozen=True)
@@ -141,6 +161,7 @@ class Mode(Enum):
     WIRE = auto()
     CALIBRATE = auto()
     PLACE_DEVICE = auto()
+    AUTO_ROUTE = auto()        # click two devices, A* draws optimal path
 
 
 # ============================================================ Drawio helpers
@@ -606,6 +627,27 @@ class CameraWireTool:
         self._next_device_id = 100
         self._place_type: str | None = None
         self._show_device_ids = tk.BooleanVar(value=False)
+        self._show_fov = tk.BooleanVar(value=False)
+        self._show_dori = tk.BooleanVar(value=True)
+
+        # Cable types catalog (project-level)
+        self.cable_types: dict = {k: dict(v) for k, v in
+                                   bom_mod.DEFAULT_CABLE_TYPES.items()}
+
+        # Multi-floor project (created lazily; single-floor by default)
+        # active_floor_id is "F1" for legacy single-floor; multi-floor mode
+        # populates self._project (ProjectState) and tracks floors there.
+        self._project: mf_mod.ProjectState | None = None
+        self._floor_anchors_picking: list[tuple[float, float]] | None = None
+
+        # Routing context (built lazily on first auto-route)
+        self._routing_ctx = None
+        self._auto_route_first: dict | None = None
+
+        # BOM tab inputs
+        self._bom_waste_var = tk.DoubleVar(value=1.10)
+        self._bom_tax_var = tk.DoubleVar(value=0.0)
+        self._bom_currency_var = tk.StringVar(value="$")
 
         # Mode
         self.mode = Mode.MOVE
@@ -638,68 +680,84 @@ class CameraWireTool:
 
     # ============================================================ project file IO
     def _load_project(self) -> None:
-        if not os.path.exists(self.project_path):
-            return
+        """Load via multifloor.load_project (handles v1 → v2 migration).
+
+        v1 wiremap.json files (single floor, flat wire_routes list) are
+        auto-wrapped into a v2 ProjectState with one floor 'F1'.
+        """
         try:
-            with open(self.project_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError) as e:
+            self._project = mf_mod.load_project(self.project_path, self.drawio_path)
+        except Exception as e:
             log_error(f"Could not load project file {self.project_path}", e)
             messagebox.showwarning(
                 "Project file unreadable",
                 f"Could not load companion project file:\n{self.project_path}\n\n"
                 f"Error: {e}\n\nWires and scale will start empty.",
             )
+            self._project = mf_mod.ProjectState(
+                floors=[mf_mod.FloorState(
+                    id="F1", name="First Floor", elevation_ft=0,
+                    drawio_file=os.path.basename(self.drawio_path),
+                )],
+            )
             return
 
-        try:
-            self.scale_factor = data.get("scale_factor")
-            self._loaded_unit = data.get("unit", "ft-in")
-            for wr in data.get("wire_routes", []):
-                pts = [tuple(p) for p in wr.get("points", [])]
-                if len(pts) < 2:
-                    continue
-                px_len = self._calc_wire_length(pts)
-                real_in = px_len * self.scale_factor if self.scale_factor else None
-                self.wire_routes.append({
-                    "points": pts,
-                    "length_px": px_len,
-                    "length_in": real_in,
-                    "device_id": wr.get("device_id"),
-                })
-            nid = data.get("next_device_id")
-            if nid:
-                self._next_device_id = max(self._next_device_id, int(nid))
-        except (KeyError, TypeError, ValueError) as e:
-            log_error(f"Project file {self.project_path} schema error", e)
-            messagebox.showwarning(
-                "Project file schema error",
-                f"Project file is partially malformed; some data may not have loaded:\n{e}",
-            )
+        proj = self._project
+        self.scale_factor = proj.scale_factor
+        self._loaded_unit = proj.unit
+        if proj.cable_types:
+            self.cable_types = {**self.cable_types, **proj.cable_types}
+        if proj.next_device_id:
+            self._next_device_id = max(self._next_device_id, proj.next_device_id)
+
+        # Active floor's wire routes → self.wire_routes (recalc lengths now)
+        active = proj.get_floor(proj.active_floor) or proj.floors[0]
+        for wr in active.wire_routes:
+            pts = [tuple(p) for p in wr.get("points", [])]
+            if len(pts) < 2:
+                continue
+            px_len = self._calc_wire_length(pts)
+            real_in = px_len * self.scale_factor if self.scale_factor else None
+            entry = {
+                "points": pts,
+                "length_px": px_len,
+                "length_in": real_in,
+                "device_id": wr.get("device_id"),
+            }
+            if wr.get("cable_type"):
+                entry["cable_type"] = wr["cable_type"]
+            self.wire_routes.append(entry)
 
     def _save_project(self) -> None:
-        data = {
-            "drawio_file": os.path.basename(self.drawio_path),
-            "scale_factor": self.scale_factor,
-            "unit": self.unit_var.get(),
-            "next_device_id": self._next_device_id,
-            "wire_routes": [
-                {"points": [list(p) for p in wr["points"]], "device_id": wr.get("device_id")}
-                for wr in self.wire_routes
-            ],
-        }
-        summary: dict[str, dict] = {}
+        """Persist as v2 project file. Captures cable types + active floor wires."""
+        if self._project is None:
+            self._project = mf_mod.ProjectState(
+                floors=[mf_mod.FloorState(
+                    id="F1", name="First Floor", elevation_ft=0,
+                    drawio_file=os.path.basename(self.drawio_path),
+                )],
+            )
+
+        proj = self._project
+        proj.scale_factor = self.scale_factor
+        proj.unit = self.unit_var.get()
+        proj.next_device_id = self._next_device_id
+        proj.cable_types = {k: dict(v) for k, v in self.cable_types.items()}
+
+        # Sync active floor's wire_routes from the live list
+        active = proj.get_floor(proj.active_floor) or proj.floors[0]
+        active.wire_routes = []
         for wr in self.wire_routes:
-            did = wr.get("device_id") or "unassigned"
-            length = wr.get("length_in", 0) or 0
-            summary.setdefault(did, {"runs": 0, "total_inches": 0.0})
-            summary[did]["runs"] += 1
-            summary[did]["total_inches"] += length
-        data["summary_by_device"] = summary
+            entry = {
+                "points": [list(p) for p in wr["points"]],
+                "device_id": wr.get("device_id"),
+            }
+            if wr.get("cable_type"):
+                entry["cable_type"] = wr["cable_type"]
+            active.wire_routes.append(entry)
 
         try:
-            with open(self.project_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            mf_mod.save_project(proj, self.project_path)
         except OSError as e:
             log_error(f"Could not write project file {self.project_path}", e)
             messagebox.showerror("Save failed", f"Could not write project file:\n{e}")
@@ -723,7 +781,7 @@ class CameraWireTool:
         self.canvas.bind("<B1-Motion>", self._on_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
         self.canvas.bind("<Motion>", self._on_motion)
-        self.canvas.bind("<ButtonPress-3>", self._on_right_click)
+        # NOTE: right-click is handled by _on_right_click_with_menu below.
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_move)
@@ -757,9 +815,13 @@ class CameraWireTool:
         b("<KeyPress-W>", self._kbd_mode_wire)
         b("<KeyPress-c>", self._kbd_mode_cal)
         b("<KeyPress-C>", self._kbd_mode_cal)
+        b("<KeyPress-a>", self._kbd_mode_autoroute)
+        b("<KeyPress-A>", self._kbd_mode_autoroute)
         b("<KeyPress-space>", self._kbd_space_press)
         b("<KeyRelease-space>", self._kbd_space_release)
         self.canvas.bind("<Configure>", lambda _e: self._schedule_redraw())
+        # Right-click: finish/cancel wire, otherwise show context menu
+        self.canvas.bind("<Button-3>", self._on_right_click_with_menu)
 
     def _focus_search(self) -> None:
         # Focus whichever search field belongs to the visible tab
@@ -819,6 +881,12 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show Device IDs on Map",
                                   variable=self._show_device_ids,
                                   command=self._redraw)
+        view_menu.add_checkbutton(label="Show Camera FOV Cones",
+                                  variable=self._show_fov,
+                                  command=self._redraw)
+        view_menu.add_checkbutton(label="Show DORI Rings (D/O/R/I)",
+                                  variable=self._show_dori,
+                                  command=self._redraw)
 
         # Mode
         mode_menu = tk.Menu(menubar, tearoff=0)
@@ -829,9 +897,36 @@ class CameraWireTool:
         mode_menu.add_radiobutton(label="Wire", variable=self.mode_var, value=Mode.WIRE.name,
                                   accelerator="W",
                                   command=lambda: self._set_mode(Mode.WIRE))
+        mode_menu.add_radiobutton(label="Auto-route (A*)", variable=self.mode_var,
+                                  value=Mode.AUTO_ROUTE.name, accelerator="A",
+                                  command=lambda: self._set_mode(Mode.AUTO_ROUTE))
         mode_menu.add_radiobutton(label="Calibrate", variable=self.mode_var,
                                   value=Mode.CALIBRATE.name, accelerator="C",
                                   command=self._start_calibration)
+
+        # Floors
+        floor_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Floors", menu=floor_menu)
+        self._floor_menu = floor_menu
+        self._refresh_floor_menu()
+
+        # Tools
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Cable Types Editor…",
+                               command=self._open_cable_types_editor)
+        tools_menu.add_command(label="Edit FOV for Selected Camera…",
+                               command=self._open_fov_dialog_for_selected)
+
+        # Export submenu inside File
+        file_menu.add_separator()
+        export_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label="Export", menu=export_menu)
+        export_menu.add_command(label="BOM (CSV)…", command=self._export_bom_csv)
+        export_menu.add_command(label="All CSVs (BOM + Devices + Wires)…",
+                                command=self._export_csv_bundle)
+        export_menu.add_command(label="Project PDF Report…",
+                                command=self._export_pdf)
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -868,9 +963,10 @@ class CameraWireTool:
         seg.pack(side=tk.LEFT, padx=4, pady=2)
         self._mode_buttons: dict[Mode, ttk.Radiobutton] = {}
         for m, label, tip in (
-            (Mode.MOVE,      "Move",      "Move/select devices  (M)"),
-            (Mode.WIRE,      "Wire",      "Draw wire routes  (W)"),
-            (Mode.CALIBRATE, "Calibrate", "Set real-world scale  (C)"),
+            (Mode.MOVE,       "Move",       "Move/select devices  (M)"),
+            (Mode.WIRE,       "Wire",       "Draw wire routes  (W)"),
+            (Mode.AUTO_ROUTE, "Auto-route", "A* shortest path between two devices  (A)"),
+            (Mode.CALIBRATE,  "Calibrate",  "Set real-world scale  (C)"),
         ):
             rb = ttk.Radiobutton(
                 seg, text=label, value=m.name, variable=self.mode_var,
@@ -1023,6 +1119,70 @@ class CameraWireTool:
         ttk.Button(place_frame, text="Place on Map",
                    command=self._start_place_device).pack(side=tk.LEFT, padx=4)
 
+        # --- Tab 4: BOM ---
+        tab_bom = ttk.Frame(notebook)
+        notebook.add(tab_bom, text="BOM")
+        ttk.Label(tab_bom, text="Bill of Materials",
+                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+
+        # Cost adjustment row
+        adj = ttk.Frame(tab_bom)
+        adj.pack(fill=tk.X, padx=6, pady=2)
+        ttk.Label(adj, text="Waste ×").pack(side=tk.LEFT)
+        ws_entry = ttk.Entry(adj, textvariable=self._bom_waste_var, width=6)
+        ws_entry.pack(side=tk.LEFT, padx=(2, 8))
+        Tooltip(ws_entry, "Waste multiplier (1.10 = 10% extra material)")
+        ttk.Label(adj, text="Tax %").pack(side=tk.LEFT)
+        tax_entry = ttk.Entry(adj, textvariable=self._bom_tax_var, width=6)
+        tax_entry.pack(side=tk.LEFT, padx=(2, 8))
+        Tooltip(tax_entry, "Sales tax rate (decimal, e.g. 0.08 for 8%)")
+        ttk.Label(adj, text="Currency:").pack(side=tk.LEFT)
+        ttk.Entry(adj, textvariable=self._bom_currency_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Button(adj, text="Refresh", command=self._refresh_bom_tab).pack(side=tk.RIGHT)
+
+        # BOM table (Treeview)
+        bom_frame = ttk.Frame(tab_bom)
+        bom_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        cols = ("cable", "label", "runs", "ft", "rate", "subtotal")
+        self._bom_tree = ttk.Treeview(bom_frame, columns=cols, show="headings",
+                                       height=10)
+        for c, w, h in (
+            ("cable", 60, "Cable"),
+            ("label", 130, "Description"),
+            ("runs", 50, "Runs"),
+            ("ft", 80, "Length (ft)"),
+            ("rate", 70, "$/ft"),
+            ("subtotal", 80, "Subtotal"),
+        ):
+            self._bom_tree.heading(c, text=h)
+            self._bom_tree.column(c, width=w, anchor=tk.W if c in ("cable", "label") else tk.E)
+        sb_bom = ttk.Scrollbar(bom_frame, orient=tk.VERTICAL,
+                                command=self._bom_tree.yview)
+        self._bom_tree.config(yscrollcommand=sb_bom.set)
+        self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_bom.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Totals
+        self._bom_totals_label = ttk.Label(
+            tab_bom, text="Subtotal: --\nGrand total: --",
+            font=("Consolas", 10),
+        )
+        self._bom_totals_label.pack(anchor=tk.W, padx=8, pady=(4, 0))
+
+        bom_btns = ttk.Frame(tab_bom)
+        bom_btns.pack(fill=tk.X, padx=6, pady=6)
+        ttk.Button(bom_btns, text="Cable Types…",
+                   command=self._open_cable_types_editor).pack(side=tk.LEFT)
+        ttk.Button(bom_btns, text="Export CSV",
+                   command=self._export_bom_csv).pack(side=tk.LEFT, padx=4)
+        if _HAS_EXPORT:
+            ttk.Button(bom_btns, text="Export PDF",
+                       command=self._export_pdf).pack(side=tk.LEFT, padx=4)
+
+        # Refresh once on input change
+        for var in (self._bom_waste_var, self._bom_tax_var, self._bom_currency_var):
+            var.trace_add("write", lambda *_: self._refresh_bom_tab())
+
         # Bottom breadcrumb status bar
         self._statusbar = ttk.Frame(self.root)
         self._statusbar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1035,6 +1195,7 @@ class CameraWireTool:
 
         self._refresh_symbol_list()
         self._refresh_device_list()
+        self._refresh_bom_tab()
         self._update_undo_redo_state()
 
         # Default search hook for Ctrl+F = devices tab
@@ -1098,6 +1259,7 @@ class CameraWireTool:
             Mode.WIRE: "crosshair",
             Mode.CALIBRATE: "tcross",
             Mode.PLACE_DEVICE: "tcross",
+            Mode.AUTO_ROUTE: "plus",
         }.get(self.mode, "arrow")
         try:
             self.canvas.config(cursor=cursor)
@@ -1171,6 +1333,7 @@ class CameraWireTool:
         self._refresh_symbol_list()
         self._refresh_device_list()
         self._refresh_wire_list()
+        self._refresh_bom_tab()
         self._redraw()
         self._update_undo_redo_state()
 
@@ -1525,6 +1688,10 @@ class CameraWireTool:
             self.canvas.create_image(px, py, anchor=tk.NW, image=tk_img, tags="img")
             self._tk_ref = tk_img
 
+        # FOV cones go BEHIND wires so the wire labels stay readable
+        if self._show_fov.get():
+            self._draw_fov_cones()
+
         for i, route in enumerate(self.wire_routes):
             self._draw_wire_route(route, i)
 
@@ -1838,6 +2005,32 @@ class CameraWireTool:
             return
         ix, iy = self._canvas_to_img(event.x, event.y)
 
+        # Floor-anchor picking takes priority over normal modes
+        if self._floor_anchors_picking is not None:
+            self._floor_anchors_picking.append((ix, iy))
+            cx, cy = self._img_to_canvas(ix, iy)
+            self.canvas.create_oval(cx-6, cy-6, cx+6, cy+6,
+                                    fill="#FFC0CB", outline="black", width=2, tags="anchor")
+            n = len(self._floor_anchors_picking)
+            active, ref = self._floor_anchor_target
+            if n < 2:
+                self.status_label.config(
+                    text=f"ANCHOR: click point #{n+1}/2 on {active.id}")
+                return
+            # 2 picked on this floor; remember and switch to the reference floor
+            active.anchor_points = [list(p) for p in self._floor_anchors_picking]
+            self._floor_anchors_picking = None
+            messagebox.showinfo(
+                "Switch floors",
+                f"Anchors stored for {active.id}. Click OK, then on {ref.id} click "
+                f"the SAME 2 physical points (in the same order).")
+            # Begin picking on the reference floor
+            self._floor_anchors_picking = []
+            self._floor_anchor_target = (ref, active)
+            # Switch to ref floor
+            self._switch_floor(ref.id)
+            return
+
         if self.mode == Mode.CALIBRATE:
             self.cal_points.append((ix, iy))
             cx, cy = self._img_to_canvas(ix, iy)
@@ -1852,6 +2045,29 @@ class CameraWireTool:
         if self.mode == Mode.PLACE_DEVICE:
             self._do_place_device(ix, iy)
             return
+
+        if self.mode == Mode.AUTO_ROUTE:
+            dev = self._device_at(ix, iy)
+            if dev is None:
+                self.status_label.config(
+                    text="Auto-route: click directly on a device icon. Esc to cancel.")
+                return
+            if self._auto_route_first is None:
+                self._auto_route_first = dev
+                self.selected_device = dev
+                self._redraw()
+                self.status_label.config(
+                    text=f"Auto-route: now click destination "
+                         f"(started at {dev['id']})")
+                return
+            else:
+                if dev["id"] == self._auto_route_first["id"]:
+                    self.status_label.config(text="Pick a DIFFERENT destination device.")
+                    return
+                self._do_auto_route(self._auto_route_first, dev)
+                self._auto_route_first = None
+                # stay in auto-route mode so user can chain runs
+                return
 
         if self.mode == Mode.MOVE:
             dev = self._device_at(ix, iy)
@@ -1985,11 +2201,14 @@ class CameraWireTool:
 
     def _cancel_current(self) -> None:
         self.current_wire_points = []
-        if self.mode in (Mode.PLACE_DEVICE, Mode.CALIBRATE):
+        if self.mode in (Mode.PLACE_DEVICE, Mode.CALIBRATE, Mode.AUTO_ROUTE):
             self._set_mode(Mode.MOVE)
         self.canvas.delete("wire_preview")
         self.canvas.delete("wip_wire")
+        self.canvas.delete("anchor")
         self.cal_points = []
+        self._auto_route_first = None
+        self._floor_anchors_picking = None
         self._update_status()
 
     def _on_mousewheel(self, event) -> None:
@@ -2411,11 +2630,780 @@ class CameraWireTool:
         messagebox.showinfo(
             "About Camera Wire Tool",
             "Camera Wire Estimation Tool\n"
-            "v0.2.0 — polish pass\n\n"
+            "v1.0.0 — killer features release\n\n"
             "Tkinter app for estimating security-camera cable runs on draw.io floor plans.\n\n"
+            "Features:\n"
+            "  • Cable types + BOM with waste & tax\n"
+            "  • Camera FOV / DORI overlays (IEC 62676-4)\n"
+            "  • A* auto-routing between devices\n"
+            "  • Multi-floor with anchor-point alignment + risers\n"
+            "  • PDF + CSV report export\n\n"
             "See PLAYBOOK.md for full documentation.\n"
             "MIT License.",
         )
+
+    # ============================================================ keyboard handlers (extra)
+    def _kbd_mode_autoroute(self, event):
+        if self._is_text_focus(event):
+            return
+        if not _HAS_ROUTING:
+            messagebox.showwarning(
+                "Auto-route unavailable",
+                "Auto-routing requires numpy. `pip install numpy` then restart.")
+            return
+        self._set_mode(Mode.AUTO_ROUTE)
+
+    # ============================================================ right-click context menu
+    def _on_right_click_with_menu(self, event) -> None:
+        # In Wire Mode, right-click finishes (≥2 points) or cancels.
+        if self.mode == Mode.WIRE:
+            if len(self.current_wire_points) >= 2:
+                self._finish_wire_route()
+            else:
+                self._cancel_current()
+            return
+        # In other action modes, right-click cancels rather than menuing.
+        if self.mode in (Mode.CALIBRATE, Mode.PLACE_DEVICE, Mode.AUTO_ROUTE):
+            self._cancel_current()
+            return
+        ix, iy = self._canvas_to_img(event.x, event.y)
+        dev = self._device_at(ix, iy)
+        menu = tk.Menu(self.root, tearoff=0)
+        if dev is not None:
+            self.selected_device = dev
+            self._redraw()
+            info = self.symbol_types.get(dev["type"], {})
+            menu.add_command(label=f"Selected: {dev['id']} ({dev['type']})",
+                             state=tk.DISABLED)
+            menu.add_separator()
+            if info.get("is_camera"):
+                menu.add_command(label="Edit FOV / DORI…",
+                                 command=lambda d=dev: self._open_fov_dialog(d))
+                menu.add_command(
+                    label="Toggle FOV cone for this camera",
+                    command=lambda d=dev: self._toggle_camera_fov(d),
+                )
+                menu.add_separator()
+            if _HAS_ROUTING:
+                menu.add_command(
+                    label="Auto-route from here…",
+                    command=lambda d=dev: self._auto_route_from(d),
+                )
+                menu.add_separator()
+            menu.add_command(label="Delete device",
+                             command=self._on_delete_key)
+        else:
+            menu.add_command(label="Fit view",
+                             command=lambda: (self._fit_image(), self._redraw()))
+            menu.add_separator()
+            menu.add_command(label="Show device IDs",
+                             command=lambda: (self._show_device_ids.set(
+                                 not self._show_device_ids.get()), self._redraw()))
+            menu.add_command(label="Toggle FOV overlays",
+                             command=lambda: (self._show_fov.set(
+                                 not self._show_fov.get()), self._redraw()))
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # ============================================================ BOM tab
+    def _build_bom_report(self) -> bom_mod.BomReport:
+        try:
+            waste = float(self._bom_waste_var.get())
+        except tk.TclError:
+            waste = 1.10
+        try:
+            tax = float(self._bom_tax_var.get())
+        except tk.TclError:
+            tax = 0.0
+        risers = self._project.risers if self._project else []
+        return bom_mod.rollup(
+            self.wire_routes, self.devices, self.symbol_types, self.cable_types,
+            waste_factor=waste, tax_rate=tax, risers=risers,
+            scale_factor=self.scale_factor,
+        )
+
+    def _refresh_bom_tab(self) -> None:
+        if not hasattr(self, "_bom_tree"):
+            return
+        for item in self._bom_tree.get_children():
+            self._bom_tree.delete(item)
+        report = self._build_bom_report()
+        cur = self._bom_currency_var.get() or "$"
+        for line in report.lines:
+            self._bom_tree.insert(
+                "", tk.END,
+                values=(line.cable_id, line.label, line.runs,
+                        f"{line.total_ft:,.2f}",
+                        f"{cur}{line.cost_per_ft:.4f}",
+                        f"{cur}{line.subtotal:,.2f}"),
+            )
+        unassigned = ""
+        if report.unassigned_runs:
+            unassigned = (
+                f"\n  ⚠ {report.unassigned_runs} unassigned wire(s) — "
+                f"{self._format_length(report.unassigned_inches)}"
+            )
+        self._bom_totals_label.config(text=(
+            f"Subtotal:    {cur}{report.subtotal:,.2f}\n"
+            f"Waste added: {cur}{report.waste_added:,.2f} (×{report.waste_factor:.2f})\n"
+            f"Tax:         {cur}{report.tax_amount:,.2f} ({report.tax_rate*100:.2f}%)\n"
+            f"GRAND TOTAL: {cur}{report.grand_total:,.2f}"
+            + unassigned
+        ))
+
+    # ============================================================ Cable types editor
+    def _open_cable_types_editor(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Cable Types")
+        dlg.geometry("520x420")
+        dlg.transient(self.root); dlg.grab_set()
+
+        ttk.Label(dlg, text="Project cable catalog. Per-symbol cable assignment "
+                  "is in the Symbol editor.",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=10, pady=(8, 4))
+
+        cols = ("id", "label", "color", "cost")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=10)
+        for c, w, h in (("id", 70, "ID"), ("label", 200, "Label"),
+                         ("color", 80, "Color"), ("cost", 80, "$/ft")):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor=tk.W)
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        def repop():
+            for it in tree.get_children():
+                tree.delete(it)
+            for cid, ct in sorted(self.cable_types.items()):
+                tree.insert("", tk.END, iid=cid,
+                            values=(cid, ct["label"], ct["color"],
+                                    f"{ct.get('cost_per_ft', 0):.4f}"))
+        repop()
+
+        def edit_dialog(cid: str | None):
+            edit = tk.Toplevel(dlg); edit.transient(dlg); edit.grab_set()
+            edit.title("Cable" if cid else "New Cable")
+            edit.geometry("340x230")
+            row = 0
+            ttk.Label(edit, text="ID:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
+            id_var = tk.StringVar(value=cid or "")
+            ttk.Entry(edit, textvariable=id_var, width=20,
+                      state=("disabled" if cid else "normal")).grid(row=row, column=1, sticky=tk.W)
+            row += 1
+            ttk.Label(edit, text="Label:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
+            label_var = tk.StringVar(value=self.cable_types.get(cid, {}).get("label", "") if cid else "")
+            ttk.Entry(edit, textvariable=label_var, width=28).grid(row=row, column=1, sticky=tk.W)
+            row += 1
+            ttk.Label(edit, text="Color:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
+            color_var = tk.StringVar(value=self.cable_types.get(cid, {}).get("color", "#888888") if cid else "#888888")
+            color_frame = ttk.Frame(edit); color_frame.grid(row=row, column=1, sticky=tk.W)
+            sw = tk.Label(color_frame, bg=color_var.get(), width=4, height=1, relief=tk.RAISED)
+            sw.pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Label(color_frame, textvariable=color_var, width=10).pack(side=tk.LEFT)
+            def pick():
+                c = colorchooser.askcolor(initialcolor=color_var.get())
+                if c and c[1]:
+                    color_var.set(c[1].upper()); sw.config(bg=c[1])
+            ttk.Button(color_frame, text="Pick…", command=pick).pack(side=tk.LEFT, padx=4)
+            row += 1
+            ttk.Label(edit, text="Cost/ft ($):").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
+            cost_var = tk.DoubleVar(value=self.cable_types.get(cid, {}).get("cost_per_ft", 0.10) if cid else 0.10)
+            ttk.Entry(edit, textvariable=cost_var, width=10).grid(row=row, column=1, sticky=tk.W)
+            row += 1
+            def save():
+                new_id = id_var.get().strip()
+                if not new_id:
+                    messagebox.showerror("Error", "ID required"); return
+                self.cable_types[new_id] = {
+                    "label": label_var.get().strip() or new_id,
+                    "color": color_var.get().upper(),
+                    "cost_per_ft": float(cost_var.get()),
+                }
+                self._mark_dirty()
+                repop()
+                self._refresh_bom_tab()
+                self._redraw()
+                edit.destroy()
+            ttk.Button(edit, text="Save", command=save).grid(row=row, column=0, columnspan=2, pady=10)
+
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
+        ttk.Button(btns, text="Add", command=lambda: edit_dialog(None)).pack(side=tk.LEFT)
+        def on_edit():
+            sel = tree.selection()
+            if sel: edit_dialog(sel[0])
+        ttk.Button(btns, text="Edit", command=on_edit).pack(side=tk.LEFT, padx=4)
+        def on_del():
+            sel = tree.selection()
+            if not sel: return
+            cid = sel[0]
+            if messagebox.askyesno("Delete", f"Delete cable type '{cid}'?"):
+                self.cable_types.pop(cid, None)
+                self._mark_dirty(); repop()
+                self._refresh_bom_tab(); self._redraw()
+        ttk.Button(btns, text="Delete", command=on_del).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+
+    # ============================================================ FOV / DORI editor
+    def _open_fov_dialog_for_selected(self) -> None:
+        if self.selected_device is None:
+            messagebox.showinfo("Select", "Select a camera device first")
+            return
+        info = self.symbol_types.get(self.selected_device["type"], {})
+        if not info.get("is_camera"):
+            messagebox.showinfo("Not a camera",
+                                f"{self.selected_device['id']} is not flagged as a camera.")
+            return
+        self._open_fov_dialog(self.selected_device)
+
+    def _toggle_camera_fov(self, device: dict) -> None:
+        fov = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
+        fov["show"] = not fov.get("show", True)
+        device["fov"] = fov
+        self._show_fov.set(True)
+        self._mark_dirty()
+        self._redraw()
+
+    def _open_fov_dialog(self, device: dict) -> None:
+        existing = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
+        fov = dict(existing)
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"FOV / DORI — {device['id']}")
+        dlg.geometry("560x540")
+        dlg.transient(self.root); dlg.grab_set()
+
+        ttk.Label(dlg, text=f"Camera {device['id']} ({device['type']})",
+                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 4))
+
+        form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=10, pady=4)
+        row = 0
+
+        ttk.Label(form, text="Lens (mm):").grid(row=row, column=0, sticky=tk.W, pady=2)
+        lens_var = tk.DoubleVar(value=float(fov.get("lens_mm", 4.0)))
+        lens_combo = ttk.Combobox(form, textvariable=lens_var, width=10,
+                                   values=[str(v) for v in lenses_mod.LENS_PRESETS_MM])
+        lens_combo.grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
+
+        ttk.Label(form, text="Sensor:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        sensor_var = tk.StringVar(value=fov.get("sensor", '1/2.8"'))
+        ttk.Combobox(form, textvariable=sensor_var, width=10,
+                     values=list(lenses_mod.SENSORS.keys()),
+                     state="readonly").grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
+
+        ttk.Label(form, text="Resolution:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        res_var = tk.StringVar(value=next(
+            (k for k, v in lenses_mod.RESOLUTIONS.items()
+             if list(v) == list(fov.get("resolution") or [])), "4K (UHD)"))
+        ttk.Combobox(form, textvariable=res_var, width=12,
+                     values=list(lenses_mod.RESOLUTIONS.keys()),
+                     state="readonly").grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
+
+        ttk.Label(form, text="Mount height (ft):").grid(row=row, column=0, sticky=tk.W, pady=2)
+        mh_var = tk.DoubleVar(value=float(fov.get("mount_height_ft", 9.0)))
+        ttk.Entry(form, textvariable=mh_var, width=10).grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
+
+        ttk.Label(form, text="Tilt (° down):").grid(row=row, column=0, sticky=tk.W, pady=2)
+        tilt_var = tk.DoubleVar(value=float(fov.get("tilt_deg", 15.0)))
+        ttk.Entry(form, textvariable=tilt_var, width=10).grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
+
+        ttk.Label(form, text="Azimuth (°, 0=up):").grid(row=row, column=0, sticky=tk.W, pady=2)
+        az_var = tk.DoubleVar(value=float(fov.get("azimuth_deg", 0.0)))
+        ttk.Scale(form, from_=0, to=360, variable=az_var, orient=tk.HORIZONTAL,
+                  length=200).grid(row=row, column=1, sticky=tk.W, padx=4)
+        ttk.Entry(form, textvariable=az_var, width=8).grid(row=row, column=2, padx=4); row += 1
+
+        show_var = tk.BooleanVar(value=bool(fov.get("show", True)))
+        ttk.Checkbutton(form, text="Show this camera's FOV cone on map",
+                        variable=show_var).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=4); row += 1
+
+        # DORI distance preview
+        preview = ttk.LabelFrame(dlg, text="DORI distances (computed live)")
+        preview.pack(fill=tk.X, padx=10, pady=8)
+        preview_label = ttk.Label(preview, text="—", font=("Consolas", 10),
+                                   justify=tk.LEFT)
+        preview_label.pack(anchor=tk.W, padx=8, pady=6)
+
+        def update_preview(*_):
+            try:
+                cur = {
+                    "lens_mm": float(lens_var.get()),
+                    "sensor": sensor_var.get(),
+                    "resolution": list(lenses_mod.RESOLUTIONS.get(res_var.get(),
+                                                                  [1920, 1080])),
+                    "mount_height_ft": float(mh_var.get()),
+                    "azimuth_deg": float(az_var.get()),
+                }
+                cone = fov_mod.compute_fov(cur)
+                lines = [f"Horizontal AOV: {cone.aov_h_deg:.1f}°    "
+                         f"Vertical AOV: {cone.aov_v_deg:.1f}°"]
+                for r in ("D", "O", "R", "I"):
+                    d_in = cone.distances_in[r]
+                    d_ft = d_in / 12
+                    lines.append(f"  {r}  {fov_mod.DORI_LABELS[r]:14s}  {d_ft:6.1f} ft")
+                preview_label.config(text="\n".join(lines))
+            except (ValueError, tk.TclError):
+                preview_label.config(text="(invalid input)")
+        for v in (lens_var, sensor_var, res_var, mh_var, az_var):
+            v.trace_add("write", update_preview)
+        update_preview()
+
+        # Quick presets
+        presets_frame = ttk.LabelFrame(dlg, text="Quick presets")
+        presets_frame.pack(fill=tk.X, padx=10, pady=4)
+        for i, (name, p) in enumerate(lenses_mod.INSTALL_PRESETS.items()):
+            def apply_preset(pp=p):
+                lens_var.set(pp["lens_mm"])
+                tilt_var.set(pp["tilt_deg"])
+                mh_var.set(pp["mount_height_ft"])
+            ttk.Button(presets_frame, text=name, command=apply_preset).grid(
+                row=i // 4, column=i % 4, padx=4, pady=2, sticky=tk.W)
+
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
+        def apply():
+            device["fov"] = {
+                "enabled": True,
+                "show": show_var.get(),
+                "lens_mm": float(lens_var.get()),
+                "sensor": sensor_var.get(),
+                "resolution": list(lenses_mod.RESOLUTIONS.get(res_var.get(),
+                                                              [1920, 1080])),
+                "mount_height_ft": float(mh_var.get()),
+                "tilt_deg": float(tilt_var.get()),
+                "azimuth_deg": float(az_var.get()),
+            }
+            self._show_fov.set(True)
+            self._mark_dirty()
+            self._redraw()
+            dlg.destroy()
+        ttk.Button(btns, text="Apply", command=apply).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+
+    # ============================================================ Auto-routing (A*)
+    def _build_routing_ctx(self):
+        if self._routing_ctx is not None:
+            return self._routing_ctx
+        if not _HAS_ROUTING or routing_mod is None:
+            return None
+        try:
+            self.status_label.config(text="Building obstacle grid…")
+            self.root.update_idletasks()
+            # cell_px=25 + threshold=80 + no dilation tuned for typical
+            # architectural floor plans (lots of fine detail; dilation makes
+            # everything a wall).
+            grid = routing_mod.build_obstacle_grid(self.bg_image, cell_px=25,
+                                                    threshold=80, dilate_iters=0)
+            self._routing_ctx = routing_mod.RoutingContext(grid=grid, cell_px=25)
+            self._update_status()
+        except Exception as e:
+            log_error("Failed to build routing grid", e)
+            messagebox.showerror("Auto-route", f"Could not build obstacle grid:\n{e}")
+            return None
+        return self._routing_ctx
+
+    def _start_auto_route(self):
+        if not _HAS_ROUTING:
+            messagebox.showwarning(
+                "Auto-route unavailable",
+                "Auto-routing requires numpy. `pip install numpy` then restart.")
+            return
+        self._set_mode(Mode.AUTO_ROUTE)
+        self._auto_route_first = None
+        self.status_label.config(
+            text="Auto-route: click first device, then click second device. Esc to cancel.")
+
+    def _auto_route_from(self, device: dict):
+        self._start_auto_route()
+        self._auto_route_first = device
+        self.status_label.config(
+            text=f"Auto-route: now click destination device (started at {device['id']})")
+
+    def _do_auto_route(self, src: dict, dst: dict):
+        ctx = self._build_routing_ctx()
+        if ctx is None:
+            return
+        sx, sy = self._drawio_to_img(src["x"] + src["w"]/2, src["y"] + src["h"]/2)
+        gx, gy = self._drawio_to_img(dst["x"] + dst["w"]/2, dst["y"] + dst["h"]/2)
+        try:
+            waypoints = routing_mod.route_between(ctx, (sx, sy), (gx, gy))
+        except Exception as e:
+            log_error("A* failed", e)
+            messagebox.showerror("Auto-route", f"Route failed:\n{e}")
+            return
+        if not waypoints:
+            messagebox.showwarning("Auto-route",
+                                   "No path found (all routes blocked by walls)")
+            return
+        px_len = self._calc_wire_length(waypoints)
+        real_in = px_len * self.scale_factor if self.scale_factor else None
+        route = {
+            "points": [tuple(p) for p in waypoints],
+            "length_px": px_len,
+            "length_in": real_in,
+            "device_id": src["id"],
+        }
+        self._execute(AddWireCmd(self, route))
+        self.selected_device = src
+        self._post_command_refresh()
+        self.status_label.config(
+            text=f"Auto-routed {src['id']} → {dst['id']}: "
+                 f"{len(waypoints)} waypoints, "
+                 f"{self._format_length(real_in) if real_in else f'{px_len:.0f}px'}")
+
+    # ============================================================ Multi-floor
+    def _refresh_floor_menu(self) -> None:
+        if not hasattr(self, "_floor_menu"):
+            return
+        m = self._floor_menu
+        m.delete(0, tk.END)
+        proj = self._project
+        if proj is None or not proj.floors:
+            m.add_command(label="(single-floor mode)", state=tk.DISABLED)
+            m.add_separator()
+        else:
+            for f in proj.floors:
+                marker = "● " if f.id == proj.active_floor else "  "
+                m.add_command(label=f"{marker}{f.id} — {f.name}",
+                              command=lambda fid=f.id: self._switch_floor(fid))
+            m.add_separator()
+        m.add_command(label="Add Floor…", command=self._add_floor_dialog)
+        m.add_command(label="Align Floor to Reference…",
+                      command=self._open_alignment_dialog)
+        m.add_command(label="Manage Floors…", command=self._open_floor_manager)
+
+    def _add_floor_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Pick .drawio for new floor",
+            initialdir=os.path.dirname(self.drawio_path),
+            filetypes=[("Draw.io files", "*.drawio")])
+        if not path:
+            return
+        if self._project is None:
+            # Bootstrap into multi-floor mode by capturing current floor as F1
+            self._project = mf_mod.ProjectState(
+                floors=[mf_mod.FloorState(
+                    id="F1", name="First Floor", elevation_ft=0,
+                    drawio_file=os.path.basename(self.drawio_path),
+                )],
+            )
+        existing_ids = {f.id for f in self._project.floors}
+        n = 2
+        while f"F{n}" in existing_ids:
+            n += 1
+        new_id = f"F{n}"
+
+        dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
+        dlg.title("New floor"); dlg.geometry("360x180")
+        ttk.Label(dlg, text=f"Floor ID: {new_id}").pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Label(dlg, text="Name:").pack(anchor=tk.W, padx=10)
+        name_var = tk.StringVar(value=os.path.splitext(os.path.basename(path))[0])
+        ttk.Entry(dlg, textvariable=name_var, width=40).pack(padx=10, pady=2)
+        ttk.Label(dlg, text="Elevation (ft):").pack(anchor=tk.W, padx=10)
+        elev_var = tk.DoubleVar(value=14.0 * (n - 1))
+        ttk.Entry(dlg, textvariable=elev_var, width=10).pack(anchor=tk.W, padx=10, pady=2)
+
+        # Make path relative if possible (project file's directory)
+        try:
+            rel = os.path.relpath(path, os.path.dirname(self.drawio_path))
+        except ValueError:
+            rel = path
+
+        def add():
+            new_floor = mf_mod.FloorState(
+                id=new_id, name=name_var.get().strip() or new_id,
+                elevation_ft=float(elev_var.get()),
+                drawio_file=rel,
+            )
+            self._project.floors.append(new_floor)
+            self._mark_dirty()
+            self._refresh_floor_menu()
+            dlg.destroy()
+            if messagebox.askyesno("Switch?", f"Switch to {new_id} now?"):
+                self._switch_floor(new_id)
+
+        ttk.Button(dlg, text="Add", command=add).pack(pady=8)
+
+    def _switch_floor(self, floor_id: str) -> None:
+        if self._project is None:
+            return
+        target = self._project.get_floor(floor_id)
+        if target is None or floor_id == self._project.active_floor:
+            return
+
+        if self._dirty and not self._confirm_discard():
+            return
+
+        # Save active floor's wires back to project
+        active = self._project.get_floor(self._project.active_floor)
+        if active is not None:
+            active.wire_routes = []
+            for wr in self.wire_routes:
+                e = {"points": [list(p) for p in wr["points"]],
+                     "device_id": wr.get("device_id")}
+                if wr.get("cable_type"):
+                    e["cable_type"] = wr["cable_type"]
+                active.wire_routes.append(e)
+
+        # Resolve target's drawio path (relative or absolute)
+        if os.path.isabs(target.drawio_file):
+            new_path = target.drawio_file
+        else:
+            new_path = os.path.normpath(
+                os.path.join(os.path.dirname(self.drawio_path), target.drawio_file))
+        if not os.path.exists(new_path):
+            messagebox.showerror("Missing file",
+                                 f"Drawio file not found:\n{new_path}")
+            return
+
+        # Reload — relaunch the tool with the new file (cleaner than reparenting state)
+        self._save_project()  # persist the v2 project
+        # Hand the active_floor change off to the new instance via the project file:
+        self._project.active_floor = floor_id
+        try:
+            mf_mod.save_project(self._project, self.project_path)
+        except OSError:
+            pass
+        self.root.destroy()
+        new_root = tk.Tk()
+        apply_theme(new_root)
+        new_root.title("Camera Wire Estimation Tool")
+        CameraWireTool(new_root, new_path)
+        new_root.mainloop()
+
+    def _open_alignment_dialog(self) -> None:
+        if self._project is None or len(self._project.floors) < 2:
+            messagebox.showinfo("Alignment",
+                                "Add a second floor first (Floors menu → Add Floor).")
+            return
+        active = self._project.get_floor(self._project.active_floor)
+        if active is None:
+            return
+
+        dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
+        dlg.title(f"Align floor {active.id} to reference")
+        dlg.geometry("520x320")
+
+        ttk.Label(dlg, text=
+            f"Pick a reference floor and click 2 anchor points (e.g. NW and NE\n"
+            f"corners of the building) on each. The transform that maps this floor's\n"
+            f"anchors to the reference's anchors becomes its alignment.",
+            justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=8)
+
+        ref_var = tk.StringVar(value=self._project.floors[0].id
+                               if self._project.floors[0].id != active.id
+                               else self._project.floors[1].id)
+        ttk.Label(dlg, text="Reference floor:").pack(anchor=tk.W, padx=10)
+        ttk.Combobox(dlg, textvariable=ref_var,
+                     values=[f.id for f in self._project.floors if f.id != active.id],
+                     state="readonly", width=20).pack(anchor=tk.W, padx=10, pady=2)
+
+        info_label = ttk.Label(
+            dlg,
+            text="Status: anchors not picked.\n\n"
+                 "Tip: anchor points are stored per-floor. To re-align, just pick "
+                 "new ones. The transform updates automatically.",
+            font=("Segoe UI", 9), justify=tk.LEFT)
+        info_label.pack(anchor=tk.W, padx=10, pady=8)
+
+        def show_current():
+            a = active.alignment
+            info_label.config(
+                text=f"Current alignment for {active.id}:\n"
+                     f"  translation: ({a['tx']:.1f}, {a['ty']:.1f}) px\n"
+                     f"  scale:       {a['scale']:.4f}\n"
+                     f"  rotation:    {a['rotation_deg']:.2f}°\n"
+                     f"  anchors:     {len(active.anchor_points)} stored")
+        show_current()
+
+        def reset():
+            active.alignment = dict(mf_mod.IDENTITY_ALIGNMENT)
+            active.anchor_points = []
+            self._mark_dirty()
+            show_current()
+            messagebox.showinfo("Reset", f"{active.id} reset to identity transform.")
+
+        def manual():
+            # Quick manual nudge dialog using arrow keys
+            n = tk.Toplevel(dlg); n.transient(dlg); n.grab_set()
+            n.title("Manual nudge")
+            n.geometry("320x180")
+            ttk.Label(n, text="Use these buttons to nudge the alignment.\n"
+                              "1px steps; ×10 with shift modifier.").pack(padx=10, pady=8)
+            grid = ttk.Frame(n); grid.pack(pady=6)
+            def nudge(dx, dy):
+                active.alignment["tx"] += dx
+                active.alignment["ty"] += dy
+                self._mark_dirty()
+                show_current()
+            ttk.Button(grid, text="↑",  width=4, command=lambda: nudge(0, -1)).grid(row=0, column=1)
+            ttk.Button(grid, text="←",  width=4, command=lambda: nudge(-1, 0)).grid(row=1, column=0)
+            ttk.Button(grid, text="↓",  width=4, command=lambda: nudge(0, 1)).grid(row=1, column=1)
+            ttk.Button(grid, text="→",  width=4, command=lambda: nudge(1, 0)).grid(row=1, column=2)
+            ttk.Button(grid, text="↑10", width=4, command=lambda: nudge(0, -10)).grid(row=2, column=1)
+            ttk.Button(grid, text="←10", width=4, command=lambda: nudge(-10, 0)).grid(row=3, column=0)
+            ttk.Button(grid, text="↓10", width=4, command=lambda: nudge(0, 10)).grid(row=3, column=1)
+            ttk.Button(grid, text="→10", width=4, command=lambda: nudge(10, 0)).grid(row=3, column=2)
+
+        def pick_anchors():
+            ref = self._project.get_floor(ref_var.get())
+            if ref is None:
+                messagebox.showerror("Error", "Pick a valid reference floor"); return
+            messagebox.showinfo(
+                "Alignment via anchors",
+                f"On {active.id}, click two reference points on the map. Then on "
+                f"{ref.id} (you'll be prompted to switch), click the SAME two "
+                f"physical points. The system computes the alignment transform.")
+            # Capture mode for current floor
+            self._floor_anchors_picking = []
+            self._floor_anchor_target = (active, ref)
+            self.status_label.config(
+                text=f"ANCHOR: click 2 reference points on {active.id}")
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
+        ttk.Button(btns, text="Pick anchor points (this floor)",
+                   command=pick_anchors).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Manual nudge…", command=manual).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Reset", command=reset).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+
+    def _open_floor_manager(self) -> None:
+        if self._project is None or not self._project.floors:
+            messagebox.showinfo("Floors", "No floors yet — use Add Floor.")
+            return
+        dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
+        dlg.title("Manage floors"); dlg.geometry("520x320")
+        cols = ("id", "name", "elevation", "drawio")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
+        for c, w, h in (("id", 60, "ID"), ("name", 140, "Name"),
+                         ("elevation", 90, "Elev. (ft)"), ("drawio", 220, "Drawio")):
+            tree.heading(c, text=h); tree.column(c, width=w)
+        for f in self._project.floors:
+            tree.insert("", tk.END, iid=f.id,
+                        values=(f.id, f.name, f"{f.elevation_ft:.1f}",
+                                f.drawio_file))
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=6)
+
+    # ============================================================ Export
+    def _export_bom_csv(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Export BOM as CSV",
+            defaultextension=".csv",
+            initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_bom.csv",
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            bom_mod.write_csv(self._build_bom_report(), path,
+                              currency=self._bom_currency_var.get() or "$")
+            messagebox.showinfo("Exported", f"BOM written:\n{path}")
+        except OSError as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _export_csv_bundle(self) -> None:
+        if not _HAS_EXPORT:
+            messagebox.showwarning("Unavailable", "Export module not available.")
+            return
+        directory = filedialog.askdirectory(title="Export CSV bundle into folder")
+        if not directory:
+            return
+        try:
+            paths = export_mod.write_bundle_csv(
+                directory,
+                devices=self.devices,
+                symbol_types=self.symbol_types,
+                wire_routes=self.wire_routes,
+                bom_report=self._build_bom_report(),
+                format_length=self._format_length,
+                currency=self._bom_currency_var.get() or "$",
+            )
+            messagebox.showinfo("Exported", "Wrote:\n" + "\n".join(paths))
+        except OSError as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _export_pdf(self) -> None:
+        if not _HAS_EXPORT or not export_mod._HAS_REPORTLAB:
+            messagebox.showwarning(
+                "PDF unavailable",
+                "PDF export requires reportlab. `pip install reportlab` then restart.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export PDF report",
+            defaultextension=".pdf",
+            initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_report.pdf",
+            filetypes=[("PDF", "*.pdf")])
+        if not path:
+            return
+        try:
+            project_name = (self._project.project_name if self._project else "")
+            project_name = project_name or os.path.splitext(
+                os.path.basename(self.drawio_path))[0]
+            export_mod.write_pdf_report(
+                path,
+                project_name=project_name,
+                devices=self.devices,
+                symbol_types=self.symbol_types,
+                wire_routes=self.wire_routes,
+                bom_report=self._build_bom_report(),
+                risers=(self._project.risers if self._project else []),
+                floor_label=(self._project.active_floor if self._project else None),
+                scale_factor=self.scale_factor,
+                format_length=self._format_length,
+                currency=self._bom_currency_var.get() or "$",
+            )
+            messagebox.showinfo("Exported", f"PDF written:\n{path}")
+        except Exception as e:
+            log_error("PDF export failed", e)
+            messagebox.showerror("Export failed", str(e))
+
+    # ============================================================ FOV rendering helper
+    def _draw_fov_cones(self) -> None:
+        """Render DORI cones for any cameras with `fov` configured.
+
+        Uses inches_per_pixel = 1/scale_factor to convert DORI radii (inches)
+        into image-pixel coords. Falls back to 0.5 if no scale set.
+        """
+        ipp = (1.0 / self.scale_factor) if self.scale_factor else 0.5
+        for d in self.devices:
+            f = d.get("fov")
+            if not f or not f.get("show", True):
+                continue
+            info = self.symbol_types.get(d["type"], {})
+            if not info.get("is_camera"):
+                continue
+            cone = fov_mod.compute_fov(f)
+            # Camera apex in image coords
+            apex_ix, apex_iy = self._drawio_to_img(
+                d["x"] + d["w"]/2, d["y"] + d["h"]/2)
+            # Draw rings outermost-to-innermost so inner rings overlay correctly
+            for ring in ("D", "O", "R", "I"):
+                if ring != "D" and not self._show_dori.get():
+                    # When DORI rings disabled, draw only Detection (the outer cone)
+                    continue
+                radius_in = cone.distances_in[ring]
+                if radius_in <= 0:
+                    continue
+                poly_img = fov_mod.cone_polygon(
+                    cone,
+                    center_x=apex_ix, center_y=apex_iy,
+                    radius_in=radius_in,
+                    inches_per_pixel=ipp,
+                    azimuth_deg=cone.azimuth_deg,
+                )
+                if len(poly_img) < 3:
+                    continue
+                pts_canvas: list[float] = []
+                for ix, iy in poly_img:
+                    cx, cy = self._img_to_canvas(ix, iy)
+                    pts_canvas.extend([cx, cy])
+                color = fov_mod.DORI_COLORS[ring]
+                self.canvas.create_polygon(
+                    pts_canvas, fill=color, outline=color, width=1,
+                    stipple="gray25",  # semi-transparent feel
+                    tags=("fov", f"fov_{d['id']}"),
+                )
 
 
 # ============================================================ Entry point

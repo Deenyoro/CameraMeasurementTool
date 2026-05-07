@@ -7,25 +7,29 @@ estimate total cable per device + project-wide BOM.
 Built for the **a commercial building** project (Sheet A111B,
 First Floor) but works on any draw.io plan.
 
-## What it does today
+## v1.0 features
 
-- Parses a `.drawio` XML floor plan (devices, legend, embedded background image)
-- Lets you drag devices, draw multi-point wire routes between them
-- Calibrates pixel-to-real-world scale from a known dimension
-- Saves a companion `.wiremap.json` file alongside the `.drawio`
+- Parses a `.drawio` XML floor plan (devices, legend, embedded background)
+- Drag devices, draw multi-point wire routes, calibrate real-world scale
 - Auto-regenerates the legend from your symbol-type set
-- Estimates total wire per device, with running total in the side panel
+- **Cable types + BOM** — per-symbol cable assignment (Cat6 / Cat5e / RG59 /
+  fiber / speaker / alarm — editable catalog), running cost with waste & tax,
+  CSV export
+- **Camera FOV / DORI overlays** — per-camera lens / sensor / resolution /
+  mount-height → IEC EN 62676-4 Detection/Observation/Recognition/Identification
+  zones drawn on the map. Quick presets for Lobby, Hallway, Parking…
+- **A\* auto-routing** — click two devices, system finds the optimal cable
+  path. Soft-walls model (cable can cross walls through conduit/ceiling),
+  diagonal-penalized so paths prefer orthogonal — matches real conduit runs.
+- **Multi-floor + anchor-point alignment** — multiple floor plans in one
+  project; pick 2 reference points per floor and the system computes the
+  alignment transform automatically. Risers between floors roll into the BOM.
+- **PDF + CSV export** — multi-page PDF report (cover, BOM, per-device, risers),
+  3-CSV bundle (BOM + devices + wires) for procurement & installer hand-off.
 
-## What it will do (v1.0 roadmap)
-
-See `PLAYBOOK.md` for the architecture and `CHANGELOG.md` for the path forward:
-
-- Cable-type assignment (Cat6 / Coax / Fiber) and BOM with per-foot cost
-- Camera FOV / DORI overlays (industry-standard coverage zones)
-- A* auto-routing between two devices (avoids walls, snaps orthogonal)
-- Multi-floor projects with cross-floor anchor-point alignment + risers
-- PDF / CSV export for installers and procurement
-- Universal undo/redo, dark theme, dirty-state tracking, tooltips everywhere
+Plus everything from v0.2: dark Sun Valley theme, segmented mode bar, 3-tab
+side panel with search, universal undo/redo, breadcrumb status bar, recent
+files, dirty-state tracking, tooltips everywhere, full keyboard shortcuts.
 
 ## Install
 
