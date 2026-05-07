@@ -1,0 +1,56 @@
+[project]
+name = "camera-wire-tool"
+version = "0.1.0"
+description = "Tkinter desktop tool for security-camera wire estimation on draw.io floor plans"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Dean Thomas" }]
+dependencies = [
+    "Pillow>=10.0",
+    "pymupdf>=1.24",
+    "sv-ttk>=2.6",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "reportlab>=4.0",
+]
+
+[project.scripts]
+camera-wire-tool = "camera_wire_tool:main"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "PL"]
+ignore = [
+    "PLR0913",  # too many arguments — Tk callbacks naturally have many
+    "PLR2004",  # magic numbers — we'll move them to Constants gradually
+    "E501",     # line too long — let formatter handle this
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+strict_optional = true
+# UI code is hard to type fully; only require strictness in non-UI modules
+[[tool.mypy.overrides]]
+module = ["cwt.coords", "cwt.drawio_io", "cwt.bom", "cwt.routing", "cwt.fov"]
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
