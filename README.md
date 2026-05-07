@@ -41,14 +41,15 @@ Python 3.10+ recommended.
 python camera_wire_tool.py
 ```
 
-The tool auto-finds the `.drawio` file in the current directory. If multiple
-exist, it shows a picker. If a companion `.wiremap.json` exists, it auto-loads
-wire routes and scale.
+The tool auto-finds the `.drawio` file in `data/` (then the repo root if
+nothing's there). If multiple files are present, it shows a picker. If a
+companion `.wiremap.json` exists alongside the `.drawio`, it auto-loads wire
+routes and scale.
 
-For the simpler PNG-only measurement tool:
+For the simpler PNG-only measurement tool (kept for quick one-off measurements):
 
 ```
-python measure_tool.py
+python old/measure_tool.py
 ```
 
 ## Controls (cheat sheet)
@@ -67,17 +68,26 @@ python measure_tool.py
 
 Full reference in `PLAYBOOK.md`.
 
-## Files
+## Repo layout
 
-| File | Purpose |
-|------|---------|
-| `camera_wire_tool.py` | Main app |
-| `measure_tool.py` | Standalone PNG measurement tool |
-| `PLAYBOOK.md` | Complete architecture + format docs |
-| `Floor1_Security_Measurements.drawio` | Sample floor plan |
-| `Floor1_Security_Measurements.wiremap.json` | Sample project state |
-| `schematic.png` | High-res raster of the source PDF |
-| `A111B-...Rev.6.pdf` | Original architect drawing |
+```
+CameraMeasurementTool/
+├── camera_wire_tool.py             # main app
+├── PLAYBOOK.md                     # complete architecture + format docs
+├── README.md / CHANGELOG.md / LICENSE
+├── pyproject.toml / requirements*.txt
+├── data/                           # active project data
+│   ├── Floor1_Security_Measurements.drawio
+│   ├── Floor1_Security_Measurements.wiremap.json
+│   ├── schematic.png
+│   └── source/                     # original assets (PDF, etc.)
+│       └── A111B-…Rev.6.pdf
+└── old/                            # superseded files kept for reference
+    └── measure_tool.py             # simpler PNG-only measurement tool
+```
+
+Future work (per `CHANGELOG.md` roadmap): a `cwt/` Python package for the
+modular refactor, plus `tests/` for the pytest suite.
 
 ## Development
 
