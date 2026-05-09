@@ -1433,13 +1433,16 @@ class CameraWireTool:
         # ~24 drawio-units offset = visibly distinct without sliding off-screen
         offset = 24.0
         new_devices: list[dict] = []
+        import copy as _copy
         for src in self.selected_devices:
             new_id = f"s{self._next_device_id}"
             self._next_device_id += 1
-            d_new = {**src, "id": new_id,
-                     "x": src["x"] + offset, "y": src["y"] + offset}
-            if "fov" in d_new and isinstance(d_new["fov"], dict):
-                d_new["fov"] = dict(d_new["fov"])
+            # Deepcopy whole src so nested lists (fov.resolution, etc.)
+            # aren't aliased between original and duplicate.
+            d_new = _copy.deepcopy(src)
+            d_new["id"] = new_id
+            d_new["x"] = src["x"] + offset
+            d_new["y"] = src["y"] + offset
             new_devices.append(d_new)
         self._execute(PasteDevicesCmd(self, new_devices))
         self.selected_devices = list(new_devices)
@@ -1490,18 +1493,17 @@ class CameraWireTool:
         delta_dy = anchor_dy - ref_dy
 
         new_devices: list[dict] = []
+        import copy as _copy
         for src in clip:
             new_id = f"s{self._next_device_id}"
             self._next_device_id += 1
-            d_new = {**src, "id": new_id,
-                     "x": src["x"] + delta_dx,
-                     "y": src["y"] + delta_dy}
-            # Deep-copy mutable nested dicts so edits don't bleed into
-            # the original. fov.resolution is a list — shallow dict()
-            # alone leaves it aliased.
-            if "fov" in d_new and isinstance(d_new["fov"], dict):
-                import copy as _copy
-                d_new["fov"] = _copy.deepcopy(d_new["fov"])
+            # Deepcopy the whole source so each pasted instance is
+            # independent — without this, pasting twice would share
+            # nested fov dicts/lists between the two new devices.
+            d_new = _copy.deepcopy(src)
+            d_new["id"] = new_id
+            d_new["x"] = src["x"] + delta_dx
+            d_new["y"] = src["y"] + delta_dy
             new_devices.append(d_new)
         self._execute(PasteDevicesCmd(self, new_devices))
         # Select the newly pasted devices so user can drag/move/delete them
