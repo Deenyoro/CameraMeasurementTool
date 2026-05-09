@@ -706,6 +706,64 @@ class DeleteSymbolCmd(Command):
             self.app.wire_routes.insert(min(i, len(self.app.wire_routes)), wr)
 
 
+class AddAnnotationCmd(Command):
+    def __init__(self, app: "CameraWireTool", ann: dict):
+        self.app = app
+        self.ann = ann
+
+    def do(self):
+        if self.ann not in self.app.annotations:
+            self.app.annotations.append(self.ann)
+
+    def undo(self):
+        try:
+            self.app.annotations.remove(self.ann)
+        except ValueError:
+            pass
+
+
+class DeleteAnnotationCmd(Command):
+    def __init__(self, app: "CameraWireTool", ann: dict, index: int):
+        self.app = app
+        self.ann = ann
+        self.index = index
+
+    def do(self):
+        try:
+            self.app.annotations.remove(self.ann)
+        except ValueError:
+            pass
+
+    def undo(self):
+        idx = min(self.index, len(self.app.annotations))
+        self.app.annotations.insert(idx, self.ann)
+
+
+class EditAnnotationCmd(Command):
+    """Replace an annotation's mutable fields (text/color/font_size).
+    Lives in-place — same dict identity, so existing references keep
+    working."""
+
+    EDITED_KEYS = ("text", "color", "font_size")
+
+    def __init__(self, app: "CameraWireTool", ann: dict,
+                 old_values: dict, new_values: dict):
+        self.app = app
+        self.ann = ann
+        self.old_values = old_values
+        self.new_values = new_values
+
+    def do(self):
+        for k in self.EDITED_KEYS:
+            if k in self.new_values:
+                self.ann[k] = self.new_values[k]
+
+    def undo(self):
+        for k in self.EDITED_KEYS:
+            if k in self.old_values:
+                self.ann[k] = self.old_values[k]
+
+
 class EditFovCmd(Command):
     """Apply new FOV settings to one or many cameras. Each entry is
     (device, old_fov_or_None, new_fov). `None` for old_fov means the
@@ -2297,6 +2355,9 @@ class CameraWireTool:
                 f"edit FOV ({len(c.entries)} cameras)"
                 if len(c.entries) > 1 else
                 f"edit FOV on {c.entries[0][0].get('id', '?')}"),
+            "AddAnnotationCmd":   lambda c: f"add annotation '{c.ann.get('text','')[:20]}'",
+            "DeleteAnnotationCmd":lambda c: f"delete annotation '{c.ann.get('text','')[:20]}'",
+            "EditAnnotationCmd":  lambda c: f"edit annotation",
             "CalibrateCmd":       lambda c: f"calibrate scale",
         }
         try:
@@ -2854,13 +2915,13 @@ class CameraWireTool:
         if code == "__annotation__" and self._placing_annotation:
             dx, dy = self._img_to_drawio(ix, iy)
             ann = {**self._placing_annotation, "x": dx, "y": dy}
-            self.annotations.append(ann)
+            self._execute(AddAnnotationCmd(self, ann))
             self._placing_annotation = None
             self._set_mode(Mode.MOVE)
-            self._mark_dirty()
-            self._redraw()
+            self._post_command_refresh()
             self._flash_status(
-                f"Placed annotation '{ann['text']}'. Right-click on it to edit/delete.",
+                f"Placed annotation '{ann['text']}'. Right-click to edit. "
+                f"Ctrl+Z to undo.",
                 ttl_ms=3500)
             return
         # Centre the icon on the click point (drawio coords). Without this
@@ -6083,11 +6144,15 @@ class CameraWireTool:
             if not t:
                 messagebox.showerror("Error", "Annotation text can't be empty.")
                 return
-            ann["text"] = t
-            ann["color"] = color_var.get()
-            ann["font_size"] = int(size_var.get())
-            self._mark_dirty()
-            self._redraw()
+            old = {"text": ann.get("text"),
+                   "color": ann.get("color"),
+                   "font_size": ann.get("font_size")}
+            new = {"text": t, "color": color_var.get(),
+                   "font_size": int(size_var.get())}
+            if old == new:
+                dlg.destroy(); return
+            self._execute(EditAnnotationCmd(self, ann, old, new))
+            self._post_command_refresh()
             dlg.destroy()
 
         btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
@@ -6098,12 +6163,12 @@ class CameraWireTool:
 
     def _delete_annotation(self, ann: dict) -> None:
         try:
-            self.annotations.remove(ann)
+            idx = self.annotations.index(ann)
         except ValueError:
             return
-        self._mark_dirty()
-        self._redraw()
-        self._flash_status("Annotation deleted.", ttl_ms=2000)
+        self._execute(DeleteAnnotationCmd(self, ann, idx))
+        self._post_command_refresh()
+        self._flash_status("Annotation deleted. Ctrl+Z to undo.", ttl_ms=2500)
 
     def _toggle_fullscreen(self) -> None:
         try:
