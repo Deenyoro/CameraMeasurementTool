@@ -1320,10 +1320,19 @@ class CameraWireTool:
         b("<Control-G>", lambda _e: self._open_quick_jump())
         b("<Control-p>", lambda _e: self._open_quick_jump())
         b("<Control-P>", lambda _e: self._open_quick_jump())
-        b("<Home>", lambda _e: (self._fit_image(), self._redraw()))
-        b("<plus>", lambda _e: self._zoom_button(1))
-        b("<equal>", lambda _e: self._zoom_button(1))
-        b("<minus>", lambda _e: self._zoom_button(-1))
+        # Wraps a global key callback so it skips while a text widget
+        # has focus — without this, Home / + / - / [ / ] all fire
+        # alongside the user's typing, which is jarring.
+        def _canvas_only(fn):
+            def _w(_e):
+                if self._is_text_focus(_e):
+                    return
+                fn()
+            return _w
+        b("<Home>", _canvas_only(lambda: (self._fit_image(), self._redraw())))
+        b("<plus>", _canvas_only(lambda: self._zoom_button(1)))
+        b("<equal>", _canvas_only(lambda: self._zoom_button(1)))
+        b("<minus>", _canvas_only(lambda: self._zoom_button(-1)))
         # Z key — zoom to selected device or wire
         b("<KeyPress-z>", self._kbd_zoom_to_selection)
         b("<KeyPress-Z>", self._kbd_zoom_to_selection)
@@ -1355,10 +1364,10 @@ class CameraWireTool:
         # Ctrl+D — duplicate selection in place at small offset
         b("<Control-d>", lambda _e: self._duplicate_selected_devices())
         b("<Control-D>", lambda _e: self._duplicate_selected_devices())
-        b("<bracketleft>", lambda _e: self._cycle_device(-1))
-        b("<bracketright>", lambda _e: self._cycle_device(1))
-        b("<braceleft>", lambda _e: self._cycle_wire(-1))   # Shift+[
-        b("<braceright>", lambda _e: self._cycle_wire(1))   # Shift+]
+        b("<bracketleft>", _canvas_only(lambda: self._cycle_device(-1)))
+        b("<bracketright>", _canvas_only(lambda: self._cycle_device(1)))
+        b("<braceleft>", _canvas_only(lambda: self._cycle_wire(-1)))   # Shift+[
+        b("<braceright>", _canvas_only(lambda: self._cycle_wire(1)))   # Shift+]
         # Single-key mode shortcuts (only when canvas-focused, never inside Entry)
         b("<KeyPress-m>", self._kbd_mode_move)
         b("<KeyPress-M>", self._kbd_mode_move)
