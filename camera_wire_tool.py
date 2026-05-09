@@ -6822,6 +6822,16 @@ class CameraWireTool:
                 menu.add_command(label="📏  Set Scale (calibrate)…",
                                  command=self._start_calibration)
                 menu.add_separator()
+            # "Place here" submenu — drop a device at the right-click point
+            # without making the user round-trip through the Symbols tab.
+            place_menu = self._build_place_here_submenu(menu, ix, iy)
+            if place_menu is not None:
+                menu.add_cascade(label="➕  Place device here…",
+                                  menu=place_menu)
+                menu.add_command(
+                    label="📝  Place annotation here…",
+                    command=lambda: self._place_annotation_at(ix, iy))
+                menu.add_separator()
             menu.add_command(label="Fit view",
                              command=lambda: (self._fit_image(), self._redraw()))
             menu.add_separator()
@@ -6836,6 +6846,108 @@ class CameraWireTool:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _build_place_here_submenu(self, parent_menu: tk.Menu,
+                                   ix: float, iy: float) -> tk.Menu | None:
+        """Submenu listing all symbol types, grouped (cameras / readers /
+        sensors / other). Click drops the device at (ix, iy) directly —
+        no second click needed."""
+        if not self.symbol_types:
+            return None
+        sub = tk.Menu(parent_menu, tearoff=0)
+        # Group by category for readability
+        groups = {"Cameras": [], "Access": [], "Sensors": [], "Other": []}
+        for code, info in sorted(self.symbol_types.items()):
+            if info.get("is_camera"):
+                groups["Cameras"].append((code, info))
+            elif info.get("is_run_point"):
+                groups["Other"].append((code, info))
+            elif info.get("color", "").upper() in ("#00E080", "#00FF00", "#80FF80"):
+                groups["Access"].append((code, info))
+            elif info.get("color", "").upper() in ("#FF80FF", "#FF00FF", "#FFA0FF"):
+                groups["Sensors"].append((code, info))
+            else:
+                groups["Other"].append((code, info))
+        any_added = False
+        for label, items in groups.items():
+            if not items:
+                continue
+            if any_added:
+                sub.add_separator()
+            sub.add_command(label=f"— {label} —", state=tk.DISABLED)
+            for code, info in items:
+                disp = f"{code}  {info.get('label', code)}"[:40]
+                sub.add_command(
+                    label=disp,
+                    command=lambda c=code, x=ix, y=iy:
+                        self._place_device_directly(c, x, y))
+            any_added = True
+        return sub if any_added else None
+
+    def _place_device_directly(self, code: str, ix: float, iy: float) -> None:
+        """Place a device of `code` at (ix, iy) without entering
+        PLACE_DEVICE mode — used by the right-click 'Place here' path."""
+        self._place_type = code
+        self._do_place_device(ix, iy, repeat=False)
+
+    def _place_annotation_at(self, ix: float, iy: float) -> None:
+        """Right-click 'Place annotation here' shortcut — opens the
+        annotation dialog and uses the right-click coords as the drop
+        point. Saves a click vs Tools → Add Annotation → click."""
+        # Reuse the dialog flow but auto-place once user confirms text.
+        # Simplest: stash the coord and open the existing dialog;
+        # on confirm, _do_place_device's annotation branch fires when
+        # the user clicks. We bypass that by directly committing here.
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Add Annotation Here")
+        dlg.geometry("420x180")
+        dlg.transient(self.root); dlg.grab_set()
+        ttk.Label(dlg, text="Annotation text:",
+                  font=("Segoe UI", 10, "bold"),
+                  ).pack(anchor=tk.W, padx=14, pady=(12, 4))
+        text_var = tk.StringVar(value="Server Room")
+        ent = ttk.Entry(dlg, textvariable=text_var, width=42)
+        ent.pack(padx=14, pady=4); ent.select_range(0, tk.END); ent.focus_set()
+
+        opts = ttk.Frame(dlg); opts.pack(fill=tk.X, padx=14, pady=4)
+        ttk.Label(opts, text="Size:").pack(side=tk.LEFT)
+        size_var = tk.IntVar(value=18)
+        ttk.Spinbox(opts, textvariable=size_var, from_=8, to=72, width=6,
+                    increment=2,
+                    ).pack(side=tk.LEFT, padx=4)
+        ttk.Label(opts, text="  Color:").pack(side=tk.LEFT)
+        color_var = tk.StringVar(value="#FFD060")
+        sw = tk.Label(opts, bg=color_var.get(), width=4, height=1,
+                      relief=tk.RAISED, cursor="hand2")
+        sw.pack(side=tk.LEFT, padx=4)
+        def pick(_e=None):
+            c = colorchooser.askcolor(initialcolor=color_var.get(),
+                                       title="Annotation color")
+            if c and c[1]:
+                color_var.set(c[1].upper()); sw.config(bg=c[1].upper())
+        sw.bind("<Button-1>", pick)
+
+        def commit():
+            t = text_var.get().strip()
+            if not t:
+                messagebox.showerror("Error", "Annotation text can't be empty.")
+                return
+            dx, dy = self._img_to_drawio(ix, iy)
+            ann = {"text": t, "color": color_var.get(),
+                   "font_size": int(size_var.get()), "x": dx, "y": dy}
+            self._execute(AddAnnotationCmd(self, ann))
+            self._post_command_refresh()
+            self._flash_status(
+                f"Placed annotation '{t}'. Ctrl+Z to undo.", ttl_ms=3000)
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
+        ttk.Button(btns, text="Place here", command=commit
+                    ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy
+                    ).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: commit())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
     # ============================================================ BOM tab
     def _build_bom_report(self) -> bom_mod.BomReport:
