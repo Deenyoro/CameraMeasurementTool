@@ -5858,10 +5858,22 @@ class CameraWireTool:
                 tg.set("height", "26")
                 tg.set("as", "geometry")
 
-            tree.write(self.drawio_path, xml_declaration=True, encoding="utf-8")
+            # Atomic write: stage to a sibling .tmp then os.replace().
+            # Without this a crash mid-write would corrupt the user's
+            # .drawio source — the companion .wiremap.json already
+            # behaves this way; this brings parity.
+            tmp_path = self.drawio_path + ".tmp"
+            tree.write(tmp_path, xml_declaration=True, encoding="utf-8")
+            os.replace(tmp_path, self.drawio_path)
             self._save_project()
         except Exception as e:
             log_error(f"Failed to write {self.drawio_path}", e)
+            # Best-effort cleanup of the staged tmp file
+            try:
+                if os.path.exists(self.drawio_path + ".tmp"):
+                    os.unlink(self.drawio_path + ".tmp")
+            except OSError:
+                pass
             messagebox.showerror("Save failed", f"Could not write file:\n{e}")
             return
 
