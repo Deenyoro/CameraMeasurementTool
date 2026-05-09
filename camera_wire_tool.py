@@ -6885,12 +6885,24 @@ class CameraWireTool:
                      f"{cur}{report.tax_amount:,.2f}")
             self._bom_pill_total.config(
                 text=f"GRAND TOTAL\n{cur}{report.grand_total:,.2f}")
-        # Unassigned-wires warning lives on the side-panel total label
-        # (still shown; the pill row is fixed-width and doesn't include it)
+        # Bottom warning band: scale-not-set + unassigned-wires warnings
+        # both surface here. Stale text is reset every refresh — without
+        # the reset a fixed problem leaves the warning lingering.
+        warns: list[str] = []
+        if self.scale_factor is None and self.wire_routes:
+            warns.append(
+                f"⚠ Scale not set — wire totals are 0. "
+                f"Press C or click 'Set Scale' to calibrate.")
         if report.unassigned_runs:
-            warn = (f"\n  ⚠ {report.unassigned_runs} unassigned wire(s) — "
-                    f"{self._format_length(report.unassigned_inches)}")
-            self._bom_totals_label.config(text=warn, foreground="#FF8C42")
+            warns.append(
+                f"⚠ {report.unassigned_runs} unassigned wire(s) — "
+                f"{self._format_length(report.unassigned_inches)}")
+        if warns:
+            self._bom_totals_label.config(
+                text="\n  " + "\n  ".join(warns),
+                foreground="#FF8C42")
+        else:
+            self._bom_totals_label.config(text="", foreground="#FF8C42")
 
     # ============================================================ BOM right-click
     def _on_bom_cable_rclick(self, event) -> None:
