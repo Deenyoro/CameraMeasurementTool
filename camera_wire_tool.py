@@ -1354,8 +1354,11 @@ class CameraWireTool:
         if not self.selected_devices:
             self._flash_status("Nothing selected to copy.", ttl_ms=2000)
             return
+        # Deep-copy so edits to the original after Ctrl+C don't leak
+        # into the clipboard snapshot at paste time.
+        import copy as _copy
         self._device_clipboard = [
-            {k: v for k, v in d.items() if k != "id"}
+            {k: _copy.deepcopy(v) for k, v in d.items() if k != "id"}
             for d in self.selected_devices
         ]
         self._flash_status(
@@ -1443,9 +1446,11 @@ class CameraWireTool:
                      "x": src["x"] + delta_dx,
                      "y": src["y"] + delta_dy}
             # Deep-copy mutable nested dicts so edits don't bleed into
-            # the original.
+            # the original. fov.resolution is a list — shallow dict()
+            # alone leaves it aliased.
             if "fov" in d_new and isinstance(d_new["fov"], dict):
-                d_new["fov"] = dict(d_new["fov"])
+                import copy as _copy
+                d_new["fov"] = _copy.deepcopy(d_new["fov"])
             new_devices.append(d_new)
         self._execute(PasteDevicesCmd(self, new_devices))
         # Select the newly pasted devices so user can drag/move/delete them
