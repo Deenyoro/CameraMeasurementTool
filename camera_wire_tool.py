@@ -4010,6 +4010,7 @@ class CameraWireTool:
                 )
                 if not clicked_in_multi:
                     self.selected_device = dev
+                    self._sync_dev_listbox_to_canvas()
                 else:
                     # Snapshot every selected device's starting position
                     self._multi_drag_starts = {
@@ -5927,6 +5928,20 @@ class CameraWireTool:
                         best_d = d; best = ann
                 return best
         return None
+
+    def _sync_dev_listbox_to_canvas(self) -> None:
+        """When a device is selected on the canvas (single-select), scroll
+        the Devices tab to its row and highlight it. Two-way coupling that
+        makes navigation feel cohesive."""
+        if not hasattr(self, "_dev_listbox_rows") or not self.selected_device:
+            return
+        target_id = self.selected_device.get("id")
+        for idx, row in enumerate(self._dev_listbox_rows):
+            if row is not None and row.get("id") == target_id:
+                self.dev_listbox.selection_clear(0, tk.END)
+                self.dev_listbox.selection_set(idx)
+                self.dev_listbox.see(idx)
+                break
 
     def _edit_annotation(self, ann: dict) -> None:
         """Tiny inline editor for an existing annotation."""
