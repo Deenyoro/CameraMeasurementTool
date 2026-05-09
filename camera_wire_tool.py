@@ -2961,9 +2961,16 @@ class CameraWireTool:
             return
         self._place_type = code
         self._set_mode(Mode.PLACE_DEVICE)
-        self.status_label.config(text=f"Click on map to place a '{code}' device")
+        self.status_label.config(
+            text=f"Click on map to place a '{code}' device.  "
+                 f"Hold Shift to keep placing more.  Esc cancels."
+        )
 
-    def _do_place_device(self, ix: float, iy: float) -> None:
+    def _do_place_device(self, ix: float, iy: float,
+                          repeat: bool = False) -> None:
+        """Place a device at (ix, iy). If `repeat` (Shift held), stay in
+        PLACE_DEVICE mode so the user can rapid-fire several copies of
+        the same symbol — common CAD pattern. Esc / right-click exits."""
         code = self._place_type
         if code is None:
             return
@@ -3010,15 +3017,24 @@ class CameraWireTool:
             except Exception:
                 pass
         self.selected_device = device   # so it shows red-outlined immediately
-        self._set_mode(Mode.MOVE)
+        if not repeat:
+            self._set_mode(Mode.MOVE)
         self._post_command_refresh()
         # Flash a 'placed!' marker around it for ~1.2s
         self._flash_placement(dx_click, dy_click, code, new_id)
         cam_hint = "  FOV cone auto-applied." if info.get("is_camera") else ""
-        self.status_label.config(
-            text=f"✓ Placed {code} ({new_id}).{cam_hint}  Ctrl+Z undoes; "
-                 f"right-click for options."
-        )
+        if repeat:
+            self.status_label.config(
+                text=f"✓ Placed {code} ({new_id}).{cam_hint}  "
+                     f"Shift-click again to place another, "
+                     f"or release Shift / press Esc to stop."
+            )
+        else:
+            self.status_label.config(
+                text=f"✓ Placed {code} ({new_id}).{cam_hint}  "
+                     f"Tip: hold Shift while clicking to place several "
+                     f"in a row.  Ctrl+Z undoes."
+            )
 
     def _flash_placement(self, dx: float, dy: float, code: str, new_id: str) -> None:
         """Briefly draw an animated ring around a freshly-placed device so
@@ -4128,7 +4144,8 @@ class CameraWireTool:
             return
 
         if self.mode == Mode.PLACE_DEVICE:
-            self._do_place_device(ix, iy)
+            shift_held = bool(event.state & 0x0001)
+            self._do_place_device(ix, iy, repeat=shift_held)
             return
 
         if self.mode == Mode.MOVE:
