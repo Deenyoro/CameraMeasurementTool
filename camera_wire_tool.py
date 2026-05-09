@@ -1609,9 +1609,16 @@ class CameraWireTool:
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
 
+        # Tk's keysym for "s" with caps-lock-on becomes "S", so <Control-S>
+        # was firing Save-As when the user pressed Ctrl+S with caps lock —
+        # bind both variants to Save and use Shift-explicit bindings for
+        # Save As.
         self.root.bind("<Control-s>", lambda _e: self._save_drawio())
-        self.root.bind("<Control-S>", lambda _e: self._file_save_as())
+        self.root.bind("<Control-S>", lambda _e: self._save_drawio())
+        self.root.bind("<Control-Shift-s>", lambda _e: self._file_save_as())
+        self.root.bind("<Control-Shift-S>", lambda _e: self._file_save_as())
         self.root.bind("<Control-o>", lambda _e: self._file_open())
+        self.root.bind("<Control-O>", lambda _e: self._file_open())
 
         # Edit
         edit_menu = tk.Menu(menubar, tearoff=0)
