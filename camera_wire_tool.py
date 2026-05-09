@@ -706,6 +706,31 @@ class DeleteSymbolCmd(Command):
             self.app.wire_routes.insert(min(i, len(self.app.wire_routes)), wr)
 
 
+class EditFovCmd(Command):
+    """Apply new FOV settings to one or many cameras. Each entry is
+    (device, old_fov_or_None, new_fov). `None` for old_fov means the
+    device had no fov dict before (undo deletes the key).
+
+    Bulk variant batches every per-camera mutation into a single undoable
+    step so 'Apply to all 28 cameras' is one Ctrl+Z, not 28."""
+
+    def __init__(self, app: "CameraWireTool",
+                 entries: list[tuple[dict, dict | None, dict]]):
+        self.app = app
+        self.entries = entries
+
+    def do(self):
+        for dev, _old, new in self.entries:
+            dev["fov"] = dict(new)
+
+    def undo(self):
+        for dev, old, _new in self.entries:
+            if old is None:
+                dev.pop("fov", None)
+            else:
+                dev["fov"] = dict(old)
+
+
 class ReassignWireCmd(Command):
     """Move a wire from one device_id to another (or to None). Without
     this, reassign was a silent direct mutation and Ctrl+Z couldn't roll
@@ -2268,6 +2293,10 @@ class CameraWireTool:
             "DeleteSymbolCmd":    lambda c: f"delete symbol {c.code}",
             "ReassignWireCmd":    lambda c: (
                 f"reassign wire {c.old_did or '—'} → {c.new_did or '—'}"),
+            "EditFovCmd":         lambda c: (
+                f"edit FOV ({len(c.entries)} cameras)"
+                if len(c.entries) > 1 else
+                f"edit FOV on {c.entries[0][0].get('id', '?')}"),
             "CalibrateCmd":       lambda c: f"calibrate scale",
         }
         try:
@@ -7381,10 +7410,11 @@ class CameraWireTool:
             return d
 
         def apply():
-            device["fov"] = _settings_dict(include_az=True)
+            old_fov = dict(device["fov"]) if device.get("fov") else None
+            new_fov = _settings_dict(include_az=True)
+            self._execute(EditFovCmd(self, [(device, old_fov, new_fov)]))
             self._show_fov.set(True)
-            self._mark_dirty()
-            self._redraw()
+            self._post_command_refresh()
             dlg.destroy()
 
         def apply_to_type():
@@ -7404,21 +7434,24 @@ class CameraWireTool:
                 "pushed. Each camera keeps its own azimuth and show-flag.)"):
                 return
             shared = _settings_dict(include_az=False)
+            entries: list[tuple[dict, dict | None, dict]] = []
             for d in same_type:
-                old = d.get("fov") or default_fov_for_type(d["type"])
-                # Preserve per-camera azimuth + show flag; overwrite the rest
-                merged = {**old, **shared}
-                merged["azimuth_deg"] = old.get("azimuth_deg", 0.0)
-                if "show" in old:
-                    merged["show"] = old["show"]
-                d["fov"] = merged
-            # Also save the active camera's azimuth (the one the user was editing)
-            device["fov"]["azimuth_deg"] = float(az_var.get())
+                old_raw = d.get("fov")
+                old_snapshot = dict(old_raw) if old_raw else None
+                base = old_raw or default_fov_for_type(d["type"])
+                merged = {**base, **shared}
+                merged["azimuth_deg"] = base.get("azimuth_deg", 0.0)
+                if "show" in base:
+                    merged["show"] = base["show"]
+                if d is device:
+                    merged["azimuth_deg"] = float(az_var.get())
+                entries.append((d, old_snapshot, merged))
+            self._execute(EditFovCmd(self, entries))
             self._show_fov.set(True)
-            self._mark_dirty()
-            self._redraw()
+            self._post_command_refresh()
             self._flash_status(
-                f"Applied FOV settings to all {len(same_type)} {device['type']} cameras.",
+                f"Applied FOV settings to all {len(same_type)} "
+                f"{device['type']} cameras. Ctrl+Z to undo.",
                 ttl_ms=3500)
             dlg.destroy()
 
