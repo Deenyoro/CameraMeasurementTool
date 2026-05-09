@@ -612,18 +612,35 @@ class AddDeviceCmd(Command):
 
 
 class DeleteDeviceCmd(Command):
+    """Delete a device AND all wire routes that reference it. Without
+    this, deleting a device leaves orphan wires that the BOM silently
+    counts under a fallback cable type — confusing and wrong."""
+
     def __init__(self, app: "CameraWireTool", device: dict, index: int):
         self.app = app
         self.device = device
         self.index = index
+        # captured at do() time so undo restores wires in their
+        # original positions
+        self._removed_wires: list[tuple[int, dict]] = []
 
     def do(self):
         if self.device in self.app.devices:
             self.app.devices.remove(self.device)
+        did = self.device.get("id")
+        # Sweep wires referencing this device. Capture (original_index, route)
+        # pairs in REVERSE so we can pop without shifting indexes.
+        self._removed_wires = []
+        for i in range(len(self.app.wire_routes) - 1, -1, -1):
+            if self.app.wire_routes[i].get("device_id") == did:
+                self._removed_wires.append((i, self.app.wire_routes.pop(i)))
 
     def undo(self):
         idx = min(self.index, len(self.app.devices))
         self.app.devices.insert(idx, self.device)
+        # Restore wires in original index order (smallest first)
+        for i, wr in sorted(self._removed_wires, key=lambda t: t[0]):
+            self.app.wire_routes.insert(min(i, len(self.app.wire_routes)), wr)
 
 
 class EditSymbolCmd(Command):
@@ -4787,7 +4804,18 @@ class CameraWireTool:
             label = (f"{n} devices" if n > 1
                      else f"{self.selected_devices[0]['id']} "
                           f"({self.selected_devices[0]['type']})")
-            if not messagebox.askyesno("Delete", f"Delete {label}?"):
+            # Count wires that will go with the devices so the prompt
+            # accurately reflects the cascade.
+            sel_ids = {d["id"] for d in self.selected_devices}
+            wires_to_drop = sum(
+                1 for w in self.wire_routes if w.get("device_id") in sel_ids
+            )
+            wire_clause = (f"\n\nThis will also remove {wires_to_drop} "
+                           f"associated wire run(s)."
+                           if wires_to_drop else "")
+            if not messagebox.askyesno(
+                "Delete", f"Delete {label}?{wire_clause}\n\nUndo with Ctrl+Z."
+            ):
                 return
             for dev in list(self.selected_devices):
                 try:
@@ -4797,6 +4825,11 @@ class CameraWireTool:
                 self._execute(DeleteDeviceCmd(self, dev, idx))
             self.selected_device = None  # clears multi too
             self._post_command_refresh()
+            self._flash_status(
+                (f"Deleted {label} + {wires_to_drop} wire(s). Ctrl+Z to undo."
+                 if wires_to_drop else
+                 f"Deleted {label}. Ctrl+Z to undo."),
+                ttl_ms=3000)
             return
 
     def _delete_selected_wires_multi(self, list_indices) -> None:
