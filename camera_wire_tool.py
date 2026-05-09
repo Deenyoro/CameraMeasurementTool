@@ -789,6 +789,27 @@ class EditFovCmd(Command):
                 dev["fov"] = dict(old)
 
 
+class ClearFovCmd(Command):
+    """Pop the 'fov' key off many cameras at once. Stores per-camera
+    snapshots so undo restores each one's exact configuration."""
+
+    def __init__(self, app: "CameraWireTool", devices_with_fov: list[dict]):
+        self.app = app
+        self.devices_with_fov = devices_with_fov
+        self._snapshots: list[tuple[dict, dict]] = []
+
+    def do(self):
+        self._snapshots = []
+        for d in self.devices_with_fov:
+            if "fov" in d:
+                self._snapshots.append((d, dict(d["fov"])))
+                d.pop("fov", None)
+
+    def undo(self):
+        for d, snap in self._snapshots:
+            d["fov"] = snap
+
+
 class RotateFovCmd(Command):
     """Rotate one camera's FOV azimuth. Coalesces consecutive rotations
     on the same camera (within 1.5s) into a single undoable step — same
@@ -2447,6 +2468,8 @@ class CameraWireTool:
                 f"edit FOV on {c.entries[0][0].get('id', '?')}"),
             "RotateFovCmd":       lambda c: (
                 f"rotate FOV {c.device.get('id','?')} → {c.new_az:.0f}°"),
+            "ClearFovCmd":        lambda c: (
+                f"clear FOV from {len(c.devices_with_fov)} camera(s)"),
             "AddAnnotationCmd":   lambda c: f"add annotation '{c.ann.get('text','')[:20]}'",
             "DeleteAnnotationCmd":lambda c: f"delete annotation '{c.ann.get('text','')[:20]}'",
             "EditAnnotationCmd":  lambda c: f"edit annotation",
@@ -3046,9 +3069,11 @@ class CameraWireTool:
         self._execute(AddDeviceCmd(self, device))
         # Auto-apply default FOV preset for new cameras so the cone is
         # visible immediately — addresses "I don't see how FOV works".
+        # record=False so this is bundled with the AddDeviceCmd (one undo
+        # press undoes the whole placement instead of two).
         if info.get("is_camera"):
             try:
-                self._apply_default_fov_to_one(device)
+                self._apply_default_fov_to_one(device, record=False)
                 self._show_fov.set(True)
             except Exception:
                 pass
@@ -7426,10 +7451,11 @@ class CameraWireTool:
     # ============================================================ FOV bulk actions
     def _apply_default_fov_all_cameras(self) -> None:
         """Set the per-type default FOV on every camera that doesn't
-        already have one. Existing per-camera FOVs are preserved."""
+        already have one. Existing per-camera FOVs are preserved.
+        Undoable as a single batch step."""
         camera_count = 0
-        applied = 0
         skipped = 0
+        entries: list[tuple[dict, dict | None, dict]] = []
         for d in self.devices:
             info = self.symbol_types.get(d["type"], {})
             if not info.get("is_camera"):
@@ -7438,24 +7464,24 @@ class CameraWireTool:
             if d.get("fov"):
                 skipped += 1
                 continue
-            d["fov"] = default_fov_for_type(d["type"])
-            applied += 1
-        if applied == 0 and skipped > 0:
+            entries.append((d, None, default_fov_for_type(d["type"])))
+        if not entries and skipped > 0:
             self._flash_status(
                 f"All {camera_count} cameras already have FOV configured.",
                 ttl_ms=3500)
-        elif applied == 0:
+            return
+        if not entries:
             self._flash_status(
                 "No cameras on this floor — place some cameras first.",
                 ttl_ms=3500)
-        else:
-            self._mark_dirty()
-            self._show_fov.set(True)   # auto-enable so the user sees them
-            self._redraw()
-            msg = f"Applied default FOV to {applied} camera(s)."
-            if skipped:
-                msg += f" Kept existing FOV on {skipped}."
-            self._flash_status(msg, ttl_ms=3500)
+            return
+        self._execute(EditFovCmd(self, entries))
+        self._show_fov.set(True)   # auto-enable so the user sees them
+        self._post_command_refresh()
+        msg = f"Applied default FOV to {len(entries)} camera(s)."
+        if skipped:
+            msg += f" Kept existing FOV on {skipped}."
+        self._flash_status(msg + "  Ctrl+Z to undo.", ttl_ms=3500)
 
     def _clear_fov_all_cameras(self) -> None:
         """Remove all per-camera FOV configurations (cones revert to
@@ -7468,35 +7494,48 @@ class CameraWireTool:
             "Clear FOV configs?",
             f"Remove FOV configuration from {n_have} camera(s)?\n\n"
             "(They'll revert to the type defaults — cones still show "
-            "when 'Show FOV Cones' is on.)"):
+            "when 'Show FOV Cones' is on.)\n\nUndo with Ctrl+Z."):
             return
-        for d in self.devices:
-            d.pop("fov", None)
-        self._mark_dirty()
-        self._redraw()
-        self._flash_status(f"Cleared FOV from {n_have} camera(s).")
+        targets = [d for d in self.devices if d.get("fov")]
+        self._execute(ClearFovCmd(self, targets))
+        self._post_command_refresh()
+        self._flash_status(
+            f"Cleared FOV from {n_have} camera(s). Ctrl+Z to undo.")
 
-    def _apply_default_fov_to_one(self, device: dict) -> None:
+    def _apply_default_fov_to_one(self, device: dict, *,
+                                    record: bool = True) -> None:
         """Apply the type-default FOV to a single camera, overwriting any
-        existing per-camera FOV (so this also acts as 'reset to default')."""
+        existing per-camera FOV (so this also acts as 'reset to default').
+
+        `record=False` (used by the auto-FOV-on-place flow) makes this a
+        direct mutation so the surrounding AddDeviceCmd handles undo
+        atomically — otherwise placing a camera would take 2 undos."""
         info = self.symbol_types.get(device["type"], {})
         if not info.get("is_camera"):
             return
-        device["fov"] = default_fov_for_type(device["type"])
-        self._show_fov.set(True)
-        self._mark_dirty()
-        self._redraw()
-        self._flash_status(
-            f"Applied default FOV to {device['id']} ({device['type']}). "
-            f"Right-click → Edit FOV to fine-tune.")
+        new_fov = default_fov_for_type(device["type"])
+        if record:
+            old = dict(device["fov"]) if device.get("fov") else None
+            self._execute(EditFovCmd(self, [(device, old, new_fov)]))
+            self._show_fov.set(True)
+            self._post_command_refresh()
+            self._flash_status(
+                f"Applied default FOV to {device['id']} ({device['type']}). "
+                f"Right-click → Edit FOV to fine-tune.  Ctrl+Z to undo.")
+        else:
+            device["fov"] = new_fov
+            self._show_fov.set(True)
+            self._mark_dirty()
+            self._redraw()
 
     def _toggle_camera_fov(self, device: dict) -> None:
-        fov = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
-        fov["show"] = not fov.get("show", True)
-        device["fov"] = fov
+        old = dict(device["fov"]) if device.get("fov") else None
+        base = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
+        new = dict(base)
+        new["show"] = not base.get("show", True)
+        self._execute(EditFovCmd(self, [(device, old, new)]))
         self._show_fov.set(True)
-        self._mark_dirty()
-        self._redraw()
+        self._post_command_refresh()
 
     def _open_fov_dialog(self, device: dict) -> None:
         existing = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
