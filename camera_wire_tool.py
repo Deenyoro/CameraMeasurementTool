@@ -433,6 +433,42 @@ class PasteDevicesCmd(Command):
         self.app.devices = [d for d in self.app.devices if d["id"] not in ids]
 
 
+def _follow_wires_with_device(app, device_id: str,
+                               old_x: float, old_y: float,
+                               new_x: float, new_y: float) -> None:
+    """Shift wire endpoints that were anchored at the device's center.
+
+    Without this, dragging a camera leaves its wire's first point hanging
+    in mid-air at the camera's old position. We fuzzy-match because users
+    may have manually nudged the endpoint — only follow if the endpoint
+    is within half-a-device-width of the device's old center."""
+    dev = next((d for d in app.devices if d["id"] == device_id), None)
+    if dev is None:
+        return
+    dx_scale = app.dx_scale; dy_scale = app.dy_scale
+    old_cx = (old_x + dev["w"] / 2) * dx_scale
+    old_cy = (old_y + dev["h"] / 2) * dy_scale
+    new_cx = (new_x + dev["w"] / 2) * dx_scale
+    new_cy = (new_y + dev["h"] / 2) * dy_scale
+    # Tolerance: half the device size (image pixels), with a floor.
+    tol = max(8.0, 0.6 * max(dev["w"] * dx_scale, dev["h"] * dy_scale))
+    for wr in app.wire_routes:
+        if wr.get("device_id") != device_id:
+            continue
+        pts = list(wr["points"])
+        changed = False
+        for end_idx in (0, len(pts) - 1):
+            ex, ey = pts[end_idx]
+            if math.hypot(ex - old_cx, ey - old_cy) <= tol:
+                pts[end_idx] = (new_cx, new_cy)
+                changed = True
+        if changed:
+            wr["points"] = pts
+            wr["length_px"] = app._calc_wire_length(pts)
+            sf = app.scale_factor
+            wr["length_in"] = (wr["length_px"] * sf) if sf else None
+
+
 class MoveDeviceCmd(Command):
     def __init__(self, app: "CameraWireTool", device: dict, old_x: float, old_y: float,
                  new_x: float, new_y: float):
@@ -448,11 +484,17 @@ class MoveDeviceCmd(Command):
         d = self._find()
         if d is not None:
             d["x"], d["y"] = self.new
+            _follow_wires_with_device(self.app, self.device_id,
+                                       self.old[0], self.old[1],
+                                       self.new[0], self.new[1])
 
     def undo(self):
         d = self._find()
         if d is not None:
             d["x"], d["y"] = self.old
+            _follow_wires_with_device(self.app, self.device_id,
+                                       self.new[0], self.new[1],
+                                       self.old[0], self.old[1])
 
 
 class MoveDevicesCmd(Command):
@@ -468,12 +510,21 @@ class MoveDevicesCmd(Command):
         for d in self.app.devices:
             if d["id"] in ids:
                 d["x"], d["y"] = ids[d["id"]]
+        # Sweep wires after positions are committed
+        for did, old_xy, new_xy in self.deltas:
+            _follow_wires_with_device(self.app, did,
+                                       old_xy[0], old_xy[1],
+                                       new_xy[0], new_xy[1])
 
     def undo(self):
         ids = {did: old_xy for did, old_xy, _new in self.deltas}
         for d in self.app.devices:
             if d["id"] in ids:
                 d["x"], d["y"] = ids[d["id"]]
+        for did, old_xy, new_xy in self.deltas:
+            _follow_wires_with_device(self.app, did,
+                                       new_xy[0], new_xy[1],
+                                       old_xy[0], old_xy[1])
 
     def label(self) -> str:
         return f"move {len(self.deltas)} devices"
@@ -4700,6 +4751,13 @@ class CameraWireTool:
                                 deltas.append((d["id"], (ox, oy),
                                                 (d["x"], d["y"])))
                     if deltas:
+                        # Catch up wire endpoints to the new device centers
+                        # before recording — the live drag mutated devices
+                        # but not their associated wires.
+                        for did, old_xy, new_xy in deltas:
+                            _follow_wires_with_device(
+                                self, did, old_xy[0], old_xy[1],
+                                new_xy[0], new_xy[1])
                         cmd = MoveDevicesCmd(self, deltas)
                         self.history.append(cmd)
                         if len(self.history) > C.HISTORY_LIMIT:
@@ -4713,6 +4771,12 @@ class CameraWireTool:
                     old_x, old_y = self._drag_start_pos
                     if (abs(old_x - self.dragging_device["x"]) > 0.01
                             or abs(old_y - self.dragging_device["y"]) > 0.01):
+                        # Catch up wire endpoints (live drag only moved the device)
+                        _follow_wires_with_device(
+                            self, self.dragging_device["id"],
+                            old_x, old_y,
+                            self.dragging_device["x"],
+                            self.dragging_device["y"])
                         cmd = MoveDeviceCmd(
                             self, self.dragging_device,
                             old_x, old_y,
