@@ -2796,14 +2796,23 @@ class CameraWireTool:
             ),
         }
         self._execute(AddDeviceCmd(self, device))
+        # Auto-apply default FOV preset for new cameras so the cone is
+        # visible immediately — addresses "I don't see how FOV works".
+        if info.get("is_camera"):
+            try:
+                self._apply_default_fov_to_one(device)
+                self._show_fov.set(True)
+            except Exception:
+                pass
         self.selected_device = device   # so it shows red-outlined immediately
         self._set_mode(Mode.MOVE)
         self._post_command_refresh()
         # Flash a 'placed!' marker around it for ~1.2s
         self._flash_placement(dx_click, dy_click, code, new_id)
+        cam_hint = "  FOV cone auto-applied." if info.get("is_camera") else ""
         self.status_label.config(
-            text=f"✓ Placed {code} ({new_id}). Press Ctrl+Z to undo, "
-                 f"or place another from the Symbols tab."
+            text=f"✓ Placed {code} ({new_id}).{cam_hint}  Ctrl+Z undoes; "
+                 f"right-click for options."
         )
 
     def _flash_placement(self, dx: float, dy: float, code: str, new_id: str) -> None:
