@@ -2514,6 +2514,14 @@ class CameraWireTool:
         self._update_undo_redo_state()
 
     def _undo(self) -> None:
+        # Don't hijack Ctrl+Z while the user is typing in a text widget —
+        # they expect it to undo their typing, not the project.
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
         if not self.history:
             self._flash_status("Nothing to undo.", ttl_ms=2000)
             return
@@ -2526,6 +2534,12 @@ class CameraWireTool:
         self._flash_status(f"Undid: {self._cmd_human_label(cmd)}", ttl_ms=3000)
 
     def _redo(self) -> None:
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
         if not self.future:
             self._flash_status("Nothing to redo.", ttl_ms=2000)
             return
