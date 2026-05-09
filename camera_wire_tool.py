@@ -5213,6 +5213,14 @@ class CameraWireTool:
         self._ctrl_dragging = False
 
     def _on_delete_key(self, _event=None) -> None:
+        # Don't pop a destructive confirmation while the user is just
+        # editing text in a search box / dialog field.
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text, ttk.Spinbox)):
+            return
         # Prefer wires if any wire-list rows are selected (supports multi)
         if self.wire_listbox.curselection():
             sels = list(self.wire_listbox.curselection())
