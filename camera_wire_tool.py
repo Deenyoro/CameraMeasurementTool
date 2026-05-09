@@ -1252,6 +1252,9 @@ class CameraWireTool:
         b("<Control-C>", lambda _e: self._copy_selected_devices())
         b("<Control-v>", lambda _e: self._paste_devices(event_=_e))
         b("<Control-V>", lambda _e: self._paste_devices(event_=_e))
+        # Ctrl+D — duplicate selection in place at small offset
+        b("<Control-d>", lambda _e: self._duplicate_selected_devices())
+        b("<Control-D>", lambda _e: self._duplicate_selected_devices())
         b("<bracketleft>", lambda _e: self._cycle_device(-1))
         b("<bracketright>", lambda _e: self._cycle_device(1))
         b("<braceleft>", lambda _e: self._cycle_wire(-1))   # Shift+[
@@ -1306,6 +1309,39 @@ class CameraWireTool:
             f"Copied {len(self._device_clipboard)} device(s) to clipboard.",
             ttl_ms=2500,
         )
+
+    def _duplicate_selected_devices(self) -> None:
+        """Ctrl+D — duplicate the current selection at a small fixed
+        offset (no clipboard, doesn't clobber Ctrl+C state). Wires are
+        not duplicated; only the device(s)."""
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
+        if not self.selected_devices:
+            self._flash_status("Nothing selected to duplicate.", ttl_ms=2000)
+            return
+        # ~24 drawio-units offset = visibly distinct without sliding off-screen
+        offset = 24.0
+        new_devices: list[dict] = []
+        for src in self.selected_devices:
+            new_id = f"s{self._next_device_id}"
+            self._next_device_id += 1
+            d_new = {**src, "id": new_id,
+                     "x": src["x"] + offset, "y": src["y"] + offset}
+            if "fov" in d_new and isinstance(d_new["fov"], dict):
+                d_new["fov"] = dict(d_new["fov"])
+            new_devices.append(d_new)
+        self._execute(PasteDevicesCmd(self, new_devices))
+        self.selected_devices = list(new_devices)
+        self._primary_selected = new_devices[-1]
+        self.selected_device = new_devices[0]
+        self._post_command_refresh()
+        self._flash_status(
+            f"Duplicated {len(new_devices)} device(s). Ctrl+Z to undo.",
+            ttl_ms=2500)
 
     def _paste_devices(self, event_=None) -> None:
         try:
@@ -6431,6 +6467,7 @@ class CameraWireTool:
                 ("Ctrl+click",   "Toggle a device in selection"),
                 ("Ctrl+C",       "Copy selected devices to clipboard"),
                 ("Ctrl+V",       "Paste devices at cursor position"),
+                ("Ctrl+D",       "Duplicate selected devices in place"),
                 ("Delete",       "Delete selected wire or device(s)"),
                 ("Escape",       "Cancel action / clear selection"),
             ]),
