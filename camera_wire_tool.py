@@ -706,6 +706,25 @@ class DeleteSymbolCmd(Command):
             self.app.wire_routes.insert(min(i, len(self.app.wire_routes)), wr)
 
 
+class ReassignWireCmd(Command):
+    """Move a wire from one device_id to another (or to None). Without
+    this, reassign was a silent direct mutation and Ctrl+Z couldn't roll
+    it back — surprising for any other operation."""
+
+    def __init__(self, app: "CameraWireTool", route: dict,
+                 old_did: str | None, new_did: str | None):
+        self.app = app
+        self.route = route
+        self.old_did = old_did
+        self.new_did = new_did
+
+    def do(self):
+        self.route["device_id"] = self.new_did
+
+    def undo(self):
+        self.route["device_id"] = self.old_did
+
+
 class CalibrateCmd(Command):
     def __init__(self, app: "CameraWireTool", old_scale: float | None, new_scale: float):
         self.app = app
@@ -2247,6 +2266,8 @@ class CameraWireTool:
             "DeleteDeviceCmd":    lambda c: f"delete device {c.device['id']}",
             "EditSymbolCmd":      lambda c: f"edit symbol {c.old_code} → {c.new_code}",
             "DeleteSymbolCmd":    lambda c: f"delete symbol {c.code}",
+            "ReassignWireCmd":    lambda c: (
+                f"reassign wire {c.old_did or '—'} → {c.new_did or '—'}"),
             "CalibrateCmd":       lambda c: f"calibrate scale",
         }
         try:
@@ -4353,13 +4374,12 @@ class CameraWireTool:
                             f"Reassociate the wire from "
                             f"{cur_did or '(unassigned)'} to "
                             f"{landed_dev['id']}?"):
-                            route["device_id"] = landed_dev["id"]
-                            self._refresh_wire_list()
-                            self._refresh_device_list()
-                            self._refresh_bom_tab()
-                            self._redraw()
+                            self._execute(ReassignWireCmd(
+                                self, route, cur_did, landed_dev["id"]))
+                            self._post_command_refresh()
                             self._flash_status(
-                                f"Wire reassigned to {landed_dev['id']}.")
+                                f"Wire reassigned to {landed_dev['id']}. "
+                                f"Ctrl+Z to undo.")
             self._dragging_waypoint = None
             self._refresh_mode_ui()  # restore cursor
             self._redraw()
@@ -5310,12 +5330,8 @@ class CameraWireTool:
             _, new_did = visible[sel[0]]
             if new_did == cur_did:
                 dlg.destroy(); return
-            route["device_id"] = new_did
-            self._mark_dirty()
-            self._refresh_wire_list()
-            self._refresh_device_list()
-            self._refresh_bom_tab()
-            self._redraw()
+            self._execute(ReassignWireCmd(self, route, cur_did, new_did))
+            self._post_command_refresh()
             dlg.destroy()
 
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=12, pady=10)
