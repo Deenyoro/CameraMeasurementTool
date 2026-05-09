@@ -2449,7 +2449,8 @@ class CameraWireTool:
         cmd = self.history.pop()
         cmd.undo()
         self.future.append(cmd)
-        self._mark_dirty()
+        # Reconcile after the pop — may take us back to saved state.
+        self._reconcile_dirty_after_undo_redo()
         self._post_command_refresh()
         self._flash_status(f"Undid: {self._cmd_human_label(cmd)}", ttl_ms=3000)
 
@@ -2460,7 +2461,8 @@ class CameraWireTool:
         cmd = self.future.pop()
         cmd.do()
         self.history.append(cmd)
-        self._mark_dirty()
+        # Reconcile in case redo lands us back at the saved state too.
+        self._reconcile_dirty_after_undo_redo()
         self._post_command_refresh()
         self._flash_status(f"Redid: {self._cmd_human_label(cmd)}", ttl_ms=3000)
 
@@ -2524,8 +2526,27 @@ class CameraWireTool:
         self._dirty = False
         import time as _t
         self._last_save_time = _t.time()
+        # Snapshot the top-of-history pointer so undo back to here can
+        # detect "I'm at the saved state" and clear the dirty flag.
+        self._saved_marker = (
+            self.history[-1] if self.history else None
+        )
         self._update_title()
         self._tick_save_indicator()
+
+    def _reconcile_dirty_after_undo_redo(self) -> None:
+        """Called after every undo / redo. If the new top-of-history
+        equals the marker captured at save time, the project is back at
+        the saved state — clear the dirty flag and update the title."""
+        marker = getattr(self, "_saved_marker", "__never_saved__")
+        if marker == "__never_saved__":
+            return  # never persisted in this session, dirty stays
+        top = self.history[-1] if self.history else None
+        if top is marker:
+            self._dirty = False
+        else:
+            self._dirty = True
+        self._update_title()
 
     def _update_title(self) -> None:
         name = os.path.basename(self.drawio_path)
