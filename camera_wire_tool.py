@@ -679,19 +679,31 @@ class EditSymbolCmd(Command):
 
 
 class DeleteSymbolCmd(Command):
+    """Delete a symbol type, every instance of it on the map, AND their
+    wires. Same orphan-wire problem as DeleteDeviceCmd; cascade with undo."""
+
     def __init__(self, app: "CameraWireTool", code: str, info: dict, removed_devices: list[dict]):
         self.app = app
         self.code = code
         self.info = dict(info)
         self.removed_devices = list(removed_devices)
+        self._removed_wires: list[tuple[int, dict]] = []
 
     def do(self):
         self.app.symbol_types.pop(self.code, None)
         self.app.devices = [d for d in self.app.devices if d["type"] != self.code]
+        # Sweep wires for every removed device's id
+        removed_ids = {d.get("id") for d in self.removed_devices}
+        self._removed_wires = []
+        for i in range(len(self.app.wire_routes) - 1, -1, -1):
+            if self.app.wire_routes[i].get("device_id") in removed_ids:
+                self._removed_wires.append((i, self.app.wire_routes.pop(i)))
 
     def undo(self):
         self.app.symbol_types[self.code] = self.info
         self.app.devices.extend(self.removed_devices)
+        for i, wr in sorted(self._removed_wires, key=lambda t: t[0]):
+            self.app.wire_routes.insert(min(i, len(self.app.wire_routes)), wr)
 
 
 class CalibrateCmd(Command):
@@ -2756,12 +2768,21 @@ class CameraWireTool:
             return
         info = self.symbol_types[code]
         removed = [d for d in self.devices if d["type"] == code]
-        if removed and not messagebox.askyesno(
-            "Delete Type",
-            f'Delete symbol type "{code}"?\n'
-            f'This will also remove all {len(removed)} instances from the map.',
-        ):
-            return
+        removed_ids = {d.get("id") for d in removed}
+        wires_to_drop = sum(
+            1 for w in self.wire_routes if w.get("device_id") in removed_ids
+        )
+        if removed:
+            wire_clause = (f"\nAll {wires_to_drop} associated wire run(s) "
+                           f"will also be removed."
+                           if wires_to_drop else "")
+            if not messagebox.askyesno(
+                "Delete Type",
+                f'Delete symbol type "{code}"?\n'
+                f'This will remove all {len(removed)} instance(s) from the map.'
+                f'{wire_clause}\n\nUndo with Ctrl+Z.',
+            ):
+                return
         self._execute(DeleteSymbolCmd(self, code, info, removed))
         self._post_command_refresh()
 
