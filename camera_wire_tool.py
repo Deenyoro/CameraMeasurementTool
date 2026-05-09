@@ -6109,6 +6109,7 @@ class CameraWireTool:
                  "points": [list(p) for p in wr["points"]]}
                 for wr in self.wire_routes
             ],
+            "annotations": list(self.annotations),
         }
         tmp = self._autosave_path + ".tmp"
         try:
@@ -6172,6 +6173,10 @@ class CameraWireTool:
             self.cable_types = data["cable_types"]
         if data.get("devices"):
             self.devices = data["devices"]
+        # Annotations — restore as-is (they have no derived state)
+        if "annotations" in data and isinstance(data["annotations"], list):
+            self.annotations = [dict(a) for a in data["annotations"]
+                                if isinstance(a, dict)]
         # Wire routes: rebuild lengths
         self.wire_routes = []
         for wr in data.get("wire_routes", []):
@@ -6274,15 +6279,22 @@ class CameraWireTool:
         dlg.bind("<Return>", lambda _e: commit())
 
     def _draw_annotations(self) -> None:
-        """Draw all map annotations as canvas text at their drawio coords."""
+        """Draw all map annotations as canvas text at their drawio coords.
+        Skips malformed entries (missing coords or text) instead of
+        crashing — recovered/corrupted files may carry partial data."""
         for ann in self.annotations:
-            ix, iy = self._drawio_to_img(ann["x"], ann["y"])
+            text = ann.get("text", "")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            try:
+                ax = float(ann["x"]); ay = float(ann["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            ix, iy = self._drawio_to_img(ax, ay)
             cx, cy = self._img_to_canvas(ix, iy)
             # Scale font with zoom so annotations stay readable
             fs = max(8, int(ann.get("font_size", 16) * self.zoom * self.dx_scale))
-            color = ann.get("color", "#FFD060")
-            text = ann.get("text", "")
-            # Background rectangle for legibility
+            color = ann.get("color", "#FFD060") or "#FFD060"
             t_id = self.canvas.create_text(
                 cx, cy, text=text, fill=color,
                 font=("Segoe UI", fs, "bold"),
