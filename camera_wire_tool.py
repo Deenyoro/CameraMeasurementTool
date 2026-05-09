@@ -4144,13 +4144,16 @@ class CameraWireTool:
                     dev_obj = next((dd for dd in self.devices
                                     if dd["id"] == did), None)
                     if dev_obj is not None:
-                        # Make sure FOV is set on this camera so we can mutate
-                        if not dev_obj.get("fov"):
+                        # Track whether we had to auto-create FOV so undo
+                        # can pop the key cleanly back to "no FOV configured".
+                        fov_was_missing = not dev_obj.get("fov")
+                        if fov_was_missing:
                             dev_obj["fov"] = default_fov_for_type(dev_obj["type"])
                         self._rotating_fov = {
                             "device": dev_obj,
                             "apex_canvas": (ax, ay),
                             "old_az": dev_obj["fov"].get("azimuth_deg", 0),
+                            "fov_was_missing": fov_was_missing,
                         }
                         try:
                             self.canvas.config(cursor="exchange")
@@ -4462,15 +4465,25 @@ class CameraWireTool:
             dev = self._rotating_fov["device"]
             old_az = self._rotating_fov["old_az"]
             new_az = dev["fov"].get("azimuth_deg", 0)
-            if abs(old_az - new_az) > 0.1:
-                self._mark_dirty()
+            fov_was_missing = self._rotating_fov.get("fov_was_missing", False)
+            self._rotating_fov = None
+            if abs(old_az - new_az) > 0.1 or fov_was_missing:
+                # Push a single undoable command for the whole drag.
+                # The live mousemove already applied the new az; do() is
+                # a harmless no-op for the current state, undo restores.
+                import time as _time
+                cmd = RotateFovCmd(self, dev, old_az, new_az,
+                                    _time.monotonic())
+                cmd._fov_was_missing = fov_was_missing
+                self._execute(cmd)
+                self._post_command_refresh()
                 dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 compass = dirs[round(new_az / 45) % 8]
                 self._flash_status(
-                    f"Camera {dev['id']} → {int(new_az)}° ({compass})",
+                    f"Camera {dev['id']} → {int(new_az)}° ({compass})  "
+                    f"[Ctrl+Z to undo]",
                     ttl_ms=2000,
                 )
-            self._rotating_fov = None
             self._refresh_mode_ui()  # restore cursor
             self._redraw()
             return
