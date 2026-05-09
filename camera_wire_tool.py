@@ -789,6 +789,47 @@ class EditFovCmd(Command):
                 dev["fov"] = dict(old)
 
 
+class RotateFovCmd(Command):
+    """Rotate one camera's FOV azimuth. Coalesces consecutive rotations
+    on the same camera (within 1.5s) into a single undoable step — same
+    pattern most text editors use for keystroke coalescing."""
+
+    COALESCE_WINDOW_S = 1.5
+
+    def __init__(self, app: "CameraWireTool", device: dict,
+                 old_az: float, new_az: float, timestamp: float):
+        self.app = app
+        self.device = device
+        self.old_az = old_az
+        self.new_az = new_az
+        self.timestamp = timestamp
+        # Track if FOV had to be auto-created (so undo can pop the key)
+        self._fov_was_missing = "fov" not in device
+
+    def do(self):
+        if "fov" not in self.device:
+            self.device["fov"] = default_fov_for_type(self.device["type"])
+        self.device["fov"]["azimuth_deg"] = self.new_az
+
+    def undo(self):
+        if self._fov_was_missing:
+            self.device.pop("fov", None)
+        else:
+            self.device["fov"]["azimuth_deg"] = self.old_az
+
+    def can_coalesce_with(self, other: "RotateFovCmd") -> bool:
+        return (isinstance(other, RotateFovCmd)
+                and other.device is self.device
+                and abs(self.timestamp - other.timestamp)
+                    <= self.COALESCE_WINDOW_S)
+
+    def absorb(self, other: "RotateFovCmd") -> None:
+        """Merge a fresh rotation into this one — keep our old_az,
+        adopt their new_az."""
+        self.new_az = other.new_az
+        self.timestamp = other.timestamp
+
+
 class ReassignWireCmd(Command):
     """Move a wire from one device_id to another (or to None). Without
     this, reassign was a silent direct mutation and Ctrl+Z couldn't roll
@@ -2144,18 +2185,31 @@ class CameraWireTool:
         step = 45 if shift else 15
         if alt:
             step = -step
-        if not dev.get("fov"):
-            dev["fov"] = default_fov_for_type(dev["type"])
-        new_az = (dev["fov"].get("azimuth_deg", 0) + step) % 360
-        dev["fov"]["azimuth_deg"] = new_az
+        old_az = (dev.get("fov") or {}).get("azimuth_deg", 0)
+        new_az = (old_az + step) % 360
+        import time as _time
+        cmd = RotateFovCmd(self, dev, old_az, new_az, _time.monotonic())
+        # Coalesce with the previous rotation if it was on the same camera,
+        # very recently. Without this, a user pressing R 8 times burns 8
+        # undo slots and Ctrl+Z restores one tick at a time.
+        # Any new mutation invalidates the redo stack — same as _execute does.
+        self.future.clear()
+        if (self.history and isinstance(self.history[-1], RotateFovCmd)
+                and self.history[-1].can_coalesce_with(cmd)):
+            self.history[-1].absorb(cmd)
+            cmd.do()   # mutate state without re-pushing
+            self._mark_dirty()
+            self._update_undo_redo_state()
+        else:
+            self._execute(cmd)
         # Compass label so the user knows roughly where it's pointing
         dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
         compass = dirs[round(new_az / 45) % 8]
         self._show_fov.set(True)
-        self._mark_dirty()
-        self._redraw()
+        self._post_command_refresh()
         self._flash_status(
-            f"Camera {dev['id']} → azimuth {new_az}° ({compass})",
+            f"Camera {dev['id']} → azimuth {new_az}° ({compass})  "
+            f"[Ctrl+Z to undo]",
             ttl_ms=2000)
 
     def _kbd_help(self, event):
@@ -2355,6 +2409,8 @@ class CameraWireTool:
                 f"edit FOV ({len(c.entries)} cameras)"
                 if len(c.entries) > 1 else
                 f"edit FOV on {c.entries[0][0].get('id', '?')}"),
+            "RotateFovCmd":       lambda c: (
+                f"rotate FOV {c.device.get('id','?')} → {c.new_az:.0f}°"),
             "AddAnnotationCmd":   lambda c: f"add annotation '{c.ann.get('text','')[:20]}'",
             "DeleteAnnotationCmd":lambda c: f"delete annotation '{c.ann.get('text','')[:20]}'",
             "EditAnnotationCmd":  lambda c: f"edit annotation",
