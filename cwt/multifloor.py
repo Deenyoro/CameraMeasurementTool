@@ -131,6 +131,7 @@ class FloorState:
     alignment: dict = field(default_factory=lambda: dict(IDENTITY_ALIGNMENT))
     anchor_points: list[list[float]] = field(default_factory=list)
     wire_routes: list[dict] = field(default_factory=list)
+    annotations: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -193,6 +194,7 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
 def _load_v2(data: dict, project_path: str) -> ProjectState:
     floors: list[FloorState] = []
     wires_by_floor = data.get("wire_routes_by_floor", {})
+    annotations_by_floor = data.get("annotations_by_floor", {})
     for f in data.get("floors", []):
         fid = f["id"]
         floors.append(FloorState(
@@ -203,6 +205,7 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             alignment=dict(f.get("alignment", IDENTITY_ALIGNMENT)),
             anchor_points=[list(p) for p in f.get("anchor_points", [])],
             wire_routes=list(wires_by_floor.get(fid, [])),
+            annotations=list(annotations_by_floor.get(fid, [])),
         ))
     return ProjectState(
         version=2,
@@ -243,6 +246,9 @@ def save_project(project: ProjectState, project_path: str) -> None:
                 for wr in f.wire_routes
             ]
             for f in project.floors
+        },
+        "annotations_by_floor": {
+            f.id: list(f.annotations) for f in project.floors
         },
         "risers": project.risers,
         "scale_factor": project.scale_factor,

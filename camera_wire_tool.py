@@ -59,13 +59,6 @@ from cwt import lenses as lenses_mod
 from cwt import multifloor as mf_mod
 
 try:
-    from cwt import routing as routing_mod
-    _HAS_ROUTING = True
-except ImportError:        # numpy missing
-    _HAS_ROUTING = False
-    routing_mod = None  # type: ignore
-
-try:
     from cwt import export as export_mod
     _HAS_EXPORT = True
 except ImportError:
@@ -124,6 +117,42 @@ C = Constants()
 # Camera detection: shortcodes treated as cameras even with non-yellow fill
 CAMERA_CODES: frozenset[str] = frozenset({"MD", "360", "PTZ", "BC", "180", "HS", "MI"})
 
+# Per-camera-type default FOV presets. Realistic security-camera defaults
+# matching common installations. Used when a camera doesn't have its own
+# `fov` dict — both for rendering and for the Tools → "Apply default FOV"
+# bulk action.
+FOV_PRESETS_BY_TYPE: dict[str, dict] = {
+    # Fixed minidome — typical interior 4mm lens, 9ft mount, modest tilt
+    "MD":  {"lens_mm": 4.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 9.0,  "tilt_deg": 15, "azimuth_deg": 0},
+    # 360 fisheye — very wide lens; AOV lookup will give ~110-120° fwd cone
+    "360": {"lens_mm": 1.55, "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 9.0,  "tilt_deg": 0,  "azimuth_deg": 0},
+    # Bullet — usually telephoto, longer reach, tighter cone
+    "BC":  {"lens_mm": 6.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 12.0, "tilt_deg": 10, "azimuth_deg": 0},
+    # PTZ — moderate lens, mount high to look across area
+    "PTZ": {"lens_mm": 4.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 12.0, "tilt_deg": 10, "azimuth_deg": 0},
+    # 180° camera (panoramic) — ultra-wide
+    "180": {"lens_mm": 2.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 9.0,  "tilt_deg": 15, "azimuth_deg": 0},
+    # Height-strip — narrow door coverage, mount lower, more tilt
+    "HS":  {"lens_mm": 4.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 8.0,  "tilt_deg": 30, "azimuth_deg": 0},
+    # Multi-imager dome — moderate
+    "MI":  {"lens_mm": 4.0,  "sensor": '1/2.8"', "resolution": [3840, 2160],
+            "mount_height_ft": 9.0,  "tilt_deg": 15, "azimuth_deg": 0},
+}
+
+
+def default_fov_for_type(type_code: str) -> dict:
+    """Return a fresh copy of the default FOV preset for a camera type.
+    Falls back to MD defaults for unknown types. Always sets show=True
+    and enabled=True so the cone immediately renders when used."""
+    preset = FOV_PRESETS_BY_TYPE.get(type_code, FOV_PRESETS_BY_TYPE["MD"])
+    return {**preset, "show": True, "enabled": True}
+
 # Available shapes (for both drawing and saving)
 SHAPE_OPTIONS = ["ellipse", "rect", "roundrect", "hexagon", "halfrect", "step"]
 
@@ -141,6 +170,23 @@ SHAPE_STYLES = {
 HOME_DIR = Path.home()
 LOG_PATH = HOME_DIR / ".camera_wire_tool.log"
 RECENT_FILES_PATH = HOME_DIR / ".camera_wire_tool_recent.json"
+SETTINGS_PATH = HOME_DIR / ".camera_wire_tool_settings.json"
+
+
+# ============================================================ Color helper
+def _text_for_bg(hex_color: str) -> str:
+    """Return black or white text color depending on background luminance.
+    Used so color-swatch cells stay readable."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "#000000"
+    try:
+        r = int(h[0:2], 16); g = int(h[2:4], 16); b = int(h[4:6], 16)
+    except ValueError:
+        return "#000000"
+    # Standard luma — text is black if bg is bright, white if bg is dark
+    luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#000000" if luma > 0.55 else "#FFFFFF"
 
 
 # ============================================================ Logging
@@ -161,7 +207,6 @@ class Mode(Enum):
     WIRE = auto()
     CALIBRATE = auto()
     PLACE_DEVICE = auto()
-    AUTO_ROUTE = auto()        # click two devices, A* draws optimal path
 
 
 # ============================================================ Drawio helpers
@@ -370,6 +415,24 @@ class Command(ABC):
         return type(self).__name__
 
 
+class PasteDevicesCmd(Command):
+    """Insert several copied devices at once. Reversible; undo removes
+    each pasted device by reference."""
+
+    def __init__(self, app: "CameraWireTool", new_devices: list[dict]):
+        self.app = app
+        self.new_devices = list(new_devices)
+
+    def do(self):
+        for d in self.new_devices:
+            if d not in self.app.devices:
+                self.app.devices.append(d)
+
+    def undo(self):
+        ids = {d["id"] for d in self.new_devices}
+        self.app.devices = [d for d in self.app.devices if d["id"] not in ids]
+
+
 class MoveDeviceCmd(Command):
     def __init__(self, app: "CameraWireTool", device: dict, old_x: float, old_y: float,
                  new_x: float, new_y: float):
@@ -390,6 +453,30 @@ class MoveDeviceCmd(Command):
         d = self._find()
         if d is not None:
             d["x"], d["y"] = self.old
+
+
+class MoveDevicesCmd(Command):
+    """Batch-move multiple devices by the same delta. One undo step."""
+
+    def __init__(self, app: "CameraWireTool",
+                 deltas: list[tuple[str, tuple[float, float], tuple[float, float]]]):
+        self.app = app
+        self.deltas = deltas    # list of (device_id, old_xy, new_xy)
+
+    def do(self):
+        ids = {did: new_xy for did, _old, new_xy in self.deltas}
+        for d in self.app.devices:
+            if d["id"] in ids:
+                d["x"], d["y"] = ids[d["id"]]
+
+    def undo(self):
+        ids = {did: old_xy for did, old_xy, _new in self.deltas}
+        for d in self.app.devices:
+            if d["id"] in ids:
+                d["x"], d["y"] = ids[d["id"]]
+
+    def label(self) -> str:
+        return f"move {len(self.deltas)} devices"
 
 
 class AddWireCmd(Command):
@@ -434,6 +521,78 @@ class ClearWiresCmd(Command):
     def undo(self):
         self.app.wire_routes.clear()
         self.app.wire_routes.extend(self.snapshot)
+
+
+class SimplifyWireCmd(Command):
+    """Remove collinear interior waypoints from a wire. Reversible."""
+
+    def __init__(self, app: "CameraWireTool", route: dict, new_pts: list):
+        self.app = app
+        self.route = route
+        self.old_pts = list(route["points"])
+        self.new_pts = list(new_pts)
+
+    def _set(self, pts: list) -> None:
+        self.route["points"] = list(pts)
+        self.route["length_px"] = self.app._calc_wire_length(pts)
+        sf = self.app.scale_factor
+        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+
+    def do(self):  self._set(self.new_pts)
+    def undo(self): self._set(self.old_pts)
+
+
+class MoveWaypointCmd(Command):
+    """Drag a single intermediate waypoint on an existing wire route.
+    Captures the wire by reference + point index + old/new coords so it
+    survives undo/redo."""
+
+    def __init__(self, app: "CameraWireTool", route: dict, point_idx: int,
+                 old_xy: tuple[float, float], new_xy: tuple[float, float]):
+        self.app = app
+        self.route = route
+        self.point_idx = point_idx
+        self.old_xy = old_xy
+        self.new_xy = new_xy
+
+    def _set(self, xy: tuple[float, float]) -> None:
+        if 0 <= self.point_idx < len(self.route["points"]):
+            pts = list(self.route["points"])
+            pts[self.point_idx] = xy
+            self.route["points"] = pts
+            # Recompute length now that geometry changed
+            self.route["length_px"] = self.app._calc_wire_length(pts)
+            sf = self.app.scale_factor
+            self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+
+    def do(self):  self._set(self.new_xy)
+    def undo(self): self._set(self.old_xy)
+
+
+class ClearDeviceWiresCmd(Command):
+    """Remove every wire associated with a single device."""
+
+    def __init__(self, app: "CameraWireTool", device_id: str):
+        self.app = app
+        self.device_id = device_id
+        # Snapshot at construction (do() may run multiple times on undo/redo,
+        # but the snapshot is what we'll keep adding/removing).
+        self.removed: list[tuple[int, dict]] = [
+            (i, w) for i, w in enumerate(app.wire_routes)
+            if w.get("device_id") == device_id
+        ]
+
+    def do(self):
+        for _, route in self.removed:
+            try:
+                self.app.wire_routes.remove(route)
+            except ValueError:
+                pass
+
+    def undo(self):
+        for idx, route in sorted(self.removed, key=lambda r: r[0]):
+            insert_idx = min(idx, len(self.app.wire_routes))
+            self.app.wire_routes.insert(insert_idx, route)
 
 
 class AddDeviceCmd(Command):
@@ -575,6 +734,25 @@ def push_recent_file(path: str) -> list[str]:
     return paths
 
 
+# ============================================================ User preferences
+def load_settings() -> dict:
+    """Persisted UI preferences — unit, currency, BOM-modifiers, etc."""
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        SETTINGS_PATH.write_text(json.dumps(settings, indent=2),
+                                  encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ============================================================ Main app
 class CameraWireTool:
     def __init__(self, root: tk.Tk, drawio_path: str):
@@ -615,7 +793,19 @@ class CameraWireTool:
         self.dragging_device: dict | None = None
         self._drag_start_pos: tuple[float, float] | None = None
         self.drag_offset = (0.0, 0.0)
-        self.selected_device: dict | None = None
+        self._multi_drag_starts: dict[str, tuple[float, float]] = {}
+        # Waypoint-edit state: when a wire is selected and the user drags
+        # an intermediate waypoint handle.
+        self._dragging_waypoint: tuple[dict, int, tuple[float, float]] | None = None
+        # Multi-selection: `selected_device` is a property that returns
+        # the primary (most recently clicked) device, while
+        # `selected_devices` is the full set highlighted on the map.
+        # Ctrl+click toggles membership in `selected_devices`.
+        self.selected_devices: list[dict] = []
+        self._primary_selected: dict | None = None
+        # Ctrl+click-vs-drag detector state
+        self._ctrl_press_pos: tuple[int, int] | None = None
+        self._ctrl_dragging = False
         self.zoom = 1.0
         self.offset_x = 0.0
         self.offset_y = 0.0
@@ -624,11 +814,16 @@ class CameraWireTool:
         self.unit_var = tk.StringVar(value="ft-in")
         self._tk_ref: ImageTk.PhotoImage | None = None
         self._redraw_pending = False
+        self._interactive = False           # use BILINEAR while True (fast)
+        self._settle_id: str | None = None  # after-id for crisp post-interaction redraw
         self._next_device_id = 100
         self._place_type: str | None = None
         self._show_device_ids = tk.BooleanVar(value=False)
         self._show_fov = tk.BooleanVar(value=False)
         self._show_dori = tk.BooleanVar(value=True)
+        self._show_only_selected_fov = tk.BooleanVar(value=False)
+        self._show_legend = tk.BooleanVar(value=True)
+        self._show_grid = tk.BooleanVar(value=False)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -640,14 +835,44 @@ class CameraWireTool:
         self._project: mf_mod.ProjectState | None = None
         self._floor_anchors_picking: list[tuple[float, float]] | None = None
 
-        # Routing context (built lazily on first auto-route)
-        self._routing_ctx = None
-        self._auto_route_first: dict | None = None
+        # BOM tab inputs — defaults overridden by persisted user prefs
+        prefs = load_settings()
+        self._bom_waste_var = tk.DoubleVar(
+            value=float(prefs.get("waste_factor", 1.10)))
+        self._bom_tax_var = tk.DoubleVar(
+            value=float(prefs.get("tax_rate", 0.0)))
+        self._bom_currency_var = tk.StringVar(
+            value=str(prefs.get("currency", "$")))
+        # If a previous session set a unit, prefer it over the per-project
+        # `_loaded_unit` only when the project file didn't carry one.
+        self._initial_pref_unit = prefs.get("unit")
+        self._user_settings = prefs
 
-        # BOM tab inputs
-        self._bom_waste_var = tk.DoubleVar(value=1.10)
-        self._bom_tax_var = tk.DoubleVar(value=0.0)
-        self._bom_currency_var = tk.StringVar(value="$")
+        # Auto-save (writes per-session recovery file every minute)
+        self._autosave_path = self.project_path + ".autosave.json"
+        self._autosave_id: str | None = None
+
+        # Wire-drawing snap state — current target the cursor would lock to
+        self._wire_snap: tuple[float, float, str] | None = None
+        self._shift_held = False
+        # Hover state: device or wire-route under the cursor (None when hovering empty space)
+        self._hover_device: dict | None = None
+        # Legend-drag state — set when the user clicks-and-drags the legend
+        # rectangle on the canvas to reposition it.
+        self._dragging_legend: dict | None = None    # {start_drawio, start_offset}
+        # FOV rotation drag state — set when user drags the FOV handle of a camera
+        self._rotating_fov: dict | None = None
+        # Cache of FOV handle positions per device, populated by _draw_fov_cones
+        # so _on_left_press can hit-test cheaply.
+        self._fov_handles: dict[str, tuple[float, float, float, float]] = {}
+        # Lasso (box) selection state — set during drag on empty canvas
+        # (start_canvas, current_canvas, modifier-flags from press)
+        self._lasso: dict | None = None
+        # Map annotations: free-floating text labels users place to mark
+        # zones (Server Room, Loading Dock, IDF, etc.)
+        # Each: {x: drawio-x, y: drawio-y, text, color, font_size}
+        self.annotations: list[dict] = []
+        self._placing_annotation: dict | None = None    # pending {text, color, font_size}
 
         # Mode
         self.mode = Mode.MOVE
@@ -712,6 +937,8 @@ class CameraWireTool:
 
         # Active floor's wire routes → self.wire_routes (recalc lengths now)
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
+        # Restore map annotations for the active floor
+        self.annotations = [dict(a) for a in (active.annotations or [])]
         for wr in active.wire_routes:
             pts = [tuple(p) for p in wr.get("points", [])]
             if len(pts) < 2:
@@ -746,6 +973,7 @@ class CameraWireTool:
 
         # Sync active floor's wire_routes from the live list
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
+        active.annotations = [dict(a) for a in self.annotations]
         active.wire_routes = []
         for wr in self.wire_routes:
             entry = {
@@ -767,14 +995,25 @@ class CameraWireTool:
         self.root.update_idletasks()
         if hasattr(self, "_loaded_unit"):
             self.unit_var.set(self._loaded_unit)
-        if self.scale_factor:
-            self.scale_label.config(
-                text=f"  Scale: 1px = {self.scale_factor:.4f}\"", foreground="#3ddc84",
-            )
+        elif self._initial_pref_unit:
+            # No project-saved unit, but user has a preference from previous session
+            self.unit_var.set(self._initial_pref_unit)
+        # also sync the unit combobox once UI is built
+        if hasattr(self, "_unit_label_var"):
+            for lab, v in self._unit_choices:
+                if v == self.unit_var.get():
+                    self._unit_label_var.set(lab); break
+        # ttk.Button doesn't accept `foreground` via config(); the changing
+        # text (⚠-prefixed → plain "Scale:") is enough to signal state.
+        self.scale_label.config(text=self._scale_label_text())
         self._fit_image()
         self._refresh_wire_list()
         self._redraw()
         self._bind_events()
+        # Autosave: prompt to recover if a fresh autosave outranks the saved
+        # file, then start the periodic timer.
+        self._maybe_recover_autosave()
+        self._schedule_autosave()
 
     def _bind_events(self) -> None:
         self.canvas.bind("<ButtonPress-1>", self._on_left_press)
@@ -786,9 +1025,12 @@ class CameraWireTool:
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_move)
         self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
-        self.canvas.bind("<Control-ButtonPress-1>", self._on_pan_start)
-        self.canvas.bind("<Control-B1-Motion>", self._on_pan_move)
-        self.canvas.bind("<Control-ButtonRelease-1>", self._on_pan_end)
+        # Ctrl+left: click-or-drag detector. A short Ctrl+click toggles
+        # the device under the cursor in the multi-selection. A Ctrl+drag
+        # (more than ~5 pixels of movement) pans the canvas.
+        self.canvas.bind("<Control-ButtonPress-1>", self._on_ctrl_press)
+        self.canvas.bind("<Control-B1-Motion>", self._on_ctrl_motion)
+        self.canvas.bind("<Control-ButtonRelease-1>", self._on_ctrl_release)
 
         # Keyboard
         b = self.root.bind
@@ -802,12 +1044,46 @@ class CameraWireTool:
         b("<Control-Shift-Z>", lambda _e: self._redo())
         b("<Control-f>", lambda _e: self._focus_search())
         b("<Control-F>", lambda _e: self._focus_search())
+        b("<Control-g>", lambda _e: self._open_quick_jump())
+        b("<Control-G>", lambda _e: self._open_quick_jump())
+        b("<Control-p>", lambda _e: self._open_quick_jump())
+        b("<Control-P>", lambda _e: self._open_quick_jump())
         b("<Home>", lambda _e: (self._fit_image(), self._redraw()))
         b("<plus>", lambda _e: self._zoom_button(1))
         b("<equal>", lambda _e: self._zoom_button(1))
         b("<minus>", lambda _e: self._zoom_button(-1))
+        # Z key — zoom to selected device or wire
+        b("<KeyPress-z>", self._kbd_zoom_to_selection)
+        b("<KeyPress-Z>", self._kbd_zoom_to_selection)
+        # F1 / ? — keyboard shortcuts dialog (universal convention)
+        b("<F1>", lambda _e: self._show_shortcuts())
+        # F11 — toggle fullscreen
+        b("<F11>", lambda _e: self._toggle_fullscreen())
+        b("<KeyPress-question>", self._kbd_help)
+        b("<KeyPress-slash>", self._kbd_help)   # / on US keyboards before Shift
+        # R — rotate selected camera's FOV azimuth (Shift+R = 45° steps,
+        # Alt+R = counter-clockwise)
+        b("<KeyPress-r>", self._kbd_rotate_fov)
+        b("<KeyPress-R>", self._kbd_rotate_fov)
+        # Side-panel tab quick switching
+        b("<Control-Key-1>", lambda _e: self._notebook.select(0))
+        b("<Control-Key-2>", lambda _e: self._notebook.select(1))
+        b("<Control-Key-3>", lambda _e: self._notebook.select(2))
+        b("<Control-Key-4>", lambda _e: self._notebook.select(3))
+        b("<Control-Tab>", lambda _e: self._cycle_tab(1))
+        b("<Control-Shift-Tab>", lambda _e: self._cycle_tab(-1))
+        # Select-all devices on canvas
+        b("<Control-a>", lambda _e: self._select_all_devices())
+        b("<Control-A>", lambda _e: self._select_all_devices())
+        # Copy / paste selected devices
+        b("<Control-c>", lambda _e: self._copy_selected_devices())
+        b("<Control-C>", lambda _e: self._copy_selected_devices())
+        b("<Control-v>", lambda _e: self._paste_devices(event_=_e))
+        b("<Control-V>", lambda _e: self._paste_devices(event_=_e))
         b("<bracketleft>", lambda _e: self._cycle_device(-1))
         b("<bracketright>", lambda _e: self._cycle_device(1))
+        b("<braceleft>", lambda _e: self._cycle_wire(-1))   # Shift+[
+        b("<braceright>", lambda _e: self._cycle_wire(1))   # Shift+]
         # Single-key mode shortcuts (only when canvas-focused, never inside Entry)
         b("<KeyPress-m>", self._kbd_mode_move)
         b("<KeyPress-M>", self._kbd_mode_move)
@@ -815,13 +1091,165 @@ class CameraWireTool:
         b("<KeyPress-W>", self._kbd_mode_wire)
         b("<KeyPress-c>", self._kbd_mode_cal)
         b("<KeyPress-C>", self._kbd_mode_cal)
-        b("<KeyPress-a>", self._kbd_mode_autoroute)
-        b("<KeyPress-A>", self._kbd_mode_autoroute)
         b("<KeyPress-space>", self._kbd_space_press)
         b("<KeyRelease-space>", self._kbd_space_release)
-        self.canvas.bind("<Configure>", lambda _e: self._schedule_redraw())
+        # Configure (resize / sash drag) is throttled HARD: don't redraw on
+        # every event, just schedule a settle. Tk clips the existing canvas
+        # content automatically, so dragging feels instant.
+        self.canvas.bind("<Configure>", lambda _e: self._on_canvas_configure())
         # Right-click: finish/cancel wire, otherwise show context menu
         self.canvas.bind("<Button-3>", self._on_right_click_with_menu)
+        # Clear cursor coord readout when cursor leaves the canvas
+        self.canvas.bind("<Leave>", lambda _e: self.cursor_label.config(text=""))
+
+    # ============================================================ Tab cycling / select-all
+    def _cycle_tab(self, direction: int) -> None:
+        """Ctrl+Tab / Ctrl+Shift+Tab — cycle through the side-panel tabs."""
+        if not hasattr(self, "_notebook"):
+            return
+        try:
+            cur = self._notebook.index("current")
+            n = len(self._notebook.tabs())
+            self._notebook.select((cur + direction) % n)
+        except tk.TclError:
+            pass
+
+    # ============================================================ Copy / paste devices
+    def _copy_selected_devices(self) -> None:
+        # Don't intercept Ctrl+C in text widgets
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
+        if not self.selected_devices:
+            self._flash_status("Nothing selected to copy.", ttl_ms=2000)
+            return
+        self._device_clipboard = [
+            {k: v for k, v in d.items() if k != "id"}
+            for d in self.selected_devices
+        ]
+        self._flash_status(
+            f"Copied {len(self._device_clipboard)} device(s) to clipboard.",
+            ttl_ms=2500,
+        )
+
+    def _paste_devices(self, event_=None) -> None:
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
+        clip = getattr(self, "_device_clipboard", None)
+        if not clip:
+            self._flash_status(
+                "Nothing on clipboard. Ctrl+C copies selected devices.",
+                ttl_ms=2500,
+            )
+            return
+        # Anchor: cursor position when invoked via mouse-near keypress;
+        # otherwise center of viewport.
+        if event_ is not None and hasattr(event_, "x") and event_.x >= 0:
+            try:
+                anchor_ix, anchor_iy = self._canvas_to_img(event_.x, event_.y)
+            except Exception:
+                anchor_ix = anchor_iy = None
+        else:
+            anchor_ix = anchor_iy = None
+        if anchor_ix is None or anchor_iy is None:
+            cw = self.canvas.winfo_width() or 800
+            ch = self.canvas.winfo_height() or 600
+            anchor_ix, anchor_iy = self._canvas_to_img(cw / 2, ch / 2)
+
+        # Treat the FIRST clipboard entry's center as the offset reference;
+        # paste maintains relative geometry of multi-device groups.
+        first = clip[0]
+        first_cx = (first["x"] + first["w"]/2) * self.dx_scale
+        first_cy = (first["y"] + first["h"]/2) * self.dy_scale
+        anchor_dx, anchor_dy = self._img_to_drawio(anchor_ix, anchor_iy)
+        ref_dx = first["x"] + first["w"] / 2
+        ref_dy = first["y"] + first["h"] / 2
+        delta_dx = anchor_dx - ref_dx
+        delta_dy = anchor_dy - ref_dy
+
+        new_devices: list[dict] = []
+        for src in clip:
+            new_id = f"s{self._next_device_id}"
+            self._next_device_id += 1
+            d_new = {**src, "id": new_id,
+                     "x": src["x"] + delta_dx,
+                     "y": src["y"] + delta_dy}
+            # Deep-copy mutable nested dicts so edits don't bleed into
+            # the original.
+            if "fov" in d_new and isinstance(d_new["fov"], dict):
+                d_new["fov"] = dict(d_new["fov"])
+            new_devices.append(d_new)
+        self._execute(PasteDevicesCmd(self, new_devices))
+        # Select the newly pasted devices so user can drag/move/delete them
+        self.selected_devices = list(new_devices)
+        self._primary_selected = new_devices[-1]
+        self._post_command_refresh()
+        self._flash_status(
+            f"Pasted {len(new_devices)} device(s). "
+            "Drag to move; Ctrl+Z to undo.",
+            ttl_ms=3500,
+        )
+
+    def _select_all_devices(self) -> None:
+        """Ctrl+A — select every visible (filtered) device on the canvas."""
+        # Skip if a text-input widget has focus (then Ctrl+A means select-all-text)
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+            return
+        if not self.devices:
+            return
+        # Use _filtered_devices (matches whatever's currently in the listbox)
+        target = (self._filtered_devices
+                  if hasattr(self, "_filtered_devices") and self._filtered_devices
+                  else list(self.devices))
+        self.selected_devices = list(target)
+        self._primary_selected = target[-1]
+        self._flash_status(
+            f"Selected all {len(target)} device(s). Press Del to bulk-delete.",
+        )
+        self._redraw()
+
+    def _simplify_selected_wire(self) -> None:
+        """Drop interior waypoints whose direction equals the previous step's
+        direction (collinear). Result has the same shape but fewer points."""
+        route = self._selected_wire()
+        if route is None:
+            messagebox.showinfo("Select", "Select a wire to simplify.")
+            return
+        pts = route["points"]
+        if len(pts) <= 2:
+            self._flash_status("Wire already minimal — nothing to simplify.")
+            return
+        new_pts = [pts[0]]
+        for i in range(1, len(pts) - 1):
+            px, py = pts[i - 1]
+            cx, cy = pts[i]
+            nx, ny = pts[i + 1]
+            # Treat colinear as: cross product of (current - prev) and
+            # (next - current) is essentially zero.
+            cross = (cx - px) * (ny - cy) - (cy - py) * (nx - cx)
+            if abs(cross) > 1e-3:
+                new_pts.append(pts[i])
+        new_pts.append(pts[-1])
+        if len(new_pts) == len(pts):
+            self._flash_status("Wire is already minimal.")
+            return
+        cmd = SimplifyWireCmd(self, route, new_pts)
+        self._execute(cmd)
+        self._post_command_refresh()
+        self._flash_status(
+            f"Simplified wire — {len(pts)} → {len(new_pts)} points."
+        )
 
     def _focus_search(self) -> None:
         # Focus whichever search field belongs to the visible tab
@@ -887,6 +1315,17 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show DORI Rings (D/O/R/I)",
                                   variable=self._show_dori,
                                   command=self._redraw)
+        view_menu.add_checkbutton(
+            label="Show ONLY selected camera's FOV",
+            variable=self._show_only_selected_fov,
+            command=self._redraw)
+        view_menu.add_separator()
+        view_menu.add_checkbutton(label="Show Legend on Map",
+                                  variable=self._show_legend,
+                                  command=self._redraw)
+        view_menu.add_checkbutton(label="Show Alignment Grid",
+                                  variable=self._show_grid,
+                                  command=self._redraw)
 
         # Mode
         mode_menu = tk.Menu(menubar, tearoff=0)
@@ -897,9 +1336,6 @@ class CameraWireTool:
         mode_menu.add_radiobutton(label="Wire", variable=self.mode_var, value=Mode.WIRE.name,
                                   accelerator="W",
                                   command=lambda: self._set_mode(Mode.WIRE))
-        mode_menu.add_radiobutton(label="Auto-route (A*)", variable=self.mode_var,
-                                  value=Mode.AUTO_ROUTE.name, accelerator="A",
-                                  command=lambda: self._set_mode(Mode.AUTO_ROUTE))
         mode_menu.add_radiobutton(label="Calibrate", variable=self.mode_var,
                                   value=Mode.CALIBRATE.name, accelerator="C",
                                   command=self._start_calibration)
@@ -917,6 +1353,18 @@ class CameraWireTool:
                                command=self._open_cable_types_editor)
         tools_menu.add_command(label="Edit FOV for Selected Camera…",
                                command=self._open_fov_dialog_for_selected)
+        tools_menu.add_command(
+            label="Apply Default FOV to All Cameras",
+            command=self._apply_default_fov_all_cameras)
+        tools_menu.add_command(
+            label="Clear FOV from All Cameras",
+            command=self._clear_fov_all_cameras)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Add Map Annotation…",
+                               command=self._start_place_annotation)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Preferences…",
+                               command=self._open_preferences_dialog)
 
         # Export submenu inside File
         file_menu.add_separator()
@@ -927,6 +1375,9 @@ class CameraWireTool:
                                 command=self._export_csv_bundle)
         export_menu.add_command(label="Project PDF Report…",
                                 command=self._export_pdf)
+        export_menu.add_separator()
+        export_menu.add_command(label="Map Snapshot (PNG)…",
+                                command=self._export_map_png)
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -938,24 +1389,61 @@ class CameraWireTool:
         toolbar = ttk.Frame(self.root)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        def _ttkbtn(text, cmd, tip):
-            b = ttk.Button(toolbar, text=text, command=cmd, width=4)
+        # Text-labelled buttons render reliably on Windows where emoji glyphs
+        # in ttk.Button silently fall back to empty squares. Width=None lets
+        # each button size to its label.
+        def _ttkbtn(text, cmd, tip, width=None):
+            kwargs = {"text": text, "command": cmd}
+            if width is not None:
+                kwargs["width"] = width
+            b = ttk.Button(toolbar, **kwargs)
             b.pack(side=tk.LEFT, padx=2, pady=4)
             Tooltip(b, tip)
             return b
 
-        _ttkbtn("📁", self._file_open, "Open .drawio (Ctrl+O)")
-        _ttkbtn("💾", self._save_drawio, "Save (Ctrl+S)")
+        _ttkbtn("Open",  self._file_open,   "Open .drawio  (Ctrl+O)")
+        _ttkbtn("Save",  self._save_drawio, "Save  (Ctrl+S)")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
-        self._undo_btn = _ttkbtn("↶", self._undo, "Undo (Ctrl+Z)")
-        self._redo_btn = _ttkbtn("↷", self._redo, "Redo (Ctrl+Y)")
+        self._undo_btn = _ttkbtn("← Undo", self._undo, "Undo  (Ctrl+Z)")
+        self._redo_btn = _ttkbtn("Redo →", self._redo, "Redo  (Ctrl+Y)")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
-        _ttkbtn("📏", self._start_calibration, "Set scale by clicking a known dimension (C)")
-        _ttkbtn("🔍", lambda: (self._fit_image(), self._redraw()), "Fit to view (Home)")
-        _ttkbtn("➕", lambda: self._zoom_button(1), "Zoom in (+)")
-        _ttkbtn("➖", lambda: self._zoom_button(-1), "Zoom out (-)")
+        _ttkbtn("Set Scale",
+                self._start_calibration,
+                "Set real-world scale by clicking a known dimension  (C)")
+        _ttkbtn("Fit",
+                lambda: (self._fit_image(), self._redraw()),
+                "Fit floor plan to viewport  (Home)")
+        _ttkbtn("Zoom +", lambda: self._zoom_button(1),  "Zoom in  (+)",  width=8)
+        _ttkbtn("Zoom −", lambda: self._zoom_button(-1), "Zoom out (-)", width=8)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+
+        # Quick toggles
+        ids_btn = ttk.Checkbutton(
+            toolbar, text="IDs", variable=self._show_device_ids,
+            style="Toolbutton", command=self._redraw,
+        )
+        ids_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(ids_btn, "Show device-ID labels above each icon on the map")
+        grid_btn = ttk.Checkbutton(
+            toolbar, text="Grid", variable=self._show_grid,
+            style="Toolbutton", command=self._redraw,
+        )
+        grid_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(grid_btn, "Show alignment grid (5 ft / 1 m intervals)")
+        legend_btn = ttk.Checkbutton(
+            toolbar, text="Legend", variable=self._show_legend,
+            style="Toolbutton", command=self._redraw,
+        )
+        legend_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(legend_btn, "Show / hide the auto-generated legend on the map")
+        fov_btn = ttk.Checkbutton(
+            toolbar, text="FOV", variable=self._show_fov,
+            style="Toolbutton", command=self._redraw,
+        )
+        fov_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         # Mode segmented control
@@ -965,7 +1453,6 @@ class CameraWireTool:
         for m, label, tip in (
             (Mode.MOVE,       "Move",       "Move/select devices  (M)"),
             (Mode.WIRE,       "Wire",       "Draw wire routes  (W)"),
-            (Mode.AUTO_ROUTE, "Auto-route", "A* shortest path between two devices  (A)"),
             (Mode.CALIBRATE,  "Calibrate",  "Set real-world scale  (C)"),
         ):
             rb = ttk.Radiobutton(
@@ -979,20 +1466,83 @@ class CameraWireTool:
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
         ttk.Label(toolbar, text="Units:").pack(side=tk.LEFT, padx=(4, 0))
-        for txt, val in (("Ft-In", "ft-in"), ("In", "inches"), ("Ft", "feet-dec")):
-            ttk.Radiobutton(
-                toolbar, text=txt, variable=self.unit_var, value=val,
-                command=self._on_unit_change,
-            ).pack(side=tk.LEFT)
+        # Imperial + metric in a single dropdown — keeps the toolbar tidy.
+        self._unit_choices = [
+            ("Feet & Inches  (12'-6 1/2\")", "ft-in"),
+            ("Inches  (150.50\")",            "inches"),
+            ("Decimal feet  (12.54 ft)",     "feet-dec"),
+            ("Meters  (3.823 m)",            "meters"),
+            ("Centimeters  (382.3 cm)",      "cm"),
+            ("Meters & cm  (3 m 82.3 cm)",   "m-cm"),
+        ]
+        self._unit_label_var = tk.StringVar()
+        self._unit_combo = ttk.Combobox(
+            toolbar, textvariable=self._unit_label_var,
+            values=[label for label, _val in self._unit_choices],
+            state="readonly", width=22,
+        )
+        self._unit_combo.pack(side=tk.LEFT, padx=4)
+        Tooltip(self._unit_combo, "Switch length-display units (imperial or metric)")
 
-        self.scale_label = ttk.Label(toolbar, text="  Scale: not set", foreground="#ff6b6b")
-        self.scale_label.pack(side=tk.LEFT, padx=10)
+        # Initial selection from existing unit_var
+        def _sync_combo_from_unit():
+            for lab, v in self._unit_choices:
+                if v == self.unit_var.get():
+                    self._unit_label_var.set(lab); return
+            self._unit_label_var.set(self._unit_choices[0][0])
+        _sync_combo_from_unit()
 
-        self.total_toolbar_label = ttk.Label(toolbar, text="Total: --", font=("Segoe UI", 10, "bold"))
+        def _on_unit_combo(_e=None):
+            label = self._unit_label_var.get()
+            for lab, v in self._unit_choices:
+                if lab == label:
+                    self.unit_var.set(v); break
+            self._on_unit_change()
+        self._unit_combo.bind("<<ComboboxSelected>>", _on_unit_combo)
+
+        # Scale display: button-styled when unset (so it's obviously
+        # clickable), plain label after calibration. Click jumps straight
+        # into the calibration flow.
+        self.scale_label = ttk.Button(
+            toolbar,
+            text="⚠ Scale not set — click to calibrate",
+            command=self._start_calibration,
+        )
+        self.scale_label.pack(side=tk.LEFT, padx=10, pady=2)
+        Tooltip(self.scale_label,
+                "Without a scale, wire lengths show in pixels.\n"
+                "Click here, then click two points of a known dimension on the plan.")
+
+        # Zoom percentage indicator — quietly tucked next to scale, useful
+        # for orientation. Updates every redraw.
+        self.zoom_indicator = ttk.Label(
+            toolbar, text="Zoom: 100%",
+            font=("Consolas", 9), foreground="#888888",
+        )
+        self.zoom_indicator.pack(side=tk.LEFT, padx=8, pady=2)
+        Tooltip(self.zoom_indicator,
+                "Current viewport zoom.\n"
+                "Mouse wheel zooms toward cursor; Home fits to view; Z zooms to selection.")
+
+        # Always-visible project metrics on the right side of the toolbar.
+        # Updated whenever wires / devices / cable types change.
+        self.total_toolbar_label = ttk.Label(
+            toolbar, text="—",
+            font=("Segoe UI", 10, "bold"))
         self.total_toolbar_label.pack(side=tk.RIGHT, padx=10)
 
-        # Main split
-        main = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        # Main split. Using legacy tk.PanedWindow (NOT ttk) specifically so
+        # we can set opaqueresize=False — that turns sash drag into a fast
+        # phantom-line drag that commits on mouse-release. ttk.PanedWindow
+        # has no equivalent option and forces live resize, which on a
+        # canvas-with-86-devices + Treeview side panel is unbearably slow.
+        bg_paned = "#1e1e1e" if _HAS_SVTTK else "#cccccc"
+        main = tk.PanedWindow(
+            self.root, orient=tk.HORIZONTAL,
+            opaqueresize=False,
+            sashrelief=tk.RAISED, sashwidth=6, sashpad=1,
+            borderwidth=0, bg=bg_paned,
+        )
         main.pack(fill=tk.BOTH, expand=True)
 
         # Canvas
@@ -1001,11 +1551,33 @@ class CameraWireTool:
         self.canvas = tk.Canvas(canvas_frame, bg=canvas_bg, highlightthickness=0,
                                 cursor="hand2")
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        main.add(canvas_frame, weight=4)
+        # Mini-map: overview canvas pinned to the canvas's top-right.
+        # Sized comfortably for navigation without dominating the canvas.
+        self._minimap_w, self._minimap_h = 280, 180
+        self.minimap = tk.Canvas(
+            canvas_frame, width=self._minimap_w, height=self._minimap_h,
+            bg="#0e0e0e", highlightthickness=1, highlightbackground="#888888",
+            cursor="hand2",
+        )
+        # `place` instead of pack so it floats over the main canvas
+        self.minimap.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
+        self.minimap.bind("<ButtonPress-1>", self._minimap_click)
+        self.minimap.bind("<B1-Motion>", self._minimap_click)
+        self.minimap.bind("<Double-Button-1>",
+                           lambda _e: (self._fit_image(), self._redraw(),
+                                        self._flash_status("Fit to view.",
+                                                            ttl_ms=1500)))
+        Tooltip(self.minimap,
+                "Mini-map\n"
+                "  · click to pan there\n"
+                "  · double-click to fit view")
+        self._minimap_photo: ImageTk.PhotoImage | None = None
+        self._minimap_built = False
+        main.add(canvas_frame, stretch="always", minsize=300)
 
         # Side panel
-        side = ttk.Frame(main, width=340)
-        main.add(side, weight=1)
+        side = ttk.Frame(main, width=380)
+        main.add(side, stretch="never", minsize=240, width=380)
 
         notebook = ttk.Notebook(side)
         notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -1028,7 +1600,9 @@ class CameraWireTool:
 
         df = ttk.Frame(tab_dev)
         df.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        self.dev_listbox = tk.Listbox(df, font=("Consolas", 9), selectmode=tk.SINGLE,
+        # EXTENDED selectmode lets the user Ctrl/Shift-click rows to
+        # build a multi-selection — synced to the canvas via _on_dev_select.
+        self.dev_listbox = tk.Listbox(df, font=("Consolas", 9), selectmode=tk.EXTENDED,
                                        activestyle="dotbox")
         sb1 = ttk.Scrollbar(df, orient=tk.VERTICAL, command=self.dev_listbox.yview)
         self.dev_listbox.config(yscrollcommand=sb1.set)
@@ -1036,6 +1610,7 @@ class CameraWireTool:
         sb1.pack(side=tk.RIGHT, fill=tk.Y)
         self.dev_listbox.bind("<<ListboxSelect>>", self._on_dev_select)
         self.dev_listbox.bind("<Double-Button-1>", lambda _e: self._center_on_selected())
+        self.dev_listbox.bind("<Button-3>", self._on_dev_listbox_rclick)
 
         ttk.Button(tab_dev, text="Center on Selected (Enter)",
                    command=self._center_on_selected).pack(anchor=tk.W, padx=6, pady=4)
@@ -1045,6 +1620,19 @@ class CameraWireTool:
         notebook.add(tab_wire, text="Wires")
         ttk.Label(tab_wire, text="Wire Runs",
                   font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+
+        # Big hint banner so users know the easy way to add wires.
+        hint = ttk.Label(
+            tab_wire,
+            text=("Tip:  right-click any device on the map → "
+                  "\"Draw wire from here…\" → click route points → "
+                  "right-click to finish.\n"
+                  "Or press W with a device selected, then click points."),
+            justify=tk.LEFT, foreground="#7fc4ff",
+            font=("Segoe UI", 9, "italic"),
+            wraplength=440,
+        )
+        hint.pack(anchor=tk.W, padx=8, pady=(0, 6))
 
         self._wire_search_var = tk.StringVar()
         ws_frame = ttk.Frame(tab_wire)
@@ -1057,23 +1645,38 @@ class CameraWireTool:
 
         wf = ttk.Frame(tab_wire)
         wf.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        self.wire_listbox = tk.Listbox(wf, font=("Consolas", 9), selectmode=tk.SINGLE,
+        # EXTENDED so user can Ctrl-click multiple wires for bulk delete.
+        self.wire_listbox = tk.Listbox(wf, font=("Consolas", 9), selectmode=tk.EXTENDED,
                                         activestyle="dotbox")
         sb2 = ttk.Scrollbar(wf, orient=tk.VERTICAL, command=self.wire_listbox.yview)
         self.wire_listbox.config(yscrollcommand=sb2.set)
         self.wire_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb2.pack(side=tk.RIGHT, fill=tk.Y)
         self.wire_listbox.bind("<<ListboxSelect>>", self._on_wire_select)
+        self.wire_listbox.bind("<Button-3>", self._on_wire_listbox_rclick)
+        self.wire_listbox.bind("<Double-Button-1>", lambda _e: self._reassign_selected_wire())
 
         wbtns = ttk.Frame(tab_wire)
         wbtns.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Button(wbtns, text="Delete Wire", command=self._delete_selected_wire).pack(side=tk.LEFT)
-        ttk.Button(wbtns, text="Reassign…", command=self._reassign_selected_wire).pack(side=tk.LEFT, padx=4)
+        ttk.Button(wbtns, text="Delete",
+                   command=self._delete_selected_wire).pack(side=tk.LEFT)
+        ttk.Button(wbtns, text="Reassign…",
+                   command=self._reassign_selected_wire).pack(side=tk.LEFT, padx=4)
+        ttk.Button(wbtns, text="Re-route",
+                   command=self._reroute_selected_wire).pack(side=tk.LEFT, padx=4)
+        simp_btn = ttk.Button(wbtns, text="Simplify",
+                               command=self._simplify_selected_wire)
+        simp_btn.pack(side=tk.LEFT, padx=4)
+        Tooltip(simp_btn,
+                "Remove redundant collinear waypoints from this wire.\n"
+                "Same shape, fewer handles.")
 
         ttk.Separator(tab_wire, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=4)
+        # Big total — same prominence as the toolbar metric badge
         self.total_label = ttk.Label(tab_wire, text="Total Wire: --",
-                                     font=("Segoe UI", 12, "bold"))
-        self.total_label.pack(anchor=tk.W, padx=6, pady=4)
+                                     font=("Segoe UI", 14, "bold"),
+                                     foreground="#3ddc84")
+        self.total_label.pack(anchor=tk.W, padx=8, pady=(2, 8))
 
         # --- Tab 3: Symbols ---
         tab_sym = ttk.Frame(notebook)
@@ -1098,26 +1701,45 @@ class CameraWireTool:
         self.sym_listbox.config(yscrollcommand=sb3.set)
         self.sym_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb3.pack(side=tk.RIGHT, fill=tk.Y)
-        self.sym_listbox.bind("<Double-Button-1>", lambda _e: self._edit_symbol_type())
+        # Double-click on a symbol → place an instance immediately. Edit
+        # is still available via the Edit button, the right-click menu, or
+        # selecting + Enter.
+        self.sym_listbox.bind("<Double-Button-1>",
+                              lambda _e: self._place_symbol_from_listbox())
+        self.sym_listbox.bind("<Button-3>", self._on_sym_listbox_rclick)
+        self.sym_listbox.bind("<Return>", lambda _e: self._edit_symbol_type())
 
         sym_btns = ttk.Frame(tab_sym)
         sym_btns.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(sym_btns, text="Edit", command=self._edit_symbol_type).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sym_btns, text="Add", command=self._add_symbol_type).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sym_btns, text="Delete", command=self._delete_symbol_type).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sym_btns, text="Place on Map",
+                   command=self._place_symbol_from_listbox).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sym_btns, text="Edit",
+                   command=self._edit_symbol_type).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sym_btns, text="Add…",
+                   command=self._add_symbol_type).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sym_btns, text="Delete",
+                   command=self._delete_symbol_type).pack(side=tk.LEFT, padx=2)
+        rp_btn = ttk.Button(sym_btns, text="+ Run Point",
+                             command=self._add_run_point_type)
+        rp_btn.pack(side=tk.LEFT, padx=2)
+        Tooltip(rp_btn,
+                "Quick-create an IDF / NVR / switch (wire-run-point) symbol.\n"
+                "Run points get a yellow halo on the map.")
 
-        ttk.Separator(tab_sym, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(tab_sym, text="Place Device",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(2, 2))
-        place_frame = ttk.Frame(tab_sym)
-        place_frame.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(place_frame, text="Type:").pack(side=tk.LEFT)
+        # Help line
+        ttk.Label(tab_sym,
+                  text="Tip: double-click any symbol to drop it on the map. "
+                       "Right-click for more options.",
+                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  wraplength=440, justify=tk.LEFT,
+                  ).pack(anchor=tk.W, padx=8, pady=(4, 6))
+
+        # Internal: place_combo / place_type_var are still consumed by
+        # _start_place_device. We keep them in memory but no longer display
+        # the redundant "Place Device" section at the bottom.
         self.place_type_var = tk.StringVar()
-        self.place_combo = ttk.Combobox(place_frame, textvariable=self.place_type_var,
-                                        width=8, state="readonly")
-        self.place_combo.pack(side=tk.LEFT, padx=4)
-        ttk.Button(place_frame, text="Place on Map",
-                   command=self._start_place_device).pack(side=tk.LEFT, padx=4)
+        self.place_combo = ttk.Combobox(tab_sym, textvariable=self.place_type_var,
+                                         state="readonly")
 
         # --- Tab 4: BOM ---
         tab_bom = ttk.Frame(notebook)
@@ -1138,36 +1760,102 @@ class CameraWireTool:
         Tooltip(tax_entry, "Sales tax rate (decimal, e.g. 0.08 for 8%)")
         ttk.Label(adj, text="Currency:").pack(side=tk.LEFT)
         ttk.Entry(adj, textvariable=self._bom_currency_var, width=4).pack(side=tk.LEFT, padx=2)
-        ttk.Button(adj, text="Refresh", command=self._refresh_bom_tab).pack(side=tk.RIGHT)
+        # (No explicit refresh button — the BOM auto-refreshes on every state
+        # change via _post_command_refresh; the variables also trigger a
+        # refresh when their values change.)
 
-        # BOM table (Treeview)
+        # BOM table (Treeview) — cable totals
+        ttk.Label(tab_bom, text="By cable type",
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(4, 0))
         bom_frame = ttk.Frame(tab_bom)
         bom_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         cols = ("cable", "label", "runs", "ft", "rate", "subtotal")
         self._bom_tree = ttk.Treeview(bom_frame, columns=cols, show="headings",
-                                       height=10)
-        for c, w, h in (
-            ("cable", 60, "Cable"),
-            ("label", 130, "Description"),
-            ("runs", 50, "Runs"),
-            ("ft", 80, "Length (ft)"),
-            ("rate", 70, "$/ft"),
-            ("subtotal", 80, "Subtotal"),
+                                       height=4)
+        # Sortable headers — click to sort, click again to reverse.
+        # _bom_sort_state: (column-id, reverse-flag)
+        self._bom_sort_state: tuple[str, bool] = ("cable", False)
+        def _make_sort_cmd(col_id):
+            def cmd():
+                cur_col, cur_rev = self._bom_sort_state
+                self._bom_sort_state = (col_id, not cur_rev if cur_col == col_id else False)
+                self._refresh_bom_tab()
+            return cmd
+        for c, w, anchor, h in (
+            ("cable",    50,  tk.W, "Cable"),
+            ("label",    130, tk.W, "Description"),
+            ("runs",     50,  tk.E, "Runs"),
+            ("ft",       70,  tk.E, "Feet"),
+            ("rate",     55,  tk.E, "$/ft"),
+            ("subtotal", 80,  tk.E, "Subtotal"),
         ):
-            self._bom_tree.heading(c, text=h)
-            self._bom_tree.column(c, width=w, anchor=tk.W if c in ("cable", "label") else tk.E)
+            self._bom_tree.heading(c, text=h, command=_make_sort_cmd(c))
+            self._bom_tree.column(c, width=w, anchor=anchor, stretch=False)
         sb_bom = ttk.Scrollbar(bom_frame, orient=tk.VERTICAL,
                                 command=self._bom_tree.yview)
         self._bom_tree.config(yscrollcommand=sb_bom.set)
         self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb_bom.pack(side=tk.RIGHT, fill=tk.Y)
+        self._bom_tree.bind("<Button-3>", self._on_bom_cable_rclick)
 
-        # Totals
-        self._bom_totals_label = ttk.Label(
-            tab_bom, text="Subtotal: --\nGrand total: --",
-            font=("Consolas", 10),
+        # Devices-by-symbol Treeview — count + cable + wire totals per type
+        ttk.Label(tab_bom, text="By device type",
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(8, 0))
+        dev_frame = ttk.Frame(tab_bom)
+        dev_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        dev_cols = ("code", "label", "count", "cable", "runs", "wire")
+        self._bom_devices_tree = ttk.Treeview(
+            dev_frame, columns=dev_cols, show="headings", height=10,
         )
-        self._bom_totals_label.pack(anchor=tk.W, padx=8, pady=(4, 0))
+        for c, w, anchor, h in (
+            ("code",  45,  tk.W, "Code"),
+            ("label", 150, tk.W, "Label"),
+            ("count", 50,  tk.E, "Count"),
+            ("cable", 60,  tk.W, "Cable"),
+            ("runs",  45,  tk.E, "Runs"),
+            ("wire",  100, tk.E, "Wire"),
+        ):
+            self._bom_devices_tree.heading(c, text=h)
+            self._bom_devices_tree.column(c, width=w, anchor=anchor, stretch=False)
+        sb_dev = ttk.Scrollbar(dev_frame, orient=tk.VERTICAL,
+                                command=self._bom_devices_tree.yview)
+        self._bom_devices_tree.config(yscrollcommand=sb_dev.set)
+        self._bom_devices_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_dev.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Totals — laid out as 4 pills + 1 prominent grand-total
+        totals_frame = ttk.Frame(tab_bom)
+        totals_frame.pack(fill=tk.X, padx=8, pady=(6, 0))
+        # Use plain tk.Label so we can color the pills individually
+        self._bom_pill_subtotal = tk.Label(
+            totals_frame, text="Subtotal\n—", padx=10, pady=4,
+            bg="#23304a", fg="#e0e8ff", font=("Segoe UI", 9),
+            justify=tk.CENTER,
+        )
+        self._bom_pill_subtotal.pack(side=tk.LEFT, padx=(0, 4))
+        self._bom_pill_waste = tk.Label(
+            totals_frame, text="Waste\n—", padx=10, pady=4,
+            bg="#33231a", fg="#ffd0a0", font=("Segoe UI", 9),
+            justify=tk.CENTER,
+        )
+        self._bom_pill_waste.pack(side=tk.LEFT, padx=2)
+        self._bom_pill_tax = tk.Label(
+            totals_frame, text="Tax\n—", padx=10, pady=4,
+            bg="#1a3328", fg="#a0e0c0", font=("Segoe UI", 9),
+            justify=tk.CENTER,
+        )
+        self._bom_pill_tax.pack(side=tk.LEFT, padx=2)
+        self._bom_pill_total = tk.Label(
+            totals_frame, text="GRAND TOTAL\n—",
+            padx=12, pady=4,
+            bg="#202060", fg="#FFFFFF", font=("Segoe UI", 10, "bold"),
+            justify=tk.CENTER,
+        )
+        self._bom_pill_total.pack(side=tk.RIGHT, padx=(8, 0))
+        # Keep the legacy label name for callers that still reference it,
+        # but make it a no-op stub.
+        self._bom_totals_label = ttk.Label(tab_bom, text="")
+        # not packed — the pills above are the visible totals now
 
         bom_btns = ttk.Frame(tab_bom)
         bom_btns.pack(fill=tk.X, padx=6, pady=6)
@@ -1179,9 +1867,13 @@ class CameraWireTool:
             ttk.Button(bom_btns, text="Export PDF",
                        command=self._export_pdf).pack(side=tk.LEFT, padx=4)
 
-        # Refresh once on input change
+        # Refresh on every input change AND persist the new value so the
+        # next session opens with the same preferences.
+        def _bom_input_changed(*_):
+            self._refresh_bom_tab()
+            self._persist_user_settings()
         for var in (self._bom_waste_var, self._bom_tax_var, self._bom_currency_var):
-            var.trace_add("write", lambda *_: self._refresh_bom_tab())
+            var.trace_add("write", _bom_input_changed)
 
         # Bottom breadcrumb status bar
         self._statusbar = ttk.Frame(self.root)
@@ -1192,6 +1884,14 @@ class CameraWireTool:
         self.cursor_label = ttk.Label(self._statusbar, text="", anchor=tk.E,
                                        font=("Consolas", 9), foreground="#888888")
         self.cursor_label.pack(side=tk.RIGHT, padx=8, pady=2)
+        # "Saved Xm ago / Modified" indicator — updates every 15s
+        self.save_indicator = ttk.Label(
+            self._statusbar, text="", anchor=tk.E,
+            font=("Segoe UI", 9), foreground="#888888",
+        )
+        self.save_indicator.pack(side=tk.RIGHT, padx=8, pady=2)
+        self._last_save_time: float | None = None
+        self._tick_save_indicator()
 
         self._refresh_symbol_list()
         self._refresh_device_list()
@@ -1248,7 +1948,10 @@ class CameraWireTool:
     def _set_mode(self, new_mode: Mode) -> None:
         if self.mode == new_mode:
             return
-        self._cancel_current()
+        # Use the non-recursive cleanup helper. _cancel_current is for
+        # user-initiated Esc and would call _set_mode itself → infinite
+        # recursion when switching out of an action mode.
+        self._reset_action_state()
         self.mode = new_mode
         self.mode_var.set(new_mode.name)
         self._refresh_mode_ui()
@@ -1259,7 +1962,6 @@ class CameraWireTool:
             Mode.WIRE: "crosshair",
             Mode.CALIBRATE: "tcross",
             Mode.PLACE_DEVICE: "tcross",
-            Mode.AUTO_ROUTE: "plus",
         }.get(self.mode, "arrow")
         try:
             self.canvas.config(cursor=cursor)
@@ -1267,21 +1969,72 @@ class CameraWireTool:
             pass
         self.mode_var.set(self.mode.name)
         self._update_status()
+        # Banner is part of the canvas redraw — without this, entering an
+        # action mode via the toolbar/keyboard wouldn't paint the banner
+        # until the next unrelated redraw (motion, scroll, etc.).
+        self._redraw()
 
     def _kbd_mode_move(self, event):
         if self._is_text_focus(event):
             return
         self._set_mode(Mode.MOVE)
+        self._flash_status("Mode: Move (M)  —  click devices to select / drag")
 
     def _kbd_mode_wire(self, event):
         if self._is_text_focus(event):
             return
         self._set_mode(Mode.WIRE)
+        self._flash_status("Mode: Wire (W)  —  click points; right-click finishes")
 
     def _kbd_mode_cal(self, event):
         if self._is_text_focus(event):
             return
         self._start_calibration()
+
+    def _kbd_rotate_fov(self, event):
+        """R / Shift+R / Alt+R — rotate the selected camera's FOV.
+
+        Step is 15° normally, 45° with Shift, sign flips with Alt for
+        counter-clockwise. Auto-applies a default FOV first if the camera
+        doesn't have one yet.
+        """
+        if self._is_text_focus(event):
+            return
+        if self._primary_selected is None:
+            self._flash_status("Select a camera first, then press R to rotate FOV.")
+            return
+        dev = self._primary_selected
+        info = self.symbol_types.get(dev["type"], {})
+        if not info.get("is_camera"):
+            self._flash_status(f"{dev['id']} isn't a camera — nothing to rotate.")
+            return
+        shift = bool(event.state & 0x0001)
+        alt   = bool(event.state & 0x20000)   # Win Alt
+        step = 45 if shift else 15
+        if alt:
+            step = -step
+        if not dev.get("fov"):
+            dev["fov"] = default_fov_for_type(dev["type"])
+        new_az = (dev["fov"].get("azimuth_deg", 0) + step) % 360
+        dev["fov"]["azimuth_deg"] = new_az
+        # Compass label so the user knows roughly where it's pointing
+        dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        compass = dirs[round(new_az / 45) % 8]
+        self._show_fov.set(True)
+        self._mark_dirty()
+        self._redraw()
+        self._flash_status(
+            f"Camera {dev['id']} → azimuth {new_az}° ({compass})",
+            ttl_ms=2000)
+
+    def _kbd_help(self, event):
+        if self._is_text_focus(event):
+            return
+        # Only Shift+/ → '?' should fire on the unshifted '/' key.
+        # If the event keysym says it's slash without shift, ignore.
+        if event.keysym == "slash" and not (event.state & 0x0001):
+            return
+        self._show_shortcuts()
 
     def _kbd_space_press(self, event):
         if self._is_text_focus(event):
@@ -1300,6 +2053,124 @@ class CameraWireTool:
         w = event.widget if hasattr(event, "widget") else None
         return isinstance(w, (ttk.Entry, tk.Entry, tk.Text))
 
+    # ============================================================ Auto-pan during drag
+    def _maybe_autopan(self, event) -> None:
+        """If the mouse cursor is within `edge_px` of the canvas edge while
+        dragging, scroll the viewport that way so the user can drop a
+        waypoint anywhere without releasing the mouse."""
+        edge_px = 40
+        speed = 18
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        dx = dy = 0
+        if event.x < edge_px:
+            dx = speed
+        elif event.x > cw - edge_px:
+            dx = -speed
+        if event.y < edge_px:
+            dy = speed
+        elif event.y > ch - edge_px:
+            dy = -speed
+        if dx or dy:
+            self.offset_x += dx
+            self.offset_y += dy
+
+    # ============================================================ Wire-drawing snap
+    def _wire_snap_target_drag(self, ix: float, iy: float, route: dict, pidx: int):
+        """Variant of _wire_snap_target used while dragging an existing
+        waypoint: skips snapping to the route's own neighbouring points
+        (which would 'lock' the dragged point onto its current adjacents).
+        """
+        thresh = max(8.0, 14.0 / max(self.zoom, 0.01))
+        best = None; best_d = float("inf"); best_kind = None
+        # Device centers
+        for d in self.devices:
+            cx = (d["x"] + d["w"] / 2) * self.dx_scale
+            cy = (d["y"] + d["h"] / 2) * self.dy_scale
+            dd = math.hypot(ix - cx, iy - cy)
+            if dd < thresh and dd < best_d:
+                best = (cx, cy); best_d = dd; best_kind = "device"
+        # Other wires' endpoints (not this wire's own)
+        for r in self.wire_routes:
+            if r is route:
+                continue
+            for p in (r["points"][0], r["points"][-1]):
+                dd = math.hypot(ix - p[0], iy - p[1])
+                if dd < thresh and dd < best_d:
+                    best = p; best_d = dd; best_kind = "endpoint"
+        if best is not None:
+            return (best[0], best[1], best_kind)
+        # Shift-orthogonal from the previous point on this wire
+        if self._shift_held and pidx > 0:
+            lx, ly = route["points"][pidx - 1]
+            dx, dy = ix - lx, iy - ly
+            if dx == 0 and dy == 0:
+                return None
+            ang = math.atan2(dy, dx)
+            step = math.pi / 4
+            snap_ang = round(ang / step) * step
+            dist = math.hypot(dx, dy)
+            return (lx + dist * math.cos(snap_ang),
+                    ly + dist * math.sin(snap_ang),
+                    "ortho")
+        return None
+
+    def _wire_snap_target(self, ix: float, iy: float):
+        """Compute an optional snap target for the wire-drawing cursor.
+
+        Snap priority:
+          1. Device centers within `thresh` (highest)
+          2. Endpoints of existing wire routes
+          3. Waypoints of the wire currently being drawn (close the loop)
+          4. Holding Shift: lock direction from previous point to nearest
+             45° increment (orthogonal-friendly).
+
+        Returns (sx, sy, kind) — `kind` ∈ {device, endpoint, self, ortho},
+        or None if no snap.
+        """
+        thresh = max(8.0, 14.0 / max(self.zoom, 0.01))
+        best = None; best_d = float("inf"); best_kind = None
+
+        # 1) device centers (in image-pixel coords)
+        for d in self.devices:
+            cx = (d["x"] + d["w"] / 2) * self.dx_scale
+            cy = (d["y"] + d["h"] / 2) * self.dy_scale
+            dd = math.hypot(ix - cx, iy - cy)
+            if dd < thresh and dd < best_d:
+                best = (cx, cy); best_d = dd; best_kind = "device"
+
+        # 2) endpoints of existing wire routes
+        for r in self.wire_routes:
+            pts = r["points"]
+            for p in (pts[0], pts[-1]):
+                dd = math.hypot(ix - p[0], iy - p[1])
+                if dd < thresh and dd < best_d:
+                    best = p; best_d = dd; best_kind = "endpoint"
+
+        # 3) waypoints of the in-progress wire (snap to close the loop)
+        for p in self.current_wire_points:
+            dd = math.hypot(ix - p[0], iy - p[1])
+            if dd < thresh and dd < best_d:
+                best = p; best_d = dd; best_kind = "self"
+
+        if best is not None:
+            return (best[0], best[1], best_kind)
+
+        # 4) Shift-lock: orthogonal-or-45° from the last placed point
+        if self._shift_held and self.current_wire_points:
+            lx, ly = self.current_wire_points[-1]
+            dx, dy = ix - lx, iy - ly
+            if dx == 0 and dy == 0:
+                return None
+            ang = math.atan2(dy, dx)
+            step = math.pi / 4   # snap every 45°
+            snap_ang = round(ang / step) * step
+            dist = math.hypot(dx, dy)
+            return (lx + dist * math.cos(snap_ang),
+                    ly + dist * math.sin(snap_ang),
+                    "ortho")
+        return None
+
     # ============================================================ Undo / redo
     def _execute(self, cmd: Command) -> None:
         cmd.do()
@@ -1312,21 +2183,47 @@ class CameraWireTool:
 
     def _undo(self) -> None:
         if not self.history:
+            self._flash_status("Nothing to undo.", ttl_ms=2000)
             return
         cmd = self.history.pop()
         cmd.undo()
         self.future.append(cmd)
         self._mark_dirty()
         self._post_command_refresh()
+        self._flash_status(f"Undid: {self._cmd_human_label(cmd)}", ttl_ms=3000)
 
     def _redo(self) -> None:
         if not self.future:
+            self._flash_status("Nothing to redo.", ttl_ms=2000)
             return
         cmd = self.future.pop()
         cmd.do()
         self.history.append(cmd)
         self._mark_dirty()
         self._post_command_refresh()
+        self._flash_status(f"Redid: {self._cmd_human_label(cmd)}", ttl_ms=3000)
+
+    def _cmd_human_label(self, cmd: "Command") -> str:
+        """Friendly description of an undoable command for status messages."""
+        cls = type(cmd).__name__
+        labels = {
+            "MoveDeviceCmd":      lambda c: f"move device {c.device_id}",
+            "MoveDevicesCmd":     lambda c: f"move {len(c.deltas)} devices",
+            "AddWireCmd":         lambda c: f"add wire ({len(c.route['points'])} pts)",
+            "DeleteWireCmd":      lambda c: f"delete wire",
+            "ClearWiresCmd":      lambda c: f"clear all wires",
+            "ClearDeviceWiresCmd":lambda c: f"clear wires on {c.device_id}",
+            "MoveWaypointCmd":    lambda c: f"reshape wire (waypoint #{c.point_idx})",
+            "AddDeviceCmd":       lambda c: f"add device {c.device['id']}",
+            "DeleteDeviceCmd":    lambda c: f"delete device {c.device['id']}",
+            "EditSymbolCmd":      lambda c: f"edit symbol {c.old_code} → {c.new_code}",
+            "DeleteSymbolCmd":    lambda c: f"delete symbol {c.code}",
+            "CalibrateCmd":       lambda c: f"calibrate scale",
+        }
+        try:
+            return labels.get(cls, lambda _c: cls)(cmd)
+        except Exception:
+            return cls
 
     def _post_command_refresh(self) -> None:
         self._recalc_all_wires()
@@ -1351,7 +2248,10 @@ class CameraWireTool:
 
     def _mark_clean(self) -> None:
         self._dirty = False
+        import time as _t
+        self._last_save_time = _t.time()
         self._update_title()
+        self._tick_save_indicator()
 
     def _update_title(self) -> None:
         name = os.path.basename(self.drawio_path)
@@ -1383,16 +2283,49 @@ class CameraWireTool:
 
         self._sym_keys = sorted(self.symbol_types.keys())
         query = (self._sym_search_var.get() if hasattr(self, "_sym_search_var") else "").lower().strip()
+
+        # Group by category so the listbox is scannable: cameras, then
+        # other devices (access/intrusion/etc.), then run points.
+        groups: dict[str, list[tuple[str, dict]]] = {
+            "Cameras":   [],
+            "Devices":   [],
+            "Run points":[],
+        }
         for code in self._sym_keys:
             info = self.symbol_types[code]
             if query and query not in code.lower() and query not in info.get("label", "").lower():
                 continue
-            n = counts.get(code, 0)
-            cam_tag = " [cam]" if info["is_camera"] else ""
-            self.sym_listbox.insert(
-                tk.END,
-                f'  {code:5s} | {info["label"][:22]:22s} | {info["shape"]:9s} | x{n}{cam_tag}',
-            )
+            if info.get("is_run_point"):
+                groups["Run points"].append((code, info))
+            elif info.get("is_camera"):
+                groups["Cameras"].append((code, info))
+            else:
+                groups["Devices"].append((code, info))
+
+        for group_name in ("Cameras", "Devices", "Run points"):
+            entries = groups[group_name]
+            if not entries:
+                continue
+            header = f"── {group_name}  ({len(entries)}) ──"
+            self.sym_listbox.insert(tk.END, header)
+            self.sym_listbox.itemconfig(self.sym_listbox.size() - 1,
+                                         foreground="#7fc4ff",
+                                         selectbackground="#222244",
+                                         selectforeground="#7fc4ff")
+            for code, info in entries:
+                n = counts.get(code, 0)
+                if info.get("is_run_point"):
+                    tag = "[RP]"
+                elif info.get("is_camera"):
+                    tag = "[CAM]"
+                else:
+                    tag = "    "
+                cable = info.get("cable_type") or bom_mod.default_cable_for(info)
+                self.sym_listbox.insert(
+                    tk.END,
+                    f' {tag:5s} {code:5s} {info["label"][:28]:28s} {cable:8s} x{n}',
+                )
+
         # update place combobox
         self.place_combo["values"] = self._sym_keys
         if self._sym_keys and not self.place_type_var.get():
@@ -1400,7 +2333,19 @@ class CameraWireTool:
 
     def _refresh_device_list(self) -> None:
         self.dev_listbox.delete(0, tk.END)
-        self.devices.sort(key=lambda d: d["id"])
+        # Sort by type (alphabetically), then by id within each group.
+        # Cameras float to the top, then access/intrusion, then run points.
+        def _sort_key(d):
+            sym = self.symbol_types.get(d["type"], {})
+            cat = (0 if sym.get("is_camera")
+                   else 2 if sym.get("is_run_point")
+                   else 1)
+            # Numeric-aware id sort: s10 < s100 < s11 (string-sort) is bad,
+            # so convert "s\d+" to int.
+            m = re.match(r"s(\d+)", d["id"])
+            n = int(m.group(1)) if m else 0
+            return (cat, d["type"], n)
+        self.devices.sort(key=_sort_key)
 
         wire_by_device: dict[str, dict] = {}
         for wr in self.wire_routes:
@@ -1414,7 +2359,14 @@ class CameraWireTool:
             self._dev_search_var.get() if hasattr(self, "_dev_search_var") else ""
         ).lower().strip()
 
+        # _filtered_devices stays as a flat list of devices; the listbox
+        # rows are a mix of group headers and devices, so we also keep a
+        # parallel `_dev_listbox_rows` that maps row-index → device-or-None.
         self._filtered_devices: list[dict] = []
+        self._dev_listbox_rows: list[dict | None] = []
+
+        # Group by symbol type
+        by_type: dict[str, list[dict]] = {}
         for d in self.devices:
             info = self.symbol_types.get(d["type"], {})
             label = info.get("label", d["type"])
@@ -1424,47 +2376,183 @@ class CameraWireTool:
                 or query in label.lower()
             ):
                 continue
+            by_type.setdefault(d["type"], []).append(d)
             self._filtered_devices.append(d)
-            wire_info = wire_by_device.get(d["id"])
-            wire_str = (
-                f' [{wire_info["runs"]}w: {self._format_length(wire_info["total_in"])}]'
-                if wire_info else ""
-            )
-            self.dev_listbox.insert(tk.END, f'  {d["id"]:6s} {d["type"]:5s}{wire_str}')
+
+        for t_code in sorted(by_type.keys(),
+                              key=lambda c: (
+                                  0 if self.symbol_types.get(c, {}).get("is_camera")
+                                  else 2 if self.symbol_types.get(c, {}).get("is_run_point")
+                                  else 1, c)):
+            sym = self.symbol_types.get(t_code, {})
+            sym_label = sym.get("label", t_code)
+            cat = ("cameras"  if sym.get("is_camera")
+                   else "run points" if sym.get("is_run_point")
+                   else "devices")
+            count = len(by_type[t_code])
+            header = f"── {t_code}  {sym_label[:24]:24s}  ({count} {cat}) ──"
+            self.dev_listbox.insert(tk.END, header)
+            self._dev_listbox_rows.append(None)
+            self.dev_listbox.itemconfig(self.dev_listbox.size() - 1,
+                                         foreground="#7fc4ff",
+                                         selectbackground="#222244",
+                                         selectforeground="#7fc4ff")
+            for d in by_type[t_code]:
+                wire_info = wire_by_device.get(d["id"])
+                wire_str = (
+                    f'  [{wire_info["runs"]}w: '
+                    f'{self._format_length(wire_info["total_in"])}]'
+                    if wire_info else ""
+                )
+                self.dev_listbox.insert(
+                    tk.END, f'  {d["id"]:6s} {d["type"]:5s}{wire_str}',
+                )
+                self._dev_listbox_rows.append(d)
+
+        if not self._filtered_devices:
+            placeholder = ("(no devices yet — Symbols tab → pick a type → "
+                           "Place on Map)" if not self.devices
+                           else "(no matches for current search)")
+            self.dev_listbox.insert(tk.END, placeholder)
+            self._dev_listbox_rows.append(None)
+            self.dev_listbox.itemconfig(0, foreground="#888888")
 
     # ============================================================ Symbol editor dialog
     def _edit_symbol_type(self) -> None:
-        sel = self.sym_listbox.curselection()
-        if not sel:
+        # _selected_symbol_code parses the displayed row format safely
+        # (handles the [CAM]/[RP] tag + code + label + cable + count format).
+        code = self._selected_symbol_code()
+        if not code:
             messagebox.showinfo("Select", "Select a symbol type to edit")
             return
-        # Use the listbox's displayed order, which after filtering may not match _sym_keys.
-        text = self.sym_listbox.get(sel[0]).strip()
-        old_code = text.split("|")[0].strip()
-        if old_code not in self.symbol_types:
+        if code not in self.symbol_types:
             return
-        info = self.symbol_types[old_code]
-        self._open_type_editor(old_code, info, is_new=False)
+        info = self.symbol_types[code]
+        self._open_type_editor(code, info, is_new=False)
 
     def _add_symbol_type(self) -> None:
-        info = {"label": "New Device", "shape": "ellipse", "color": "#FFFF00", "is_camera": False}
-        self._open_type_editor("NEW", info, is_new=True)
+        # Suggest the next available short code: NEW, NEW2, NEW3...
+        suggested = "NEW"
+        n = 2
+        while suggested in self.symbol_types:
+            suggested = f"NEW{n}"
+            n += 1
+        info = {"label": "New Device", "shape": "ellipse",
+                "color": "#FFFF00", "is_camera": False}
+        self._open_type_editor(suggested, info, is_new=True)
+
+    def _selected_symbol_code(self) -> str | None:
+        """Resolve the symbol code from the current listbox selection.
+        Robust against filtering / sort order — reads the code straight
+        from the displayed row text."""
+        sel = self.sym_listbox.curselection()
+        if not sel:
+            return None
+        text = self.sym_listbox.get(sel[0]).strip()
+        # Format: "{tag} {code} {label} {cable} x{n}" — code is 2nd whitespace token
+        parts = text.split()
+        # First token is the tag (📷 / 🎯 / blank-spaces). Skip 0–1 leading emoji glyphs.
+        for tok in parts:
+            if tok in self.symbol_types:
+                return tok
+        return None
+
+    def _place_symbol_from_listbox(self) -> None:
+        """Double-click / context-menu entry: place an instance of the
+        currently-selected symbol type on the map."""
+        code = self._selected_symbol_code()
+        if not code:
+            return
+        self.place_type_var.set(code)
+        self._start_place_device()
+
+    def _on_sym_listbox_rclick(self, event) -> None:
+        """Right-click on a row in the Symbols list — context menu."""
+        idx = self.sym_listbox.nearest(event.y)
+        if idx < 0:
+            return
+        self.sym_listbox.selection_clear(0, tk.END)
+        self.sym_listbox.selection_set(idx)
+        code = self._selected_symbol_code()
+        if not code:
+            return
+        info = self.symbol_types[code]
+        n = sum(1 for d in self.devices if d["type"] == code)
+
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=f"{code} — {info['label']}  (x{n} placed)",
+                       state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(label="📍  Place on map…",
+                       command=self._place_symbol_from_listbox)
+        m.add_command(label="✏️  Edit symbol…",
+                       command=self._edit_symbol_type)
+        m.add_separator()
+        m.add_command(label="🗑  Delete symbol type…",
+                       command=self._delete_symbol_type)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _add_run_point_type(self) -> None:
+        """Pre-filled symbol-editor for a new wire-run point (IDF/NVR/switch)."""
+        # Suggest a sensible default shortcode that doesn't collide.
+        for cand in ("IDF", "NVR", "MDF", "SW", "RP"):
+            if cand not in self.symbol_types:
+                code = cand
+                break
+        else:
+            n = 1
+            while f"RP{n}" in self.symbol_types:
+                n += 1
+            code = f"RP{n}"
+        info = {
+            "label": {"IDF": "IDF / Network Closet",
+                      "NVR": "Network Video Recorder",
+                      "MDF": "Main Distribution Frame",
+                      "SW":  "Network Switch",
+                      "RP":  "Wire Run Point"}.get(code, "Run Point"),
+            "shape": "rect",
+            "color": "#FFD060",
+            "is_camera": False,
+            "is_run_point": True,
+            "cable_type": "Cat6",
+        }
+        self._open_type_editor(code, info, is_new=True)
 
     def _open_type_editor(self, old_code: str, info: dict, is_new: bool = False) -> None:
         dlg = tk.Toplevel(self.root)
         dlg.title("Edit Symbol Type" if not is_new else "Add Symbol Type")
-        dlg.geometry("440x360")
+        # Wider so the 120×120 preview canvas in column 2 fits cleanly next
+        # to the wide checkbox-text rows (columnspan=2). Resizable so the
+        # user can grow it if their display has bigger system fonts.
+        dlg.geometry("680x460")
+        dlg.minsize(600, 420)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.resizable(False, False)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        # Let column 1 (the input column) absorb extra width when resized
+        try:
+            dlg.grid_columnconfigure(1, weight=1, minsize=180)
+        except tk.TclError:
+            pass
 
         pad = {"padx": 10, "pady": 4}
         row = 0
 
         ttk.Label(dlg, text="Shortcode (shown inside icon):").grid(
             row=row, column=0, sticky=tk.W, **pad)
-        code_var = tk.StringVar(value=old_code if not is_new else "")
-        ttk.Entry(dlg, textvariable=code_var, width=10).grid(row=row, column=1, sticky=tk.W, **pad)
+        # For new symbols, pre-fill with the suggested unique code (NEW,
+        # NEW2, ...) so the user has a working default and can just hit
+        # Apply if they don't care.
+        code_var = tk.StringVar(value=old_code)
+        code_entry = ttk.Entry(dlg, textvariable=code_var, width=10)
+        code_entry.grid(row=row, column=1, sticky=tk.W, **pad)
+        if is_new:
+            # Select the placeholder so user can type to replace it
+            code_entry.select_range(0, tk.END)
+            code_entry.focus_set()
         row += 1
 
         ttk.Label(dlg, text="Label (legend description):").grid(
@@ -1483,12 +2571,13 @@ class CameraWireTool:
         color_frame = ttk.Frame(dlg)
         color_frame.grid(row=row, column=1, sticky=tk.W, **pad)
         color_var = tk.StringVar(value=info["color"])
-        color_swatch = tk.Label(color_frame, bg=info["color"], width=4, height=1, relief=tk.RAISED)
+        color_swatch = tk.Label(color_frame, bg=info["color"], width=4, height=1,
+                                 relief=tk.RAISED, cursor="hand2")
         color_swatch.pack(side=tk.LEFT, padx=(0, 6))
-        color_hex_label = ttk.Label(color_frame, text=info["color"])
+        color_hex_label = ttk.Label(color_frame, text=info["color"], cursor="hand2")
         color_hex_label.pack(side=tk.LEFT, padx=(0, 6))
 
-        def pick_color():
+        def pick_color(_event=None):
             try:
                 c = colorchooser.askcolor(initialcolor=color_var.get(), title="Pick color")
             except tk.TclError:
@@ -1500,6 +2589,8 @@ class CameraWireTool:
             color_swatch.config(bg=hexv)
             color_hex_label.config(text=hexv)
 
+        color_swatch.bind("<Button-1>", pick_color)
+        color_hex_label.bind("<Button-1>", pick_color)
         ttk.Button(color_frame, text="Pick…", command=pick_color).pack(side=tk.LEFT)
         row += 1
 
@@ -1508,21 +2599,71 @@ class CameraWireTool:
                         variable=cam_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, **pad)
         row += 1
 
+        runpoint_var = tk.BooleanVar(value=bool(info.get("is_run_point", False)))
+        rp_check = ttk.Checkbutton(
+            dlg, text="Wire-run point  (IDF / NVR / switch — wires terminate here)",
+            variable=runpoint_var,
+        )
+        rp_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, **pad)
+        Tooltip(rp_check, "Run points are aggregation targets for cable runs\n"
+                          "(IDF closets, NVRs, switches). Visually marked\n"
+                          "with a yellow halo + bullseye on the map.")
+        row += 1
+
+        # Cable type combobox
+        ttk.Label(dlg, text="Default cable:").grid(row=row, column=0, sticky=tk.W, **pad)
+        cable_choices = sorted(self.cable_types.keys())
+        cable_var = tk.StringVar(
+            value=info.get("cable_type") or bom_mod.default_cable_for(info)
+        )
+        cable_combo = ttk.Combobox(dlg, textvariable=cable_var, width=18,
+                                    values=cable_choices, state="readonly")
+        cable_combo.grid(row=row, column=1, sticky=tk.W, **pad)
+        Tooltip(cable_combo,
+                "Cable type used for wires drawn to devices of this symbol.\n"
+                "Edit the Cable Types catalog under Tools → Cable Types…")
+        row += 1
+
         if not is_new:
             count = sum(1 for d in self.devices if d["type"] == old_code)
             ttk.Label(dlg, text=f"Instances on map: {count}", foreground="gray").grid(
                 row=row, column=0, columnspan=2, sticky=tk.W, **pad)
             row += 1
 
-        # Preview canvas
-        preview_canvas = tk.Canvas(dlg, width=60, height=60, bg="white", relief=tk.SUNKEN)
-        preview_canvas.grid(row=0, column=2, rowspan=3, padx=10, pady=10)
+        # Preview canvas — bigger so the user can actually see what they're
+        # creating. Run-point halo also previewed so they can confirm the
+        # full visual treatment.
+        preview_size = 120
+        preview_canvas = tk.Canvas(
+            dlg, width=preview_size, height=preview_size,
+            bg="white", relief=tk.SUNKEN, highlightthickness=0,
+        )
+        preview_canvas.grid(row=0, column=2, rowspan=4, padx=12, pady=12)
 
         def update_preview(*_):
             preview_canvas.delete("all")
             s = shape_var.get()
             c = color_var.get()
-            cx, cy, r = 30, 30, 18
+            cx = cy = preview_size // 2
+            r = 36
+            # Run-point halo + bullseye — only when checkbox is on. Read
+            # via closure; runpoint_var is bound earlier in the dialog.
+            is_rp = False
+            try:
+                is_rp = bool(runpoint_var.get())
+            except Exception:
+                pass
+            if is_rp:
+                halo_r = r * 1.6
+                preview_canvas.create_oval(
+                    cx - halo_r, cy - halo_r, cx + halo_r, cy + halo_r,
+                    outline="#FFD060", dash=(4, 3), width=2,
+                )
+                inner = max(2, r * 0.25)
+                preview_canvas.create_oval(
+                    cx - inner, cy - inner, cx + inner, cy + inner,
+                    outline="#FFD060", width=1,
+                )
             if s == "ellipse":
                 preview_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill=c,
                                            outline="#0000FF", width=2)
@@ -1542,11 +2683,13 @@ class CameraWireTool:
                 pts = [cx-r, cy-r, cx+r*0.4, cy-r, cx+r, cy, cx+r*0.4, cy+r, cx-r, cy+r]
                 preview_canvas.create_polygon(pts, fill=c, outline="#0000FF", width=2)
             cv = code_var.get() or "?"
-            preview_canvas.create_text(cx, cy, text=cv, font=("Arial", 9, "bold"))
+            preview_canvas.create_text(cx, cy, text=cv,
+                                        font=("Arial", 14, "bold"))
 
         shape_var.trace_add("write", update_preview)
         color_var.trace_add("write", update_preview)
         code_var.trace_add("write", update_preview)
+        runpoint_var.trace_add("write", update_preview)
         update_preview()
 
         def apply():
@@ -1563,11 +2706,23 @@ class CameraWireTool:
                 "shape": shape_var.get(),
                 "color": color_var.get().upper(),
                 "is_camera": cam_var.get(),
+                "is_run_point": runpoint_var.get(),
+                "cable_type": cable_var.get(),
             }
             cmd = EditSymbolCmd(self, old_code, info, new_code, new_info, is_new)
             self._execute(cmd)
             self._post_command_refresh()
             dlg.destroy()
+            # NEW symbol: nudge user straight into placing one. Most of the
+            # time, that's why they created it.
+            if is_new:
+                if messagebox.askyesno(
+                    "Place on map?",
+                    f"Symbol '{new_code}' ({new_info['label']}) created.\n\n"
+                    f"Click YES to place an instance on the map now, or NO "
+                    f"to add it later from the Symbols tab → Place Device."):
+                    self.place_type_var.set(new_code)
+                    self._start_place_device()
 
         btns = ttk.Frame(dlg)
         btns.grid(row=row, column=0, columnspan=3, pady=12)
@@ -1577,11 +2732,9 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
     def _delete_symbol_type(self) -> None:
-        sel = self.sym_listbox.curselection()
-        if not sel:
+        code = self._selected_symbol_code()
+        if not code:
             return
-        text = self.sym_listbox.get(sel[0]).strip()
-        code = text.split("|")[0].strip()
         if code not in self.symbol_types:
             return
         info = self.symbol_types[code]
@@ -1609,22 +2762,62 @@ class CameraWireTool:
         code = self._place_type
         if code is None:
             return
-        dx, dy = self._img_to_drawio(ix, iy)
+        # Special sentinel — the user is placing a map annotation, not a device.
+        if code == "__annotation__" and self._placing_annotation:
+            dx, dy = self._img_to_drawio(ix, iy)
+            ann = {**self._placing_annotation, "x": dx, "y": dy}
+            self.annotations.append(ann)
+            self._placing_annotation = None
+            self._set_mode(Mode.MOVE)
+            self._mark_dirty()
+            self._redraw()
+            self._flash_status(
+                f"Placed annotation '{ann['text']}'. Right-click on it to edit/delete.",
+                ttl_ms=3500)
+            return
+        # Centre the icon on the click point (drawio coords). Without this
+        # offset the icon's TOP-LEFT corner sits on the cursor, which is
+        # confusing.
+        dw = C.DEVICE_DEFAULT_W
+        dh = C.DEVICE_DEFAULT_H
+        dx_click, dy_click = self._img_to_drawio(ix, iy)
+        dx = dx_click - dw / 2
+        dy = dy_click - dh / 2
+
         new_id = f"s{self._next_device_id}"
         self._next_device_id += 1
         info = self.symbol_types[code]
         device = {
             "id": new_id, "type": code,
             "x": dx, "y": dy,
-            "w": C.DEVICE_DEFAULT_W, "h": C.DEVICE_DEFAULT_H,
+            "w": dw, "h": dh,
             "orig_style": SHAPE_STYLES.get(info["shape"], SHAPE_STYLES["ellipse"]).format(
                 color=info["color"], fs=8,
             ),
         }
         self._execute(AddDeviceCmd(self, device))
+        self.selected_device = device   # so it shows red-outlined immediately
         self._set_mode(Mode.MOVE)
         self._post_command_refresh()
-        self.status_label.config(text=f"Placed {code} ({new_id})")
+        # Flash a 'placed!' marker around it for ~1.2s
+        self._flash_placement(dx_click, dy_click, code, new_id)
+        self.status_label.config(
+            text=f"✓ Placed {code} ({new_id}). Press Ctrl+Z to undo, "
+                 f"or place another from the Symbols tab."
+        )
+
+    def _flash_placement(self, dx: float, dy: float, code: str, new_id: str) -> None:
+        """Briefly draw an animated ring around a freshly-placed device so
+        the user can SEE where it landed, even if they clicked at the edge
+        of the viewport."""
+        ix, iy = self._drawio_to_img(dx, dy)
+        cx, cy = self._img_to_canvas(ix, iy)
+        for i, (r, color) in enumerate([(40, "#FFFF00"), (28, "#FFD060"),
+                                         (16, "#FF8000")]):
+            tag = f"_flash_{new_id}_{i}"
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                    outline=color, width=3, tags=tag)
+            self.root.after(400 + i * 200, lambda t=tag: self.canvas.delete(t))
 
     # ============================================================ Coords
     def _drawio_to_img(self, dx, dy):
@@ -1667,12 +2860,24 @@ class CameraWireTool:
             sc = C.VIEWPORT_MAX_DIM / max(dst_w, dst_h)
             dst_w = max(1, int(dst_w * sc))
             dst_h = max(1, int(dst_h * sc))
-        resized = cropped.resize((dst_w, dst_h), Image.LANCZOS)
+        # Two-tier resampling: BILINEAR during active interaction (panning,
+        # zooming, sash dragging) is ~10× faster than LANCZOS; we snap back
+        # to LANCZOS on settle for the final crisp frame.
+        resample = Image.BILINEAR if self._interactive else Image.LANCZOS
+        resized = cropped.resize((dst_w, dst_h), resample)
         tk_img = ImageTk.PhotoImage(resized)
         place_x, place_y = self._img_to_canvas(src_x0, src_y0)
         return tk_img, place_x, place_y
 
     def _schedule_redraw(self) -> None:
+        # Mark interactive (use fast resample) and schedule a crisp settle.
+        self._interactive = True
+        if self._settle_id is not None:
+            try:
+                self.root.after_cancel(self._settle_id)
+            except tk.TclError:
+                pass
+        self._settle_id = self.root.after(180, self._settle_redraw)
         if not self._redraw_pending:
             self._redraw_pending = True
             self.root.after(C.DEBOUNCE_MS, self._do_deferred_redraw)
@@ -1681,12 +2886,40 @@ class CameraWireTool:
         self._redraw_pending = False
         self._redraw()
 
+    def _settle_redraw(self) -> None:
+        """After ~180ms with no further interaction, do one crisp LANCZOS pass."""
+        self._settle_id = None
+        self._interactive = False
+        self._redraw()
+
+    def _on_canvas_configure(self) -> None:
+        """Configure handler.
+
+        With opaqueresize=False on the PanedWindow, the sash drag no longer
+        fires continuous Configure events — they only land on mouse-release
+        and on actual window resize. So we just redraw immediately (BILINEAR
+        for speed) and schedule a settle 180ms out for one crisp LANCZOS
+        pass. No artifact gap.
+        """
+        self._interactive = True
+        if self._settle_id is not None:
+            try:
+                self.root.after_cancel(self._settle_id)
+            except tk.TclError:
+                pass
+        self._redraw()
+        self._settle_id = self.root.after(180, self._settle_redraw)
+
     def _redraw(self) -> None:
         self.canvas.delete("all")
         tk_img, px, py = self._get_viewport_image()
         if tk_img is not None:
             self.canvas.create_image(px, py, anchor=tk.NW, image=tk_img, tags="img")
             self._tk_ref = tk_img
+
+        # Optional alignment grid
+        if self._show_grid.get():
+            self._draw_grid_overlay()
 
         # FOV cones go BEHIND wires so the wire labels stay readable
         if self._show_fov.get():
@@ -1710,12 +2943,311 @@ class CameraWireTool:
         for d in self.devices:
             self._draw_device(d)
 
-        self._draw_legend()
+        if self._show_legend.get():
+            self._draw_legend()
+
+        # Map annotations sit on top of devices/wires so they're never hidden
+        if self.annotations:
+            self._draw_annotations()
 
         for pt in self.cal_points:
             cx, cy = self._img_to_canvas(*pt)
             self.canvas.create_oval(cx-5, cy-5, cx+5, cy+5,
                                     fill="yellow", outline="black", width=2, tags="cal")
+
+        self._draw_mode_banner()
+        self._draw_welcome_banner()
+        self._draw_minimap()
+        # Zoom indicator updates with every redraw — cheap, accurate
+        if hasattr(self, "zoom_indicator"):
+            try:
+                self.zoom_indicator.config(text=f"Zoom: {self.zoom*100:.0f}%")
+            except tk.TclError:
+                pass
+
+    # ============================================================ Welcome banner
+    def _draw_welcome_banner(self) -> None:
+        """A friendly onboarding card on the canvas — only shows when the
+        project hasn't been calibrated yet OR has zero wire routes. Goes
+        away as soon as either threshold is crossed."""
+        # Active state check: hide if scale is set AND there's at least 1 wire.
+        if self.scale_factor and self.wire_routes:
+            return
+        cw = self.canvas.winfo_width() or 800
+        if cw < 460:   # too narrow to fit
+            return
+        # Banner sits below the mode banner (which is 0..32) at top center
+        x0 = max(40, (cw - 540) // 2)
+        y0 = 48
+        x1 = x0 + 540
+        y1 = y0 + 78
+
+        self.canvas.create_rectangle(
+            x0, y0, x1, y1,
+            fill="#1a1f2e", outline="#7fc4ff", width=2,
+            tags=("welcome", "welcome_bg"),
+        )
+        self.canvas.create_text(
+            x0 + 16, y0 + 8, anchor=tk.NW,
+            text="Getting started", fill="#7fc4ff",
+            font=("Segoe UI", 10, "bold"), tags="welcome",
+        )
+        # Step indicators with state colors
+        steps = [
+            ("1.  Set Scale",
+             bool(self.scale_factor),
+             "Click two points of a known dimension on the plan."),
+            ("2.  Draw Wires",
+             bool(self.wire_routes),
+             "Right-click any device on the map → 'Draw wire from here'."),
+        ]
+        sx = x0 + 16
+        sy = y0 + 30
+        for label, done, hint in steps:
+            color = "#3ddc84" if done else "#FFB347"
+            check = "✓" if done else "○"
+            self.canvas.create_text(
+                sx, sy, anchor=tk.NW, text=check,
+                fill=color, font=("Segoe UI", 11, "bold"),
+                tags="welcome",
+            )
+            self.canvas.create_text(
+                sx + 24, sy, anchor=tk.NW, text=label,
+                fill="#FFFFFF" if not done else "#7fc4ff",
+                font=("Segoe UI", 10, "bold"), tags="welcome",
+            )
+            self.canvas.create_text(
+                sx + 24, sy + 16, anchor=tk.NW, text=hint,
+                fill="#a0a8b8", font=("Segoe UI", 8, "italic"),
+                tags="welcome",
+            )
+            sx += 270  # next column
+
+    # ============================================================ Grid overlay
+    def _draw_grid_overlay(self) -> None:
+        """Faint orthogonal grid for visual alignment when placing or
+        moving devices. Spacing is calibrated to the real-world unit so
+        every line represents a clean foot/inch (or meter) interval."""
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        # Choose a real-world spacing that yields ~30-90 canvas-pixels
+        # apart. If no scale set, fall back to image-pixel grid at 50px.
+        if self.scale_factor:
+            unit = self.unit_var.get()
+            if unit in ("meters", "cm", "m-cm"):
+                step_in = self._IN_PER_M  # 1 m
+                small_in = self._IN_PER_M / 5  # 20 cm
+                label = "1 m"
+            else:
+                step_in = 12 * 5   # 5 ft
+                small_in = 12      # 1 ft
+                label = "5'"
+            step_px = step_in / self.scale_factor      # image-pixels per major
+            small_px = small_in / self.scale_factor
+            # If too dense, drop the minor grid
+            draw_minor = (small_px * self.zoom) >= 20
+        else:
+            step_px = 200; small_px = 50
+            draw_minor = self.zoom > 0.4
+            label = "px"
+
+        # Visible image-pixel range
+        ix0, iy0 = self._canvas_to_img(0, 0)
+        ix1, iy1 = self._canvas_to_img(cw, ch)
+
+        # Minor grid (very faint)
+        if draw_minor:
+            x = math.floor(ix0 / small_px) * small_px
+            while x < ix1:
+                cx, _ = self._img_to_canvas(x, 0)
+                self.canvas.create_line(cx, 0, cx, ch,
+                                         fill="#222a33", tags="grid")
+                x += small_px
+            y = math.floor(iy0 / small_px) * small_px
+            while y < iy1:
+                _, cy = self._img_to_canvas(0, y)
+                self.canvas.create_line(0, cy, cw, cy,
+                                         fill="#222a33", tags="grid")
+                y += small_px
+
+        # Major grid (slightly stronger)
+        x = math.floor(ix0 / step_px) * step_px
+        while x < ix1:
+            cx, _ = self._img_to_canvas(x, 0)
+            self.canvas.create_line(cx, 0, cx, ch,
+                                     fill="#3a4253", width=1, tags="grid")
+            x += step_px
+        y = math.floor(iy0 / step_px) * step_px
+        while y < iy1:
+            _, cy = self._img_to_canvas(0, y)
+            self.canvas.create_line(0, cy, cw, cy,
+                                     fill="#3a4253", width=1, tags="grid")
+            y += step_px
+
+        # Label in the corner so user knows the spacing
+        self.canvas.create_text(
+            cw - 8, ch - 8, anchor=tk.SE,
+            text=f"grid: {label}", fill="#5a6273",
+            font=("Segoe UI", 8, "italic"), tags="grid")
+
+    # ============================================================ Mini-map
+    def _build_minimap_image(self) -> None:
+        """Pre-render the floor plan thumbnail once. Re-runs only on
+        explicit invalidation (floor change). Cheap to keep — saved as
+        a PhotoImage on the minimap canvas."""
+        if self._minimap_built:
+            return
+        try:
+            thumb = self.bg_image.copy()
+            thumb.thumbnail((self._minimap_w, self._minimap_h), Image.LANCZOS)
+            self._minimap_photo = ImageTk.PhotoImage(thumb)
+            self._minimap_thumb_size = thumb.size
+            self._minimap_built = True
+        except Exception as e:
+            log_error("minimap thumbnail failed", e)
+
+    def _draw_minimap(self) -> None:
+        """Re-render the mini-map. To avoid expensive rebuilds during pure
+        pan/zoom, the dots-and-path layer is cached and only rebuilt when
+        the project content changes; the viewport rectangle gets refreshed
+        every frame (cheap)."""
+        self._build_minimap_image()
+        if self._minimap_photo is None:
+            return
+        m = self.minimap
+        thumb_w, thumb_h = self._minimap_thumb_size
+        ox = (self._minimap_w - thumb_w) // 2
+        oy = (self._minimap_h - thumb_h) // 2
+
+        # Compute a fingerprint of content state so we know when to rebuild.
+        sel_ids = frozenset(d["id"] for d in self.selected_devices)
+        sel_wire = self._selected_wire()
+        sel_wire_id = id(sel_wire) if sel_wire is not None else 0
+        token = (
+            len(self.devices), len(self.wire_routes),
+            sel_ids, sel_wire_id,
+            tuple((d["id"], round(d["x"], 1), round(d["y"], 1))
+                  for d in self.devices),
+        )
+        if token != getattr(self, "_minimap_state_token", None):
+            # Full rebuild — new state
+            m.delete("all")
+            m.create_image(ox, oy, anchor=tk.NW, image=self._minimap_photo)
+            self._minimap_redraw_dots(ox, oy, thumb_w, thumb_h)
+            self._minimap_state_token = token
+        else:
+            # Just update the viewport rect — devices/wires unchanged.
+            m.delete("vp")
+
+        # Always-redrawn: viewport rectangle (cheap; updates on every
+        # pan/zoom). Stays inside the "vp" tag so we can wipe it cleanly.
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        ix0, iy0 = self._canvas_to_img(0, 0)
+        ix1, iy1 = self._canvas_to_img(cw, ch)
+        scale_x = thumb_w / self.img_w
+        scale_y = thumb_h / self.img_h
+        rx0 = ox + max(0, ix0) * scale_x
+        ry0 = oy + max(0, iy0) * scale_y
+        rx1 = ox + min(self.img_w, ix1) * scale_x
+        ry1 = oy + min(self.img_h, iy1) * scale_y
+        m.create_rectangle(rx0, ry0, rx1, ry1,
+                            outline="#FFD060", width=2, tags="vp")
+
+    def _minimap_redraw_dots(self, ox: int, oy: int,
+                              thumb_w: int, thumb_h: int) -> None:
+        """Repopulate device dots + selected-wire path on the mini-map.
+        Only called when project state changes (devices added/moved,
+        selection changed) — not on every pan/zoom."""
+        m = self.minimap
+        scale_x = thumb_w / self.img_w
+        scale_y = thumb_h / self.img_h
+
+        # Selected wire path overlaid on the mini-map
+        sel_wire = self._selected_wire()
+        if sel_wire is not None and len(sel_wire["points"]) >= 2:
+            poly = []
+            for px, py in sel_wire["points"]:
+                poly.extend([ox + px * scale_x, oy + py * scale_y])
+            m.create_line(poly, fill="#FF4444", width=2, smooth=False)
+
+        # Tiny dots for placed devices. Selected ones bigger + red.
+        sel_ids = {d["id"] for d in self.selected_devices}
+        for d in self.devices:
+            cx = (d["x"] + d["w"]/2) * self.dx_scale
+            cy = (d["y"] + d["h"]/2) * self.dy_scale
+            mx = ox + cx * scale_x
+            my = oy + cy * scale_y
+            info = self.symbol_types.get(d["type"], {})
+            if d["id"] in sel_ids:
+                m.create_oval(mx-3, my-3, mx+3, my+3,
+                               fill="#FF3030", outline="#FFFFFF", width=1)
+            else:
+                color = "#FFE680" if info.get("is_camera") else "#7FC4FF"
+                m.create_oval(mx-1.5, my-1.5, mx+1.5, my+1.5,
+                               fill=color, outline="")
+
+    def _minimap_click(self, event) -> None:
+        """Click anywhere on the mini-map to pan the main view to that
+        location."""
+        if not self._minimap_built or self._minimap_photo is None:
+            return
+        thumb_w, thumb_h = self._minimap_thumb_size
+        ox = (self._minimap_w - thumb_w) // 2
+        oy = (self._minimap_h - thumb_h) // 2
+        # Convert click → image coords
+        click_x = event.x - ox
+        click_y = event.y - oy
+        if click_x < 0 or click_y < 0 or click_x > thumb_w or click_y > thumb_h:
+            return
+        ix = click_x * (self.img_w / thumb_w)
+        iy = click_y * (self.img_h / thumb_h)
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        self.offset_x = cw / 2 - ix * self.zoom
+        self.offset_y = ch / 2 - iy * self.zoom
+        self._redraw()
+
+    def _draw_mode_banner(self) -> None:
+        """Big yellow banner across the top of the canvas during action
+        modes, so the user can't miss what's expected of their next click."""
+        if self.mode == Mode.MOVE:
+            return
+        cw = self.canvas.winfo_width() or 800
+        if cw < 50:
+            return
+        msg = ""
+        bg = "#FFD060"; fg = "#202020"
+        if self.mode == Mode.PLACE_DEVICE and self._place_type:
+            info = self.symbol_types.get(self._place_type, {})
+            label = info.get("label", self._place_type)
+            msg = (f"📍  PLACEMENT MODE — click anywhere on the map to drop a "
+                   f"'{self._place_type}' ({label}).   Esc to cancel.")
+        elif self.mode == Mode.CALIBRATE:
+            n = len(self.cal_points)
+            msg = (f"📏  CALIBRATE — click point {n+1} of 2 on a known dimension. "
+                   f"Esc to cancel.")
+            bg = "#FF8C42"
+        elif self.mode == Mode.WIRE:
+            n = len(self.current_wire_points)
+            if self.selected_device is not None:
+                msg = (f"📐  WIRE MODE — drawing for {self.selected_device['id']}. "
+                       f"Click route points ({n} so far). Right-click to finish, "
+                       f"Esc to cancel.")
+            else:
+                msg = ("📐  WIRE MODE — click points to draw a wire. "
+                       "Tip: right-click a device → 'Draw wire from here…' "
+                       "to associate the wire with a device. Right-click to "
+                       "finish, Esc to cancel.")
+            bg = "#7fc4ff"
+        if not msg:
+            return
+        # Banner background bar
+        self.canvas.create_rectangle(0, 0, cw, 32, fill=bg, outline="",
+                                     tags="mode_banner")
+        self.canvas.create_text(cw / 2, 16, text=msg, fill=fg,
+                                font=("Segoe UI", 10, "bold"),
+                                tags="mode_banner")
 
     def _draw_legend(self) -> None:
         box = self.legend_box
@@ -1724,6 +3256,9 @@ class CameraWireTool:
         sorted_codes = sorted(self.symbol_types.keys())
         n_types = len(sorted_codes)
         needed_h = (n_types * C.LEGEND_ROW_H + 50) * self.dy_scale
+        # Cache legend bounds in image coords so _on_left_press can hit-test
+        # the click against this rectangle to start a drag.
+        self._legend_img_bbox = (bx, by, bx + bw, by + needed_h)
         cx, cy = self._img_to_canvas(bx, by)
         cw = bw * self.zoom
         ch = needed_h * self.zoom
@@ -1811,15 +3346,60 @@ class CameraWireTool:
         cx, cy = self._img_to_canvas(ix, iy)
         cw = iw * self.zoom
         ch = ih * self.zoom
+        # Viewport culling — skip devices entirely off-screen. Big perf win
+        # at high zoom on plans with hundreds of devices.
+        canvas_w = self.canvas.winfo_width() or 800
+        canvas_h = self.canvas.winfo_height() or 600
+        margin = 20
+        if (cx + cw < -margin or cy + ch < -margin
+                or cx > canvas_w + margin or cy > canvas_h + margin):
+            return
         center_x = cx + cw / 2
         center_y = cy + ch / 2
         r = max(cw, ch) / 2
 
-        is_selected = (self.selected_device is not None
-                       and self.selected_device["id"] == dev["id"])
+        is_selected = any(d["id"] == dev["id"] for d in self.selected_devices)
+        is_run_point = bool(info.get("is_run_point"))
+        # Subtle blue ring when this device's wire is the selected wire —
+        # makes the wire→device association obvious without forcing a full
+        # device-selection.
+        sel_wire = self._selected_wire()
+        is_wire_owner = (sel_wire is not None
+                          and sel_wire.get("device_id") == dev["id"]
+                          and not is_selected)
         outline_color = "#FF3030" if is_selected else "#0000FF"
         outline_width = 3 if is_selected else 2
         tag = f'dev_{dev["id"]}'
+
+        if is_wire_owner:
+            # Subtle blue halo around the wire's source device
+            ix, iy = self._drawio_to_img(dev["x"], dev["y"])
+            cx_outer, cy_outer = self._img_to_canvas(ix, iy)
+            iw_outer = dev["w"] * self.dx_scale * self.zoom
+            ih_outer = dev["h"] * self.dy_scale * self.zoom
+            cxc = cx_outer + iw_outer / 2
+            cyc = cy_outer + ih_outer / 2
+            ro = max(iw_outer, ih_outer) * 0.85
+            self.canvas.create_oval(
+                cxc - ro, cyc - ro, cxc + ro, cyc + ro,
+                outline="#7FCDFF", width=2, dash=(3, 3),
+                tags=(tag, "wire_owner_halo"),
+            )
+
+        # Run-point halo: dashed yellow ring + bullseye dot.
+        if is_run_point:
+            halo_r = r * 1.6
+            self.canvas.create_oval(
+                center_x - halo_r, center_y - halo_r,
+                center_x + halo_r, center_y + halo_r,
+                outline="#FFD060", dash=(4, 3), width=2, tags=tag,
+            )
+            inner = max(2, r * 0.25)
+            self.canvas.create_oval(
+                center_x - inner, center_y - inner,
+                center_x + inner, center_y + inner,
+                outline="#FFD060", width=1, tags=tag,
+            )
 
         self._draw_shape(info["shape"], info["color"], center_x, center_y, r,
                          cx, cy, cw, ch, tag,
@@ -1849,37 +3429,158 @@ class CameraWireTool:
 
         did = route.get("device_id")
         wire_color = "#00BFFF"
-        if did:
+        # Priority: explicit cable on the route → device's symbol cable → device color
+        cable_id = route.get("cable_type")
+        if not cable_id and did:
+            dev = next((d for d in self.devices if d["id"] == did), None)
+            if dev:
+                sym = self.symbol_types.get(dev["type"], {})
+                cable_id = sym.get("cable_type") or bom_mod.default_cable_for(sym)
+        if cable_id and cable_id in self.cable_types:
+            wire_color = self.cable_types[cable_id].get("color", wire_color)
+        elif did:
             dev = next((d for d in self.devices if d["id"] == did), None)
             if dev:
                 info = self.symbol_types.get(dev["type"], {})
                 wire_color = info.get("color", "#00BFFF")
 
         color = "#FF4444" if is_selected else wire_color
-        width = 3 if is_selected else 2
+        width = 4 if is_selected else 2
         pts_canvas = [self._img_to_canvas(*p) for p in route["points"]]
+        # If the wire's selected, draw a soft dim glow underneath so the
+        # red line really pops against busy floor-plan backgrounds.
+        if is_selected:
+            for j in range(len(pts_canvas) - 1):
+                self.canvas.create_line(
+                    pts_canvas[j][0], pts_canvas[j][1],
+                    pts_canvas[j+1][0], pts_canvas[j+1][1],
+                    fill="#FFFFFF", width=8,
+                    tags=(f"wire_{idx}", "wire_glow"),
+                )
         for j in range(len(pts_canvas) - 1):
             self.canvas.create_line(pts_canvas[j][0], pts_canvas[j][1],
                                     pts_canvas[j+1][0], pts_canvas[j+1][1],
                                     fill=color, width=width, tags=f"wire_{idx}")
-        for cx, cy in pts_canvas:
-            self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=color,
-                                    outline="white", tags=f"wire_{idx}")
-        mid_idx = len(pts_canvas) // 2
-        mx, my = pts_canvas[mid_idx]
-        length_in = route.get("length_in")
-        length_str = (self._format_length(length_in) if length_in is not None
-                      else f'{route["length_px"]:.0f}px')
-        dev_tag = f"{did}: " if did else ""
-        label = f"{dev_tag}{length_str}"
-        self.canvas.create_text(mx, my - 12, text=label, fill="#00FFFF",
-                                font=("Consolas", 9, "bold"), tags=f"wire_{idx}")
+        # When a wire is selected ALL its points become big draggable
+        # handles. Source endpoint is GREEN, destination is ORANGE,
+        # intermediate points are white circles — visual flow direction.
+        if is_selected:
+            for k, (cx, cy) in enumerate(pts_canvas):
+                is_first = (k == 0)
+                is_last = (k == len(pts_canvas) - 1)
+                if is_first:
+                    fill = "#3ddc84"      # green = source
+                    outline = "#1a7c3a"
+                elif is_last:
+                    fill = "#FF8C42"      # orange = destination
+                    outline = "#a04a10"
+                else:
+                    fill = "#FFFFFF"
+                    outline = color
+                if is_first or is_last:
+                    self.canvas.create_rectangle(
+                        cx-7, cy-7, cx+7, cy+7,
+                        fill=fill, outline=outline, width=2,
+                        tags=(f"wire_{idx}", "wp_handle"),
+                    )
+                else:
+                    self.canvas.create_oval(
+                        cx-7, cy-7, cx+7, cy+7,
+                        fill=fill, outline=outline, width=2,
+                        tags=(f"wire_{idx}", "wp_handle"),
+                    )
+                # Centre dot for the intermediate handles only — endpoint
+                # squares already convey direction via fill color.
+                if not (is_first or is_last):
+                    self.canvas.create_oval(
+                        cx-2, cy-2, cx+2, cy+2,
+                        fill=color, outline="",
+                        tags=(f"wire_{idx}", "wp_handle"),
+                    )
+        else:
+            for cx, cy in pts_canvas:
+                self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=color,
+                                        outline="white", tags=f"wire_{idx}")
+        # Direction chevron on the selected wire's midpoint segment so
+        # the user can see source → destination at a glance.
+        if is_selected and len(pts_canvas) >= 2:
+            # Pick the segment with the midpoint of the path
+            mid = len(pts_canvas) // 2
+            # Use the segment ending at `mid` so the chevron sits near
+            # the path's center
+            seg_a = pts_canvas[mid - 1] if mid > 0 else pts_canvas[0]
+            seg_b = pts_canvas[mid] if mid < len(pts_canvas) else pts_canvas[-1]
+            sax, say = seg_a
+            sbx, sby = seg_b
+            mx = (sax + sbx) / 2
+            my = (say + sby) / 2
+            seg_len = math.hypot(sbx - sax, sby - say)
+            if seg_len > 14:
+                # Unit vector along seg_a→seg_b
+                ux = (sbx - sax) / seg_len
+                uy = (sby - say) / seg_len
+                # Perpendicular for the chevron arms
+                px_, py_ = -uy, ux
+                arm = 7
+                tip_x = mx + ux * arm
+                tip_y = my + uy * arm
+                back_x = mx - ux * arm
+                back_y = my - uy * arm
+                left_x = back_x + px_ * arm * 0.7
+                left_y = back_y + py_ * arm * 0.7
+                right_x = back_x - px_ * arm * 0.7
+                right_y = back_y - py_ * arm * 0.7
+                self.canvas.create_polygon(
+                    tip_x, tip_y, left_x, left_y, right_x, right_y,
+                    fill="#FFFFFF", outline=color, width=1,
+                    tags=(f"wire_{idx}", "wire_chevron"),
+                )
 
-    def _wire_index_for_listbox(self, list_index: int) -> int:
-        # If the wire list is filtered, the listbox index doesn't match wire_routes index.
-        return self._filtered_wire_indices[list_index] if hasattr(self, "_filtered_wire_indices") and list_index < len(self._filtered_wire_indices) else list_index
+        # Wire label visibility tiers based on zoom level:
+        #   zoom < 0.18    → no labels (would be unreadable noise)
+        #   0.18 ≤ z < 0.45 → compact: length only, no device id
+        #   zoom ≥ 0.45    → full: "{did}: {length}"
+        if self.zoom >= 0.18:
+            mid_idx = len(pts_canvas) // 2
+            mx, my = pts_canvas[mid_idx]
+            length_in = route.get("length_in")
+            length_str = (self._format_length(length_in) if length_in is not None
+                          else f'{route["length_px"]:.0f}px')
+            if self.zoom >= 0.45:
+                dev_tag = f"{did}: " if did else ""
+                label = f"{dev_tag}{length_str}"
+            else:
+                label = length_str
+            self.canvas.create_text(mx, my - 12, text=label, fill="#00FFFF",
+                                    font=("Consolas", 9, "bold"),
+                                    tags=f"wire_{idx}")
+
+    def _wire_index_for_listbox(self, list_index: int) -> int | None:
+        """Listbox row → wire_routes index. Returns None for header rows."""
+        if not hasattr(self, "_wire_listbox_rows"):
+            return list_index
+        if 0 <= list_index < len(self._wire_listbox_rows):
+            return self._wire_listbox_rows[list_index]
+        return None
 
     # ============================================================ Formatting
+    # 1 inch = 2.54 cm = 0.0254 m
+    _IN_PER_M  = 1.0 / 0.0254     # ≈ 39.3701
+    _IN_PER_CM = 1.0 / 2.54
+
+    def _scale_label_text(self) -> str:
+        """Render the scale label string in whichever unit is active."""
+        if self.scale_factor is None:
+            return "⚠ Scale not set — click to calibrate"
+        unit = self.unit_var.get()
+        sf = self.scale_factor   # inches per pixel
+        if unit in ("meters", "cm", "m-cm"):
+            cm_per_px = sf / self._IN_PER_CM
+            if cm_per_px < 1:
+                return f"Scale:  1 px = {cm_per_px*10:.3f} mm"
+            return f"Scale:  1 px = {cm_per_px:.3f} cm"
+        return f"Scale:  1 px = {sf:.4f}\""
+
     def _format_length(self, inches) -> str:
         if inches is None:
             return "--"
@@ -1888,6 +3589,17 @@ class CameraWireTool:
             return f'{inches:.2f}"'
         if unit == "feet-dec":
             return f"{inches / 12:.2f} ft"
+        if unit == "meters":
+            return f"{inches / self._IN_PER_M:.3f} m"
+        if unit == "cm":
+            return f"{inches / self._IN_PER_CM:.1f} cm"
+        if unit == "m-cm":
+            # e.g. "3 m 82 cm"
+            total_cm = inches / self._IN_PER_CM
+            m = int(total_cm // 100)
+            cm = total_cm - m * 100
+            return (f"{m} m {cm:.1f} cm" if m > 0 else f"{cm:.1f} cm")
+        # default ft-in
         feet = int(inches // 12)
         rem = inches % 12
         whole_in = int(rem)
@@ -1905,6 +3617,117 @@ class CameraWireTool:
         return f"{feet}'-{whole_in}{frac_str}\"" if feet > 0 else f'{whole_in}{frac_str}"'
 
     # ============================================================ Hit testing
+    def _selected_wire(self) -> dict | None:
+        """Return the route currently highlighted in the Wires listbox, if any."""
+        sel = self.wire_listbox.curselection() if hasattr(self, "wire_listbox") else ()
+        if not sel or not hasattr(self, "_filtered_wire_indices"):
+            return None
+        if sel[0] >= len(self._filtered_wire_indices):
+            return None
+        idx = self._filtered_wire_indices[sel[0]]
+        if 0 <= idx < len(self.wire_routes):
+            return self.wire_routes[idx]
+        return None
+
+    def _waypoint_at(self, ix: float, iy: float):
+        """If the click is near ANY waypoint of the selected wire (start,
+        intermediate, or end), return (route, point_index). Hit threshold
+        scales inversely with zoom so the handle is grabbable at any
+        zoom level."""
+        route = self._selected_wire()
+        if route is None:
+            return None
+        pts = route["points"]
+        if len(pts) < 2:
+            return None
+        # 10 canvas-pixel grab radius → image-pixel equivalent
+        thresh = max(6.0, 10.0 / max(self.zoom, 0.01))
+        for i in range(len(pts)):       # all points draggable
+            px, py = pts[i]
+            if math.hypot(ix - px, iy - py) <= thresh:
+                return (route, i)
+        return None
+
+    def _wire_at(self, ix: float, iy: float) -> int | None:
+        """Return the wire index whose line passes near (ix, iy). Used to
+        click-to-select a wire on the canvas."""
+        thresh = max(4.0, 6.0 / max(self.zoom, 0.01))
+        best_idx = None
+        best_dist = float("inf")
+        for idx, route in enumerate(self.wire_routes):
+            pts = route["points"]
+            for j in range(len(pts) - 1):
+                d = self._point_to_segment_dist((ix, iy), pts[j], pts[j+1])
+                if d < best_dist and d <= thresh:
+                    best_dist = d
+                    best_idx = idx
+        return best_idx
+
+    def _legend_at(self, ix: float, iy: float) -> bool:
+        """Is the (image-coord) point inside the legend rectangle? Used
+        to start the legend-drag in _on_left_press."""
+        if not self._show_legend.get():
+            return False
+        if not hasattr(self, "_legend_img_bbox"):
+            return False
+        bx0, by0, bx1, by1 = self._legend_img_bbox
+        return bx0 <= ix <= bx1 and by0 <= iy <= by1
+
+    @staticmethod
+    def _point_to_segment_dist(p, a, b) -> float:
+        px, py = p; ax, ay = a; bx, by = b
+        dx = bx - ax; dy = by - ay
+        if dx == 0 and dy == 0:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx*dx + dy*dy)))
+        cx = ax + t * dx
+        cy = ay + t * dy
+        return math.hypot(px - cx, py - cy)
+
+    def _select_wire_in_listbox(self, route_index: int) -> None:
+        """Programmatically select a wire in the listbox so its waypoints
+        light up as draggable handles."""
+        if not hasattr(self, "_wire_listbox_rows"):
+            return
+        try:
+            # Find the listbox row (not the unfiltered list) where this
+            # wire is rendered. _wire_listbox_rows includes None entries
+            # for the group headers.
+            list_pos = self._wire_listbox_rows.index(route_index)
+        except ValueError:
+            return
+        self.wire_listbox.selection_clear(0, tk.END)
+        self.wire_listbox.selection_set(list_pos)
+        self.wire_listbox.see(list_pos)
+
+    # ------------------------------------------------------------ Selection
+    @property
+    def selected_device(self) -> dict | None:
+        """The primary (most recently clicked) selected device, or None.
+
+        Backed by `selected_devices`. Setting this attribute REPLACES the
+        full multi-selection with a single device (or clears it). To add
+        without clearing existing selection, use _toggle_device_selection.
+        """
+        return self._primary_selected
+
+    @selected_device.setter
+    def selected_device(self, dev: dict | None) -> None:
+        self._primary_selected = dev
+        self.selected_devices = [dev] if dev is not None else []
+
+    def _toggle_device_selection(self, dev: dict) -> None:
+        """Ctrl-click style: add the device to the selection set if it's
+        not there, otherwise remove it."""
+        if any(d is dev for d in self.selected_devices):
+            self.selected_devices = [d for d in self.selected_devices if d is not dev]
+            if self._primary_selected is dev:
+                self._primary_selected = (self.selected_devices[-1]
+                                          if self.selected_devices else None)
+        else:
+            self.selected_devices.append(dev)
+            self._primary_selected = dev
+
     def _device_at(self, ix, iy):
         hit = None
         for d in self.devices:
@@ -1938,36 +3761,58 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Enter Known Distance")
-        dlg.geometry("360x170")
+        dlg.geometry("520x320")
         dlg.transient(self.root)
         dlg.grab_set()
-        ttk.Label(dlg, text="Enter the real-world distance between the two points:").pack(
-            pady=(12, 4))
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ttk.Label(
+            dlg,
+            text=f"You measured {px_dist:.1f} pixels on the map.",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor=tk.W, padx=14, pady=(14, 2))
+        ttk.Label(
+            dlg,
+            text="Enter the real-world distance between those two points:",
+            font=("Segoe UI", 10),
+        ).pack(anchor=tk.W, padx=14, pady=(2, 8))
+
+        unit = self.unit_var.get()
+        metric = unit in ("meters", "cm", "m-cm")
+
         input_frame = ttk.Frame(dlg)
         input_frame.pack(pady=4)
-        feet_var = tk.StringVar(value="0")
-        inches_var = tk.StringVar(value="0")
-        ttk.Label(input_frame, text="Feet:").grid(row=0, column=0, padx=4)
-        ttk.Entry(input_frame, textvariable=feet_var, width=8).grid(row=0, column=1, padx=4)
-        ttk.Label(input_frame, text="Inches:").grid(row=0, column=2, padx=4)
-        ttk.Entry(input_frame, textvariable=inches_var, width=8).grid(row=0, column=3, padx=4)
+        a_var = tk.StringVar(value="0")
+        b_var = tk.StringVar(value="0")
+
+        if metric:
+            ttk.Label(input_frame, text="Meters:").grid(row=0, column=0, padx=4)
+            ttk.Entry(input_frame, textvariable=a_var, width=10).grid(row=0, column=1, padx=4)
+            ttk.Label(input_frame, text="cm:").grid(row=0, column=2, padx=4)
+            ttk.Entry(input_frame, textvariable=b_var, width=10).grid(row=0, column=3, padx=4)
+        else:
+            ttk.Label(input_frame, text="Feet:").grid(row=0, column=0, padx=4)
+            ttk.Entry(input_frame, textvariable=a_var, width=10).grid(row=0, column=1, padx=4)
+            ttk.Label(input_frame, text="Inches:").grid(row=0, column=2, padx=4)
+            ttk.Entry(input_frame, textvariable=b_var, width=10).grid(row=0, column=3, padx=4)
 
         def apply():
             try:
-                ft = float(feet_var.get())
-                inc = float(inches_var.get())
+                a = float(a_var.get())
+                b = float(b_var.get())
             except ValueError:
                 messagebox.showerror("Error", "Enter valid numbers")
                 return
-            total_in = ft * 12 + inc
+            if metric:
+                total_in = a * self._IN_PER_M + b * self._IN_PER_CM
+            else:
+                total_in = a * 12 + b
             if total_in <= 0:
                 messagebox.showerror("Error", "Distance must be positive")
                 return
             new_scale = total_in / px_dist
             self._execute(CalibrateCmd(self, self.scale_factor, new_scale))
-            self.scale_label.config(
-                text=f"  Scale: 1px = {self.scale_factor:.4f}\"", foreground="#3ddc84",
-            )
+            self.scale_label.config(text=self._scale_label_text())
             self._refresh_wire_list()
             self._refresh_device_list()
             self._redraw()
@@ -1976,8 +3821,34 @@ class CameraWireTool:
         def cancel():
             dlg.destroy()
 
+        # Reference card with common distances — helps users pick a
+        # reliable thing to measure on their architectural drawings.
+        ref = ttk.LabelFrame(dlg, text="Common reference distances")
+        ref.pack(fill=tk.X, padx=14, pady=(8, 4))
+        if metric:
+            tips = [
+                ("Standard door width",  "0.91 m  (91 cm)"),
+                ("Hallway width",        "1.20 – 1.50 m"),
+                ("Standard parking",     "2.50 m wide × 5.00 m long"),
+                ("Ceiling height",       "2.50 – 3.00 m"),
+            ]
+        else:
+            tips = [
+                ("Standard door width",  "3'-0\"  (36 in)"),
+                ("Hallway width",        "4'-0\"  to  5'-0\""),
+                ("Standard parking",     "9'-0\" wide × 18'-0\" long"),
+                ("Ceiling height",       "8'-0\"  to  10'-0\""),
+            ]
+        for i, (label_, value) in enumerate(tips):
+            ttk.Label(ref, text=label_, font=("Segoe UI", 9),
+                      foreground="#a0a8b8",
+                      ).grid(row=i, column=0, sticky=tk.W, padx=8, pady=1)
+            ttk.Label(ref, text=value, font=("Consolas", 9),
+                      foreground="#FFD060",
+                      ).grid(row=i, column=1, sticky=tk.W, padx=12, pady=1)
+
         btns = ttk.Frame(dlg)
-        btns.pack(pady=8)
+        btns.pack(pady=10)
         ttk.Button(btns, text="Apply", command=apply).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=4)
         dlg.bind("<Return>", lambda _e: apply())
@@ -2046,33 +3917,95 @@ class CameraWireTool:
             self._do_place_device(ix, iy)
             return
 
-        if self.mode == Mode.AUTO_ROUTE:
-            dev = self._device_at(ix, iy)
-            if dev is None:
-                self.status_label.config(
-                    text="Auto-route: click directly on a device icon. Esc to cancel.")
-                return
-            if self._auto_route_first is None:
-                self._auto_route_first = dev
-                self.selected_device = dev
-                self._redraw()
-                self.status_label.config(
-                    text=f"Auto-route: now click destination "
-                         f"(started at {dev['id']})")
-                return
-            else:
-                if dev["id"] == self._auto_route_first["id"]:
-                    self.status_label.config(text="Pick a DIFFERENT destination device.")
-                    return
-                self._do_auto_route(self._auto_route_first, dev)
-                self._auto_route_first = None
-                # stay in auto-route mode so user can chain runs
+        if self.mode == Mode.MOVE:
+            # Multi-device drag start: if click is on one of the currently
+            # multi-selected devices, capture all their starting positions
+            # so we can move them as a group.
+            self._multi_drag_starts: dict[str, tuple[float, float]] = {}
+
+            # -1. FOV rotation handle — highest priority. If the click is
+            # on a visible FOV handle, start rotating that camera's cone.
+            for did, (hx, hy, ax, ay) in self._fov_handles.items():
+                if math.hypot(event.x - hx, event.y - hy) <= 12:
+                    dev_obj = next((dd for dd in self.devices
+                                    if dd["id"] == did), None)
+                    if dev_obj is not None:
+                        # Make sure FOV is set on this camera so we can mutate
+                        if not dev_obj.get("fov"):
+                            dev_obj["fov"] = default_fov_for_type(dev_obj["type"])
+                        self._rotating_fov = {
+                            "device": dev_obj,
+                            "apex_canvas": (ax, ay),
+                            "old_az": dev_obj["fov"].get("azimuth_deg", 0),
+                        }
+                        try:
+                            self.canvas.config(cursor="exchange")
+                        except tk.TclError:
+                            pass
+                        return
+
+            # 0. Legend drag — if the click is inside the legend rectangle
+            # AND not on a device (devices on top win), start dragging the
+            # legend. This lets users move the legend out of the way.
+            if (self._legend_at(ix, iy)
+                    and self._device_at(ix, iy) is None):
+                # Store starting drawio coords of legend + click offset
+                self._dragging_legend = {
+                    "start_drawio": (self.legend_box["x"], self.legend_box["y"]),
+                    "click_drawio": self._img_to_drawio(ix, iy),
+                }
+                try:
+                    self.canvas.config(cursor="fleur")
+                except tk.TclError:
+                    pass
                 return
 
-        if self.mode == Mode.MOVE:
+            # 1. Highest priority: dragging an existing wire's waypoint.
+            hit = self._waypoint_at(ix, iy)
+            if hit is not None:
+                route, pidx = hit
+                self._dragging_waypoint = (route, pidx, route["points"][pidx])
+                try:
+                    self.canvas.config(cursor="fleur")
+                except tk.TclError:
+                    pass
+                return
+
+            # 2. Click on a wire line (not at a device, not on a handle):
+            #    select that wire so its waypoints become editable.
+            if self._device_at(ix, iy) is None:
+                w_idx = self._wire_at(ix, iy)
+                if w_idx is not None:
+                    route = self.wire_routes[w_idx]
+                    self._select_wire_in_listbox(w_idx)
+                    # If wire has an associated device, also select that device.
+                    did = route.get("device_id")
+                    if did:
+                        dev = next((d for d in self.devices if d["id"] == did), None)
+                        if dev is not None:
+                            self.selected_device = dev
+                    self._redraw()
+                    self.status_label.config(
+                        text=f"Wire selected ({len(route['points'])} pts, "
+                             f"{self._format_length(route.get('length_in') or 0)}). "
+                             "Drag any interior handle to reshape.")
+                    return
+
             dev = self._device_at(ix, iy)
             if dev is not None:
-                self.selected_device = dev
+                # If the clicked device is in a multi-selection, drag the
+                # whole group as a unit. Otherwise click resets to single.
+                clicked_in_multi = (
+                    len(self.selected_devices) > 1
+                    and any(d["id"] == dev["id"] for d in self.selected_devices)
+                )
+                if not clicked_in_multi:
+                    self.selected_device = dev
+                else:
+                    # Snapshot every selected device's starting position
+                    self._multi_drag_starts = {
+                        d["id"]: (d["x"], d["y"]) for d in self.selected_devices
+                    }
                 self.dragging_device = dev
                 self._drag_start_pos = (dev["x"], dev["y"])
                 dx, dy = self._drawio_to_img(dev["x"], dev["y"])
@@ -2091,55 +4024,340 @@ class CameraWireTool:
                     )
                 self._redraw()
                 return
-            self.selected_device = None
-            self.dragging_device = None
-            self._update_status()
-            self._redraw()
+            # Empty-canvas click in Move mode: arm a potential lasso. We
+            # don't clear the selection yet — that happens on release if
+            # the user didn't drag (treating it as a real "click on empty"
+            # gesture). Shift held = ADD to selection; Ctrl held would
+            # otherwise have already entered the pan-or-select branch.
+            self._lasso = {
+                "start": (event.x, event.y),
+                "current": (event.x, event.y),
+                "shift": bool(event.state & 0x0001),
+                "moved": False,
+            }
             return
 
         if self.mode == Mode.WIRE:
+            # First click in Wire mode: if it lands on a device, auto-anchor
+            # there (so you don't have to switch to Move first to "select"
+            # a source). The wire's device_id will inherit from selected_device.
+            if not self.current_wire_points:
+                hit_dev = self._device_at(ix, iy)
+                if hit_dev is not None:
+                    self.selected_device = hit_dev
+                    cx_dev, cy_dev = self._drawio_to_img(
+                        hit_dev["x"] + hit_dev["w"] / 2,
+                        hit_dev["y"] + hit_dev["h"] / 2,
+                    )
+                    self.current_wire_points.append((cx_dev, cy_dev))
+                    self._wire_snap = None
+                    self._redraw()
+                    info = self.symbol_types.get(hit_dev["type"], {})
+                    self.status_label.config(
+                        text=f"Wire from {hit_dev['id']} ({info.get('label','?')}) "
+                             f"— click route points, right-click to finish.")
+                    return
+            # Subsequent clicks: snap if motion handler found a target,
+            # otherwise place at raw cursor.
+            self._shift_held = bool(event.state & 0x0001)
+            snap = self._wire_snap_target(ix, iy)
+            if snap is not None:
+                ix, iy, _ = snap
             self.current_wire_points.append((ix, iy))
+            self._wire_snap = None
             self._redraw()
             if len(self.current_wire_points) == 1:
                 self.status_label.config(
-                    text="Wire: click to add points, right-click to finish route",
+                    text="Wire: click to add points, right-click to finish. "
+                         "Shift = orthogonal lock; cursor snaps to nearby points.",
                 )
 
     def _on_left_drag(self, event) -> None:
         if (event.state & 0x4) or self._space_pan or self.pan_start is not None:
             self._on_pan_move(event); return
+
+        # Lasso (box) selection — drag past threshold from empty-canvas click
+        if self._lasso is not None:
+            sx, sy = self._lasso["start"]
+            if not self._lasso["moved"]:
+                if abs(event.x - sx) + abs(event.y - sy) < 5:
+                    return
+                self._lasso["moved"] = True
+            self._lasso["current"] = (event.x, event.y)
+            self.canvas.delete("lasso")
+            x0, y0 = sx, sy
+            x1, y1 = event.x, event.y
+            self.canvas.create_rectangle(
+                x0, y0, x1, y1,
+                outline="#7FCDFF", width=1, dash=(4, 3),
+                tags="lasso",
+            )
+            self.canvas.create_rectangle(
+                x0, y0, x1, y1,
+                fill="#7FCDFF", outline="",
+                stipple="gray12",   # very subtle blue tint
+                tags="lasso",
+            )
+            return
+
+        # FOV rotation: cursor position relative to camera apex sets azimuth
+        if self._rotating_fov is not None:
+            dev = self._rotating_fov["device"]
+            apex_cx, apex_cy = self._rotating_fov["apex_canvas"]
+            dx = event.x - apex_cx
+            dy = event.y - apex_cy
+            if dx == 0 and dy == 0:
+                return
+            # Angle in our coords: 0° = up (-y), increasing clockwise
+            angle_rad = math.atan2(dx, -dy)
+            az = (math.degrees(angle_rad) + 360) % 360
+            # Snap to 5° increments unless Shift held (free)
+            if not (event.state & 0x0001):
+                az = round(az / 5) * 5
+            dev["fov"]["azimuth_deg"] = az
+            self._schedule_redraw()
+            return
+
+        # Legend repositioning
+        if self._dragging_legend is not None:
+            ix, iy = self._canvas_to_img(event.x, event.y)
+            cur_drawio = self._img_to_drawio(ix, iy)
+            click_drawio = self._dragging_legend["click_drawio"]
+            start_x, start_y = self._dragging_legend["start_drawio"]
+            self.legend_box["x"] = start_x + (cur_drawio[0] - click_drawio[0])
+            self.legend_box["y"] = start_y + (cur_drawio[1] - click_drawio[1])
+            self._schedule_redraw()
+            return
+
+        if self._dragging_waypoint is not None:
+            route, pidx, _old = self._dragging_waypoint
+            ix, iy = self._canvas_to_img(event.x, event.y)
+            # Snap-to-points / shift-ortho while dragging — reuse the
+            # same machinery as wire-drawing.
+            self._shift_held = bool(event.state & 0x0001)
+            # Temporarily expose previous-and-next waypoint as the
+            # "anchors" so shift-orthogonal works against the prior point.
+            saved = self.current_wire_points
+            try:
+                self.current_wire_points = [route["points"][max(0, pidx - 1)]]
+                snap = self._wire_snap_target_drag(ix, iy, route, pidx)
+            finally:
+                self.current_wire_points = saved
+            if snap is not None:
+                ix, iy, _kind = snap
+            pts = list(route["points"])
+            pts[pidx] = (ix, iy)
+            route["points"] = pts
+            route["length_px"] = self._calc_wire_length(pts)
+            sf = self.scale_factor
+            route["length_in"] = (route["length_px"] * sf) if sf else None
+
+            # Auto-pan when the drag is near the canvas edge so the user
+            # can drag a waypoint anywhere without releasing.
+            self._maybe_autopan(event)
+            self._schedule_redraw()
+            return
+
         if self.dragging_device is not None:
             ix, iy = self._canvas_to_img(event.x, event.y)
             new_ix = ix - self.drag_offset[0]
             new_iy = iy - self.drag_offset[1]
             new_dx, new_dy = self._img_to_drawio(new_ix, new_iy)
-            self.dragging_device["x"] = new_dx
-            self.dragging_device["y"] = new_dy
+            # Snap to alignment grid (when shown). Snap on the device's
+            # CENTER, not its top-left, so drops feel correct.
+            if self._show_grid.get() and self.scale_factor:
+                # Same step as _draw_grid_overlay: 5 ft / 1 m major grid
+                unit = self.unit_var.get()
+                step_in = (self._IN_PER_M if unit in ("meters", "cm", "m-cm")
+                           else 12 * 5)   # 1 m or 5 ft
+                step_px = step_in / self.scale_factor      # image pixels per step
+                step_d = step_px / self.dx_scale            # drawio units per step
+                w_d = self.dragging_device["w"]
+                h_d = self.dragging_device["h"]
+                center_dx = new_dx + w_d / 2
+                center_dy = new_dy + h_d / 2
+                # Snap center to nearest grid point
+                snap_cx = round(center_dx / step_d) * step_d
+                snap_cy = round(center_dy / step_d) * step_d
+                new_dx = snap_cx - w_d / 2
+                new_dy = snap_cy - h_d / 2
+            # If we're in a multi-device drag, move every selected device by
+            # the same delta from its starting position.
+            if self._multi_drag_starts and self.dragging_device["id"] in self._multi_drag_starts:
+                anchor_old = self._multi_drag_starts[self.dragging_device["id"]]
+                delta_x = new_dx - anchor_old[0]
+                delta_y = new_dy - anchor_old[1]
+                ids_to_starts = self._multi_drag_starts
+                for d in self.devices:
+                    if d["id"] in ids_to_starts:
+                        ox, oy = ids_to_starts[d["id"]]
+                        d["x"] = ox + delta_x
+                        d["y"] = oy + delta_y
+            else:
+                self.dragging_device["x"] = new_dx
+                self.dragging_device["y"] = new_dy
             self._schedule_redraw()
 
     def _on_left_release(self, event) -> None:
         if self.pan_start is not None:
             self._on_pan_end(event); return
+
+        if self._lasso is not None:
+            self.canvas.delete("lasso")
+            if self._lasso["moved"]:
+                # Real lasso drag — pick every device whose center sits
+                # inside the rectangle (image-coord box).
+                sx, sy = self._lasso["start"]
+                ex, ey = self._lasso["current"]
+                ix0, iy0 = self._canvas_to_img(min(sx, ex), min(sy, ey))
+                ix1, iy1 = self._canvas_to_img(max(sx, ex), max(sy, ey))
+                hits = []
+                for d in self.devices:
+                    cx_img = (d["x"] + d["w"]/2) * self.dx_scale
+                    cy_img = (d["y"] + d["h"]/2) * self.dy_scale
+                    if ix0 <= cx_img <= ix1 and iy0 <= cy_img <= iy1:
+                        hits.append(d)
+                if self._lasso["shift"]:
+                    # Shift-drag: ADD to existing selection
+                    for d in hits:
+                        if not any(s["id"] == d["id"] for s in self.selected_devices):
+                            self.selected_devices.append(d)
+                else:
+                    self.selected_devices = hits
+                self._primary_selected = (hits[-1] if hits
+                                           else self._primary_selected)
+                if hits:
+                    self._flash_status(
+                        f"Lasso selected {len(hits)} device(s).",
+                        ttl_ms=2500)
+                else:
+                    self._flash_status("Lasso: nothing inside the box.",
+                                        ttl_ms=2000)
+            else:
+                # Plain click on empty canvas — clear selection (legacy
+                # behavior preserved).
+                self.selected_device = None
+                self.dragging_device = None
+            self._lasso = None
+            self._update_status()
+            self._redraw()
+            return
+
+        if self._rotating_fov is not None:
+            dev = self._rotating_fov["device"]
+            old_az = self._rotating_fov["old_az"]
+            new_az = dev["fov"].get("azimuth_deg", 0)
+            if abs(old_az - new_az) > 0.1:
+                self._mark_dirty()
+                dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                compass = dirs[round(new_az / 45) % 8]
+                self._flash_status(
+                    f"Camera {dev['id']} → {int(new_az)}° ({compass})",
+                    ttl_ms=2000,
+                )
+            self._rotating_fov = None
+            self._refresh_mode_ui()  # restore cursor
+            self._redraw()
+            return
+
+        if self._dragging_legend is not None:
+            self._dragging_legend = None
+            self._mark_dirty()
+            self._refresh_mode_ui()  # restore default cursor
+            self._flash_status("Legend repositioned. Save to keep this layout.",
+                                ttl_ms=3000)
+            self._redraw()
+            return
+
+        # Waypoint drag finished — push undoable command if it actually moved
+        if self._dragging_waypoint is not None:
+            route, pidx, old_xy = self._dragging_waypoint
+            new_xy = route["points"][pidx]
+            if (abs(old_xy[0] - new_xy[0]) > 0.5
+                    or abs(old_xy[1] - new_xy[1]) > 0.5):
+                cmd = MoveWaypointCmd(self, route, pidx, old_xy, new_xy)
+                self.history.append(cmd)
+                if len(self.history) > C.HISTORY_LIMIT:
+                    self.history.pop(0)
+                self.future.clear()
+                self._mark_dirty()
+                self._update_undo_redo_state()
+                self._refresh_wire_list()
+                self._refresh_device_list()
+                self._refresh_bom_tab()
+                self.status_label.config(
+                    text=f"Wire reshaped — new length "
+                         f"{self._format_length(route.get('length_in') or 0)}.")
+                # Endpoint dropped on a different device → offer reassign.
+                # pidx 0 = source endpoint, pidx == last = destination.
+                is_endpoint = (pidx == 0 or pidx == len(route["points"]) - 1)
+                if is_endpoint:
+                    landed_dev = self._device_at(*new_xy)
+                    cur_did = route.get("device_id")
+                    if (landed_dev is not None
+                            and landed_dev["id"] != cur_did
+                            and pidx == 0):
+                        # source-endpoint moved onto a different device
+                        if messagebox.askyesno(
+                            "Reassign wire?",
+                            f"This wire's source endpoint landed on "
+                            f"{landed_dev['id']} ({landed_dev['type']}).\n\n"
+                            f"Reassociate the wire from "
+                            f"{cur_did or '(unassigned)'} to "
+                            f"{landed_dev['id']}?"):
+                            route["device_id"] = landed_dev["id"]
+                            self._refresh_wire_list()
+                            self._refresh_device_list()
+                            self._refresh_bom_tab()
+                            self._redraw()
+                            self._flash_status(
+                                f"Wire reassigned to {landed_dev['id']}.")
+            self._dragging_waypoint = None
+            self._refresh_mode_ui()  # restore cursor
+            self._redraw()
+            return
+
         if self.dragging_device is not None:
-            # Record undoable command if device actually moved
+            # Record undoable command if anything actually moved
             if self._drag_start_pos is not None:
-                old_x, old_y = self._drag_start_pos
-                if (abs(old_x - self.dragging_device["x"]) > 0.01
-                        or abs(old_y - self.dragging_device["y"]) > 0.01):
-                    cmd = MoveDeviceCmd(
-                        self, self.dragging_device,
-                        old_x, old_y,
-                        self.dragging_device["x"], self.dragging_device["y"],
-                    )
-                    # We've already mutated; record without re-doing
-                    self.history.append(cmd)
-                    if len(self.history) > C.HISTORY_LIMIT:
-                        self.history.pop(0)
-                    self.future.clear()
-                    self._mark_dirty()
-                    self._update_undo_redo_state()
+                if self._multi_drag_starts and len(self._multi_drag_starts) > 1:
+                    # Batch move: gather (id, old, new) for everything that moved
+                    deltas = []
+                    for d in self.devices:
+                        if d["id"] in self._multi_drag_starts:
+                            ox, oy = self._multi_drag_starts[d["id"]]
+                            if (abs(ox - d["x"]) > 0.01
+                                    or abs(oy - d["y"]) > 0.01):
+                                deltas.append((d["id"], (ox, oy),
+                                                (d["x"], d["y"])))
+                    if deltas:
+                        cmd = MoveDevicesCmd(self, deltas)
+                        self.history.append(cmd)
+                        if len(self.history) > C.HISTORY_LIMIT:
+                            self.history.pop(0)
+                        self.future.clear()
+                        self._mark_dirty()
+                        self._update_undo_redo_state()
+                        self._flash_status(
+                            f"Moved {len(deltas)} devices.", ttl_ms=2500)
+                else:
+                    old_x, old_y = self._drag_start_pos
+                    if (abs(old_x - self.dragging_device["x"]) > 0.01
+                            or abs(old_y - self.dragging_device["y"]) > 0.01):
+                        cmd = MoveDeviceCmd(
+                            self, self.dragging_device,
+                            old_x, old_y,
+                            self.dragging_device["x"], self.dragging_device["y"],
+                        )
+                        self.history.append(cmd)
+                        if len(self.history) > C.HISTORY_LIMIT:
+                            self.history.pop(0)
+                        self.future.clear()
+                        self._mark_dirty()
+                        self._update_undo_redo_state()
             self._drag_start_pos = None
             self.dragging_device = None
+            self._multi_drag_starts = {}
             self._redraw()
 
     def _on_motion(self, event) -> None:
@@ -2153,24 +4371,210 @@ class CameraWireTool:
         else:
             self.cursor_label.config(text=f"{int(ix):>5d}, {int(iy):>5d} px")
 
+        # Hover info: show a small popup with device ID + label when the
+        # cursor is over a device (Move mode only, otherwise it competes
+        # with wire-snap rings or placement cursor).
+        # Throttled: at most one update every 33ms (~30fps) to avoid
+        # spamming canvas redraws when the user moves the cursor fast.
+        if self.mode == Mode.MOVE:
+            import time as _t
+            now = _t.monotonic()
+            last = getattr(self, "_hover_last_ts", 0.0)
+            if now - last < 0.033:
+                return
+            self._hover_last_ts = now
+            # Wire-line hover (only when not over a device, since devices win)
+            wire_under = None
+            dev_under = self._device_at(ix, iy)
+            if dev_under is None:
+                w_idx = self._wire_at(ix, iy)
+                if w_idx is not None:
+                    wire_under = self.wire_routes[w_idx]
+            if wire_under is not None:
+                # Show wire info popup
+                self.canvas.delete("hover_info")
+                self._hover_device = None
+                did = wire_under.get("device_id") or "—"
+                cable = wire_under.get("cable_type") or "?"
+                length = (self._format_length(wire_under.get("length_in") or 0)
+                          if wire_under.get("length_in") is not None
+                          else f"{wire_under['length_px']:.0f}px")
+                segs = len(wire_under["points"]) - 1
+                lines = [f"  Wire → {did}  ",
+                         f"  {length}, {segs} segments  ",
+                         f"  Cable: {cable}  "]
+                cw = self.canvas.winfo_width() or 800
+                ch = self.canvas.winfo_height() or 600
+                box_w = max(180, 8 * max(len(s) for s in lines))
+                box_h = 22 * len(lines)
+                px = event.x + 18
+                py = event.y + 18
+                if px + box_w > cw: px = event.x - 18 - box_w
+                if py + box_h > ch: py = event.y - 18 - box_h
+                self.canvas.create_rectangle(
+                    px, py, px + box_w, py + box_h,
+                    fill="#1a2a1a", outline="#80FFC8", width=1,
+                    tags="hover_info",
+                )
+                self.canvas.create_text(
+                    px + 4, py + 4, text="\n".join(lines), anchor=tk.NW,
+                    fill="#FFFFFF", font=("Segoe UI", 9), tags="hover_info",
+                )
+                return
+            if dev_under is not self._hover_device:
+                self._hover_device = dev_under
+                self.canvas.delete("hover_info")
+                if dev_under is not None:
+                    info = self.symbol_types.get(dev_under["type"], {})
+                    label = info.get("label", dev_under["type"])
+                    n_wires = sum(1 for w in self.wire_routes
+                                  if w.get("device_id") == dev_under["id"])
+                    msg_lines = [f"  {dev_under['id']} — {dev_under['type']}  ",
+                                 f"  {label}  "]
+                    if n_wires:
+                        total_in = sum((w.get("length_in") or 0)
+                                        for w in self.wire_routes
+                                        if w.get("device_id") == dev_under["id"])
+                        msg_lines.append(
+                            f"  {n_wires} wire run(s), "
+                            f"{self._format_length(total_in)}  ")
+                    if info.get("is_run_point"):
+                        msg_lines.append("  [run point]  ")
+                    # FOV info if camera has it configured
+                    fov = dev_under.get("fov")
+                    if fov and info.get("is_camera"):
+                        try:
+                            cone = fov_mod.compute_fov(fov)
+                            d_ft = cone.distances_in.get("D", 0) / 12
+                            i_ft = cone.distances_in.get("I", 0) / 12
+                            msg_lines.append(
+                                f"  FOV: {cone.aov_h_deg:.0f}°  "
+                                f"detect {d_ft:.0f}ft  ID {i_ft:.0f}ft  "
+                            )
+                        except Exception:
+                            pass
+                    text = "\n".join(msg_lines)
+                    # Position the popup just below+right of the cursor
+                    # (clamped to canvas so it doesn't fall off the edge)
+                    cw = self.canvas.winfo_width() or 800
+                    ch = self.canvas.winfo_height() or 600
+                    box_w, box_h = 14 * 26, 22 * len(msg_lines)
+                    px = event.x + 18
+                    py = event.y + 18
+                    if px + box_w > cw: px = event.x - 18 - box_w
+                    if py + box_h > ch: py = event.y - 18 - box_h
+                    self.canvas.create_rectangle(
+                        px, py, px + box_w, py + box_h,
+                        fill="#1a1a2e", outline="#7fc4ff", width=1,
+                        tags="hover_info",
+                    )
+                    self.canvas.create_text(
+                        px + 4, py + 4, text=text, anchor=tk.NW,
+                        fill="#FFFFFF", font=("Segoe UI", 9),
+                        tags="hover_info",
+                    )
+
+        # Calibration rubber-band: after the first cal point is set, draw
+        # a yellow preview line from it to the cursor + the running pixel
+        # distance, so the user can see what they're about to commit to.
+        if self.mode == Mode.CALIBRATE and len(self.cal_points) == 1:
+            self.canvas.delete("cal_preview")
+            cx0, cy0 = self._img_to_canvas(*self.cal_points[0])
+            self.canvas.create_line(cx0, cy0, event.x, event.y,
+                                    fill="#FFD060", width=2, dash=(6, 3),
+                                    tags="cal_preview")
+            ix2, iy2 = self._canvas_to_img(event.x, event.y)
+            dist_px = math.hypot(ix2 - self.cal_points[0][0],
+                                 iy2 - self.cal_points[0][1])
+            mid_x = (cx0 + event.x) / 2
+            mid_y = (cy0 + event.y) / 2
+            text = f"{dist_px:.0f} px"
+            box_w = 8 * len(text) + 12
+            self.canvas.create_rectangle(
+                mid_x - box_w/2, mid_y - 24,
+                mid_x + box_w/2, mid_y - 6,
+                fill="#332a08", outline="#FFD060", width=1,
+                tags="cal_preview",
+            )
+            self.canvas.create_text(
+                mid_x, mid_y - 15, text=text, fill="#FFD060",
+                font=("Segoe UI", 9, "bold"), tags="cal_preview",
+            )
+
         if self.mode == Mode.WIRE and self.current_wire_points:
+            # event.state & 0x1 is the Shift modifier — read it live so we
+            # don't need keyboard focus for the orthogonal-lock to work.
+            self._shift_held = bool(event.state & 0x0001)
             self.canvas.delete("wire_preview")
+            self.canvas.delete("wire_snap")
             last = self.current_wire_points[-1]
+            ix_raw, iy_raw = self._canvas_to_img(event.x, event.y)
+            snap = self._wire_snap_target(ix_raw, iy_raw)
+            if snap is not None:
+                self._wire_snap = snap
+                ix2, iy2, kind = snap
+                # Highlight the snap target — distinct color per snap type
+                # so the user knows at a glance what they'll lock onto.
+                scx, scy = self._img_to_canvas(ix2, iy2)
+                ring_color = {
+                    "device":   "#FFD060",   # gold — snapping to a device
+                    "endpoint": "#7FCDFF",   # sky blue — another wire's end
+                    "self":     "#FF80B0",   # pink — close-the-loop on self
+                    "ortho":    "#80FFC8",   # green — Shift-lock orthogonal
+                }.get(kind, "#FFD060")
+                self.canvas.create_oval(scx-9, scy-9, scx+9, scy+9,
+                                        outline=ring_color, width=2,
+                                        tags="wire_snap")
+                self.canvas.create_oval(scx-2, scy-2, scx+2, scy+2,
+                                        fill=ring_color, outline="",
+                                        tags="wire_snap")
+                # Tiny tag label so user knows what snap they're hitting
+                kind_label = {
+                    "device":   "device",
+                    "endpoint": "wire end",
+                    "self":     "this wire",
+                    "ortho":    "orthogonal",
+                }.get(kind, kind)
+                self.canvas.create_text(
+                    scx + 14, scy - 14, text=kind_label, anchor=tk.W,
+                    fill=ring_color, font=("Segoe UI", 8, "italic"),
+                    tags="wire_snap",
+                )
+            else:
+                self._wire_snap = None
+                ix2, iy2 = ix_raw, iy_raw
+
+            # Preview line goes from last placed point → snapped target
             sx, sy = self._img_to_canvas(*last)
-            self.canvas.create_line(sx, sy, event.x, event.y,
+            ex, ey = self._img_to_canvas(ix2, iy2)
+            self.canvas.create_line(sx, sy, ex, ey,
                                     fill="#00BFFF", width=2, dash=(4, 4),
                                     tags="wire_preview")
-            ix2, iy2 = self._canvas_to_img(event.x, event.y)
             all_pts = self.current_wire_points + [(ix2, iy2)]
             total_px = self._calc_wire_length(all_pts)
+            # Floating "running total" label near the cursor — much more
+            # visible than the tiny status-bar text alone.
+            running_str = (self._format_length(total_px * self.scale_factor)
+                           if self.scale_factor else f"{total_px:.0f} px")
+            self.canvas.create_rectangle(
+                ex + 14, ey - 22, ex + 14 + 8 * len(running_str) + 6, ey - 4,
+                fill="#202060", outline="#7fc4ff", width=1,
+                tags="wire_preview",
+            )
+            self.canvas.create_text(
+                ex + 18, ey - 14, text=running_str, anchor=tk.W,
+                fill="#FFFFFF", font=("Segoe UI", 10, "bold"),
+                tags="wire_preview",
+            )
+            shift_hint = "  (Shift = lock 0/45/90°)" if not self._shift_held else "  [SHIFT-LOCK]"
             if self.scale_factor:
                 total_in = total_px * self.scale_factor
                 self.status_label.config(
-                    text=f"Wire route: {self._format_length(total_in)}  |  Right-click to finish",
+                    text=f"Wire route: {self._format_length(total_in)}  |  Right-click to finish{shift_hint}",
                 )
             else:
                 self.status_label.config(
-                    text=f"Wire route: {total_px:.0f}px  |  Right-click to finish",
+                    text=f"Wire route: {total_px:.0f}px  |  Right-click to finish{shift_hint}",
                 )
 
     def _on_right_click(self, _event) -> None:
@@ -2183,14 +4587,39 @@ class CameraWireTool:
         if len(self.current_wire_points) < 2:
             self._cancel_current(); return
         px_len = self._calc_wire_length(self.current_wire_points)
+        # Sanity: catch accidental fat-finger 2-click that produces a near-
+        # zero wire (often happens when right-clicking too quickly).
+        too_short = (px_len < 5
+                     if not self.scale_factor
+                     else (px_len * self.scale_factor) < 1.0)  # < 1 inch real
+        if too_short:
+            if not messagebox.askyesno(
+                "Very short wire",
+                f"This wire is only "
+                f"{(self._format_length(px_len * self.scale_factor) if self.scale_factor else f'{px_len:.0f}px')}"
+                f" — looks like an accidental click.\n\nKeep it anyway?"):
+                self._cancel_current()
+                return
         real_in = px_len * self.scale_factor if self.scale_factor else None
         device_id = self.selected_device["id"] if self.selected_device else None
+        # Pick a cable. Source is the selected device. Try to detect the
+        # destination from the last waypoint — if it lands on a device,
+        # apply the source-vs-runpoint rule so cabling is consistent with
+        # auto-routed wires.
+        end_dev = None
+        if self.current_wire_points:
+            ex, ey = self.current_wire_points[-1]
+            end_dev = self._device_at(ex, ey)
+        cable = (self._resolve_cable_for_pair(self.selected_device, end_dev)
+                 if self.selected_device is not None else None)
         route = {
             "points": list(self.current_wire_points),
             "length_px": px_len,
             "length_in": real_in,
             "device_id": device_id,
         }
+        if cable:
+            route["cable_type"] = cable
         self._execute(AddWireCmd(self, route))
         self.current_wire_points = []
         self._refresh_wire_list()
@@ -2199,16 +4628,46 @@ class CameraWireTool:
         dev_label = f" for {device_id}" if device_id else " (unassigned)"
         self.status_label.config(text=f"Wire route saved{dev_label}. Click to start a new one.")
 
-    def _cancel_current(self) -> None:
+    def _reset_action_state(self) -> None:
+        """Pure cleanup: clear in-progress wire / cal / anchor state and
+        any preview canvas items. DOES NOT change mode (so it's safe to
+        call from _set_mode without recursion)."""
         self.current_wire_points = []
-        if self.mode in (Mode.PLACE_DEVICE, Mode.CALIBRATE, Mode.AUTO_ROUTE):
-            self._set_mode(Mode.MOVE)
-        self.canvas.delete("wire_preview")
-        self.canvas.delete("wip_wire")
-        self.canvas.delete("anchor")
+        try:
+            self.canvas.delete("wire_preview")
+            self.canvas.delete("wip_wire")
+            self.canvas.delete("anchor")
+            self.canvas.delete("cal_preview")
+        except tk.TclError:
+            pass
         self.cal_points = []
-        self._auto_route_first = None
         self._floor_anchors_picking = None
+
+    def _cancel_current(self) -> None:
+        """User-initiated cancel (Esc / right-click). Reset state AND
+        return to MOVE if we're currently in an action mode. If already
+        in Move mode and nothing's in progress, Esc clears the selection."""
+        was_acting = self.mode in (Mode.PLACE_DEVICE, Mode.CALIBRATE,
+                                    Mode.WIRE)
+        had_action_state = bool(self.current_wire_points or self.cal_points
+                                 or self._floor_anchors_picking)
+        self._reset_action_state()
+        if was_acting:
+            self.mode = Mode.MOVE
+            self.mode_var.set(self.mode.name)
+            self._refresh_mode_ui()
+        elif (self.mode == Mode.MOVE and not had_action_state
+              and (self.selected_devices or
+                   (hasattr(self, "wire_listbox") and self.wire_listbox.curselection()))):
+            # Nothing was in-progress — interpret Esc as "clear selection"
+            self.selected_device = None
+            try:
+                self.wire_listbox.selection_clear(0, tk.END)
+            except (tk.TclError, AttributeError):
+                pass
+            self._refresh_wire_list()
+            self._redraw()
+            self._flash_status("Selection cleared.", ttl_ms=2000)
         self._update_status()
 
     def _on_mousewheel(self, event) -> None:
@@ -2218,6 +4677,7 @@ class CameraWireTool:
         self.zoom = new_zoom
         self.offset_x = event.x - ix * self.zoom
         self.offset_y = event.y - iy * self.zoom
+        self._clamp_pan()
         self._schedule_redraw()
 
     def _zoom_button(self, direction: int) -> None:
@@ -2229,6 +4689,7 @@ class CameraWireTool:
         self.zoom = new_zoom
         self.offset_x = cw / 2 - ix * self.zoom
         self.offset_y = ch / 2 - iy * self.zoom
+        self._clamp_pan()
         self._redraw()
 
     def _on_pan_start(self, event) -> None:
@@ -2245,23 +4706,110 @@ class CameraWireTool:
 
     def _on_pan_end(self, _event) -> None:
         self.pan_start = None
+        self._clamp_pan()
         self._redraw()
 
+    def _clamp_pan(self) -> None:
+        """Stop the user from panning the floor plan entirely off-screen.
+        At least ~10% of the canvas dimension must still show map area."""
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        img_pw = self.img_w * self.zoom    # rendered width in canvas pixels
+        img_ph = self.img_h * self.zoom
+        margin_x = 0.10 * cw
+        margin_y = 0.10 * ch
+        # offset_x is the canvas-x where the image's (0,0) lands.
+        # We want:  margin_x  ≤  offset_x + img_pw   (right edge ≥ margin_x)
+        # And:      offset_x  ≤  cw - margin_x       (left edge ≤ canvas - margin)
+        self.offset_x = max(margin_x - img_pw,
+                             min(cw - margin_x, self.offset_x))
+        self.offset_y = max(margin_y - img_ph,
+                             min(ch - margin_y, self.offset_y))
+
+    # ------------------------------------------------------------ Ctrl+click multi-select
+    def _on_ctrl_press(self, event):
+        """Ctrl+left press — could become a click (toggle selection) or
+        a drag (pan). We don't decide yet; just record the start."""
+        self._ctrl_press_pos = (event.x, event.y)
+        self._ctrl_dragging = False
+
+    def _on_ctrl_motion(self, event):
+        if self._ctrl_press_pos is None:
+            return
+        if not self._ctrl_dragging:
+            px, py = self._ctrl_press_pos
+            if abs(event.x - px) + abs(event.y - py) > 5:
+                self._ctrl_dragging = True
+                self.pan_start = self._ctrl_press_pos
+        if self._ctrl_dragging and self.pan_start is not None:
+            self._on_pan_move(event)
+
+    def _on_ctrl_release(self, event):
+        if self._ctrl_dragging:
+            self._on_pan_end(event)
+        elif self._ctrl_press_pos is not None:
+            # Treat as a Ctrl+click → toggle device under cursor in selection
+            ix, iy = self._canvas_to_img(event.x, event.y)
+            dev = self._device_at(ix, iy)
+            if dev is not None:
+                self._toggle_device_selection(dev)
+                n = len(self.selected_devices)
+                self.status_label.config(
+                    text=f"{n} device(s) selected. "
+                         "Ctrl+click another to add/remove. "
+                         "Right-click or Del to delete all."
+                )
+                self._redraw()
+        self._ctrl_press_pos = None
+        self._ctrl_dragging = False
+
     def _on_delete_key(self, _event=None) -> None:
-        # Prefer wire if focused on wire list, otherwise selected device
+        # Prefer wires if any wire-list rows are selected (supports multi)
         if self.wire_listbox.curselection():
-            self._delete_selected_wire(); return
-        if self.selected_device is not None:
-            dev = self.selected_device
-            try:
-                idx = self.devices.index(dev)
-            except ValueError:
+            sels = list(self.wire_listbox.curselection())
+            if len(sels) >= 2:
+                self._delete_selected_wires_multi(sels)
+            else:
+                self._delete_selected_wire()
+            return
+        if self.selected_devices:
+            n = len(self.selected_devices)
+            label = (f"{n} devices" if n > 1
+                     else f"{self.selected_devices[0]['id']} "
+                          f"({self.selected_devices[0]['type']})")
+            if not messagebox.askyesno("Delete", f"Delete {label}?"):
                 return
-            if not messagebox.askyesno("Delete device", f"Delete {dev['id']} ({dev['type']})?"):
-                return
-            self.selected_device = None
-            self._execute(DeleteDeviceCmd(self, dev, idx))
+            for dev in list(self.selected_devices):
+                try:
+                    idx = self.devices.index(dev)
+                except ValueError:
+                    continue
+                self._execute(DeleteDeviceCmd(self, dev, idx))
+            self.selected_device = None  # clears multi too
             self._post_command_refresh()
+            return
+
+    def _delete_selected_wires_multi(self, list_indices) -> None:
+        """Bulk-delete every wire whose listbox row is in the selection."""
+        if not hasattr(self, "_wire_listbox_rows"):
+            return
+        routes_to_remove = []
+        for li in list_indices:
+            ridx = self._wire_index_for_listbox(li)
+            if ridx is None:
+                continue   # header rows
+            if 0 <= ridx < len(self.wire_routes):
+                routes_to_remove.append((ridx, self.wire_routes[ridx]))
+        if not routes_to_remove:
+            return
+        if not messagebox.askyesno(
+            "Delete", f"Delete {len(routes_to_remove)} wire run(s)?"):
+            return
+        # Issue DeleteWireCmd in reverse-index order so insert positions
+        # stay valid for undo.
+        for ridx, route in sorted(routes_to_remove, key=lambda x: -x[0]):
+            self._execute(DeleteWireCmd(self, ridx, route))
+        self._post_command_refresh()
 
     def _cycle_device(self, direction: int) -> None:
         if not self.devices:
@@ -2273,10 +4821,81 @@ class CameraWireTool:
         self._center_on_selected()
         self._redraw()
 
+    def _cycle_wire(self, direction: int) -> None:
+        """Shift+[ / Shift+] — pick the previous/next wire in the listbox."""
+        if not self.wire_routes:
+            return
+        sel = self.wire_listbox.curselection()
+        # Find the currently selected route index (skip header rows)
+        cur_route_idx = None
+        if sel and hasattr(self, "_wire_listbox_rows"):
+            row_val = self._wire_listbox_rows[sel[0]] if sel[0] < len(self._wire_listbox_rows) else None
+            cur_route_idx = row_val
+        nxt = (cur_route_idx + direction) if cur_route_idx is not None else 0
+        nxt = nxt % len(self.wire_routes)
+        self._select_wire_in_listbox(nxt)
+        # Center on its midpoint
+        r = self.wire_routes[nxt]
+        if r["points"]:
+            mid = r["points"][len(r["points"]) // 2]
+            cw = self.canvas.winfo_width() or 800
+            ch = self.canvas.winfo_height() or 600
+            self.offset_x = cw / 2 - mid[0] * self.zoom
+            self.offset_y = ch / 2 - mid[1] * self.zoom
+        self._redraw()
+        self._flash_status(f"Wire {nxt+1}/{len(self.wire_routes)} selected.",
+                            ttl_ms=2500)
+
+    def _kbd_zoom_to_selection(self, event=None) -> None:
+        """Z key — zoom and center the viewport so the current selection
+        fills most of the canvas. Works for a selected device or wire."""
+        if event is not None and self._is_text_focus(event):
+            return
+        sel_wire = self._selected_wire()
+        if sel_wire is not None:
+            xs = [p[0] for p in sel_wire["points"]]
+            ys = [p[1] for p in sel_wire["points"]]
+            self._zoom_to_image_bbox(min(xs), min(ys), max(xs), max(ys),
+                                      pad=80)
+            self.status_label.config(text=f"Zoomed to selected wire.")
+            return
+        if self.selected_devices:
+            xs0 = [d["x"] * self.dx_scale for d in self.selected_devices]
+            xs1 = [(d["x"] + d["w"]) * self.dx_scale for d in self.selected_devices]
+            ys0 = [d["y"] * self.dy_scale for d in self.selected_devices]
+            ys1 = [(d["y"] + d["h"]) * self.dy_scale for d in self.selected_devices]
+            self._zoom_to_image_bbox(min(xs0), min(ys0), max(xs1), max(ys1),
+                                      pad=120)
+            n = len(self.selected_devices)
+            self.status_label.config(
+                text=f"Zoomed to {n} selected device(s).")
+            return
+        self.status_label.config(
+            text="Nothing selected — click a device or wire first, then press Z.")
+
+    def _zoom_to_image_bbox(self, ix0, iy0, ix1, iy1, pad: float = 60) -> None:
+        """Set zoom + offset so the given image-coord rectangle fills most
+        of the visible canvas, with a margin of `pad` canvas-pixels."""
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        bw = max(1.0, ix1 - ix0)
+        bh = max(1.0, iy1 - iy0)
+        zx = max(0.0, cw - 2 * pad) / bw
+        zy = max(0.0, ch - 2 * pad) / bh
+        self.zoom = max(C.ZOOM_MIN, min(C.ZOOM_MAX, min(zx, zy)))
+        cx_img = (ix0 + ix1) / 2
+        cy_img = (iy0 + iy1) / 2
+        self.offset_x = cw / 2 - cx_img * self.zoom
+        self.offset_y = ch / 2 - cy_img * self.zoom
+        self._redraw()
+
     def _center_on_selected(self) -> None:
         sel_idx = self.dev_listbox.curselection()
-        if sel_idx and hasattr(self, "_filtered_devices") and sel_idx[0] < len(self._filtered_devices):
-            self.selected_device = self._filtered_devices[sel_idx[0]]
+        if (sel_idx and hasattr(self, "_dev_listbox_rows")
+                and sel_idx[0] < len(self._dev_listbox_rows)):
+            row = self._dev_listbox_rows[sel_idx[0]]
+            if row is not None:   # not a group header
+                self.selected_device = row
         if self.selected_device is None:
             return
         d = self.selected_device
@@ -2290,25 +4909,76 @@ class CameraWireTool:
     # ============================================================ List management
     def _refresh_wire_list(self) -> None:
         self.wire_listbox.delete(0, tk.END)
-        total = 0.0
         query = (
             self._wire_search_var.get() if hasattr(self, "_wire_search_var") else ""
         ).lower().strip()
+        # _filtered_wire_indices: actual indices into wire_routes for items
+        # that pass the filter. _wire_listbox_rows: parallel list mapping
+        # listbox row → wire-routes index OR None (header / placeholder).
         self._filtered_wire_indices: list[int] = []
-        for i, route in enumerate(self.wire_routes):
-            did = route.get("device_id") or "---"
-            if query and query not in did.lower():
-                continue
-            self._filtered_wire_indices.append(i)
-            if route["length_in"] is not None:
-                label = self._format_length(route["length_in"])
-                total += route["length_in"]
-            else:
-                label = f'{route["length_px"]:.0f}px'
-            n_segs = len(route["points"]) - 1
-            self.wire_listbox.insert(tk.END, f"  {did:6s} | {n_segs} seg | {label}")
+        self._wire_listbox_rows: list[int | None] = []
 
-        # All routes (regardless of filter) for total
+        # Group filtered wires by device id (None = unassigned)
+        groups: dict[str | None, list[tuple[int, dict]]] = {}
+        for i, route in enumerate(self.wire_routes):
+            did = route.get("device_id")
+            dev = next((d for d in self.devices if d["id"] == did), None) if did else None
+            dev_type = dev["type"] if dev else ""
+            sym_info = self.symbol_types.get(dev_type, {}) if dev_type else {}
+            sym_label = sym_info.get("label", dev_type or "")
+            cable = route.get("cable_type", "")
+            search_blob = f"{did or ''} {dev_type} {sym_label} {cable}".lower()
+            if query and query not in search_blob:
+                continue
+            groups.setdefault(did, []).append((i, route))
+
+        # Render groups, with None (unassigned) last
+        ordered_keys = (
+            sorted([k for k in groups if k is not None]) +
+            ([None] if None in groups else [])
+        )
+        for did in ordered_keys:
+            entries = groups[did]
+            if did is None:
+                header = f"── unassigned  ({len(entries)} wire(s)) ──"
+            else:
+                dev = next((d for d in self.devices if d["id"] == did), None)
+                dev_type = dev["type"] if dev else "—"
+                sym_label = (self.symbol_types.get(dev_type, {})
+                             .get("label", dev_type)) if dev else ""
+                tot_in = sum((r.get("length_in") or 0) for _, r in entries)
+                tot_str = (self._format_length(tot_in) if tot_in
+                           else f"{int(sum(r['length_px'] for _, r in entries))} px")
+                header = (f"── {did}  {dev_type:5s}  {sym_label[:24]}"
+                          f"  ({len(entries)} wire(s), {tot_str}) ──")
+            self.wire_listbox.insert(tk.END, header)
+            self._wire_listbox_rows.append(None)
+            self.wire_listbox.itemconfig(self.wire_listbox.size() - 1,
+                                          foreground="#7fc4ff",
+                                          selectbackground="#222244",
+                                          selectforeground="#7fc4ff")
+            for ri, route in entries:
+                self._filtered_wire_indices.append(ri)
+                if route["length_in"] is not None:
+                    length_str = self._format_length(route["length_in"])
+                else:
+                    length_str = f'{route["length_px"]:.0f}px'
+                n_segs = len(route["points"]) - 1
+                cable = route.get("cable_type", "")
+                row = (f'   {n_segs}seg  {length_str}'
+                       + (f"  ({cable})" if cable else ""))
+                self.wire_listbox.insert(tk.END, row)
+                self._wire_listbox_rows.append(ri)
+
+        if not self._filtered_wire_indices:
+            placeholder = ("(no wires yet — right-click any device on the map → "
+                           "Draw wire from here)" if not self.wire_routes
+                           else "(no matches for current search)")
+            self.wire_listbox.insert(tk.END, placeholder)
+            self._wire_listbox_rows.append(None)
+            self.wire_listbox.itemconfig(0, foreground="#888888")
+
+        # Side-panel total (Wires tab footer)
         if self.scale_factor:
             grand_total_in = sum((r.get("length_in") or 0) for r in self.wire_routes)
             total_text = f"Total Wire: {self._format_length(grand_total_in)}"
@@ -2318,37 +4988,169 @@ class CameraWireTool:
         else:
             total_text = "Total Wire: --"
         self.total_label.config(text=total_text)
-        self.total_toolbar_label.config(text=total_text)
+
+        # Toolbar metrics: device counts + total wire + total cost.
+        n_dev = len(self.devices)
+        n_cam = sum(1 for d in self.devices
+                    if self.symbol_types.get(d["type"], {}).get("is_camera"))
+        n_wire = len(self.wire_routes)
+        cur = self._bom_currency_var.get() or "$"
+        try:
+            report = self._build_bom_report()
+            cost_str = f"  •  {cur}{report.grand_total:,.2f}"
+        except Exception:
+            cost_str = ""
+        wire_str = (self._format_length(grand_total_in)
+                    if self.scale_factor and self.wire_routes
+                    else (f"{int(sum(r['length_px'] for r in self.wire_routes))}px"
+                          if self.wire_routes else "—"))
+        self.total_toolbar_label.config(
+            text=f"Devices: {n_dev}  ·  Cameras: {n_cam}  ·  "
+                 f"Wires: {n_wire}  ·  {wire_str}{cost_str}",
+        )
 
     def _on_dev_select(self, _event) -> None:
         sel = self.dev_listbox.curselection()
-        if sel and hasattr(self, "_filtered_devices") and sel[0] < len(self._filtered_devices):
-            self.selected_device = self._filtered_devices[sel[0]]
-            if self.mode == Mode.WIRE:
-                dev = self.selected_device
-                info = self.symbol_types.get(dev["type"], {})
-                self.status_label.config(
-                    text=f'Wire Mode for {dev["id"]} ({dev["type"]} - {info.get("label", "")}) — '
-                         f'click to route, right-click to finish',
-                )
-            self._redraw()
+        if not sel or not hasattr(self, "_dev_listbox_rows"):
+            return
+        # Header rows map to None in _dev_listbox_rows — skip them so a
+        # user clicking a group header doesn't clear their selection.
+        chosen = [self._dev_listbox_rows[i] for i in sel
+                  if i < len(self._dev_listbox_rows)
+                  and self._dev_listbox_rows[i] is not None]
+        if not chosen:
+            return
+        self.selected_devices = chosen
+        # Primary = the row that was selected most recently (Tk reports
+        # all selected rows; the last one in the iteration is fine for
+        # our purposes since user can re-click to set a specific primary).
+        self._primary_selected = chosen[-1]
+        if self.mode == Mode.WIRE:
+            dev = self._primary_selected
+            info = self.symbol_types.get(dev["type"], {})
+            self.status_label.config(
+                text=f'Wire Mode for {dev["id"]} ({dev["type"]} - {info.get("label", "")}) — '
+                     f'click to route, right-click to finish',
+            )
+        elif len(chosen) > 1:
+            self.status_label.config(
+                text=f"{len(chosen)} devices selected. "
+                     "Right-click or press Del to delete all.")
+        self._redraw()
 
     def _on_wire_select(self, _event) -> None:
         self._redraw()
 
     def _on_unit_change(self) -> None:
+        # Update scale-label format
+        if hasattr(self, "scale_label"):
+            self.scale_label.config(text=self._scale_label_text())
         self._refresh_wire_list()
         self._refresh_device_list()
+        self._refresh_bom_tab()
         self._redraw()
         self._mark_dirty()
+        self._persist_user_settings()
+
+    def _persist_user_settings(self) -> None:
+        """Write current UI prefs (unit, currency, waste, tax) to the
+        per-user settings file. Cheap; called whenever any of those vars
+        change."""
+        try:
+            prefs = {
+                "unit":          self.unit_var.get(),
+                "currency":      self._bom_currency_var.get() or "$",
+                "waste_factor":  float(self._bom_waste_var.get()),
+                "tax_rate":      float(self._bom_tax_var.get()),
+            }
+        except (tk.TclError, ValueError):
+            return
+        save_settings(prefs)
+
+    def _on_wire_listbox_rclick(self, event) -> None:
+        """Right-click on a wire-list row → context menu.
+
+        If the row under the cursor isn't already selected, switch to
+        single-select on it. Otherwise leave the existing multi-selection
+        intact so the user can bulk-delete.
+        """
+        idx = self.wire_listbox.nearest(event.y)
+        if idx < 0:
+            return
+        # Empty-state placeholder row OR group header — no actions apply.
+        if not hasattr(self, "_wire_listbox_rows"):
+            return
+        if (idx < len(self._wire_listbox_rows)
+                and self._wire_listbox_rows[idx] is None):
+            # Group header → offer "Select all wires in group"
+            self._show_wire_group_menu(event, idx)
+            return
+        existing_sel = self.wire_listbox.curselection()
+        if idx not in existing_sel:
+            self.wire_listbox.selection_clear(0, tk.END)
+            self.wire_listbox.selection_set(idx)
+        self._on_wire_select(None)
+        n_selected = len(self.wire_listbox.curselection())
+        m = tk.Menu(self.root, tearoff=0)
+        if n_selected <= 1:
+            m.add_command(label="🔁  Re-route this wire",
+                          command=self._reroute_selected_wire)
+            m.add_command(label="🔗  Reassign device…",
+                          command=self._reassign_selected_wire)
+            m.add_separator()
+            m.add_command(label="🗑  Delete wire",
+                          command=self._delete_selected_wire,
+                          accelerator="Del")
+        else:
+            m.add_command(label=f"({n_selected} wires selected)",
+                          state=tk.DISABLED)
+            m.add_separator()
+            m.add_command(label=f"🗑  Delete {n_selected} selected wires",
+                          command=lambda: self._delete_selected_wires_multi(
+                              list(self.wire_listbox.curselection())),
+                          accelerator="Del")
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _reroute_selected_wire(self) -> None:
+        """Delete the selected wire and start fresh from its device (or the
+        first waypoint if it has no device association)."""
+        sel = self.wire_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Select", "Select a wire to re-route")
+            return
+        idx = self._wire_index_for_listbox(sel[0])
+        if idx is None:
+            return  # header / placeholder row
+        route = self.wire_routes[idx]
+        did = route.get("device_id")
+        device = next((d for d in self.devices if d["id"] == did), None)
+
+        if not messagebox.askyesno(
+            "Re-route wire?",
+            f"Delete this wire ({len(route['points'])} points, "
+            f"{self._format_length(route.get('length_in') or 0)}) "
+            "and start a new one in its place?"):
+            return
+        self._execute(DeleteWireCmd(self, idx, route))
+        self._post_command_refresh()
+        if device is not None:
+            self._draw_wire_from(device)
+        else:
+            # Wire was unassigned; just enter Wire mode
+            self._set_mode(Mode.WIRE)
+            self.status_label.config(
+                text="Click a device to start, then click route points")
 
     def _delete_selected_wire(self, _event=None) -> None:
         sel = self.wire_listbox.curselection()
         if not sel:
             return
-        if not hasattr(self, "_filtered_wire_indices") or sel[0] >= len(self._filtered_wire_indices):
+        idx = self._wire_index_for_listbox(sel[0])
+        if idx is None:    # header / placeholder row
             return
-        idx = self._filtered_wire_indices[sel[0]]
         route = self.wire_routes[idx]
         self._execute(DeleteWireCmd(self, idx, route))
         self._post_command_refresh()
@@ -2358,39 +5160,105 @@ class CameraWireTool:
         if not sel:
             messagebox.showinfo("Select", "Select a wire to reassign")
             return
-        if not hasattr(self, "_filtered_wire_indices"):
-            return
-        idx = self._filtered_wire_indices[sel[0]]
+        idx = self._wire_index_for_listbox(sel[0])
+        if idx is None:
+            return  # header / placeholder row
         route = self.wire_routes[idx]
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Reassign wire")
-        dlg.geometry("320x140")
+        dlg.geometry("520x520")
         dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
-        ttk.Label(dlg, text="Assign this wire to:").pack(pady=(10, 4))
-        choices = ["(unassigned)"] + [f'{d["id"]} ({d["type"]})' for d in self.devices]
-        var = tk.StringVar(value=choices[0] if route.get("device_id") is None
-                           else f'{route["device_id"]} ({next((d["type"] for d in self.devices if d["id"] == route["device_id"]), "?")})')
-        cb = ttk.Combobox(dlg, textvariable=var, values=choices, state="readonly", width=30)
-        cb.pack(pady=4)
+        # Header — current state of the wire
+        cur_did = route.get("device_id")
+        cur_dev = next((d for d in self.devices if d["id"] == cur_did), None)
+        cur_label = "(unassigned)"
+        if cur_dev:
+            sym = self.symbol_types.get(cur_dev["type"], {})
+            cur_label = (f"{cur_dev['id']}  ({cur_dev['type']} — "
+                         f"{sym.get('label', cur_dev['type'])})")
+        ttk.Label(dlg, text=f"Currently assigned to:  {cur_label}",
+                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  ).pack(anchor=tk.W, padx=12, pady=(10, 2))
+        ttk.Label(dlg, text="Pick a new device for this wire:",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(4, 4))
+
+        # Search filter
+        search_var = tk.StringVar()
+        search_row = ttk.Frame(dlg)
+        search_row.pack(fill=tk.X, padx=12, pady=2)
+        ttk.Label(search_row, text="Filter:").pack(side=tk.LEFT)
+        ttk.Entry(search_row, textvariable=search_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        # List of devices
+        list_frame = ttk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        lb = tk.Listbox(list_frame, font=("Consolas", 10),
+                        selectmode=tk.SINGLE, activestyle="dotbox")
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=lb.yview)
+        lb.config(yscrollcommand=sb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Build candidates: (label_for_display, device_id_or_None)
+        candidates: list[tuple[str, str | None]] = [
+            ("(unassigned — no device)", None)
+        ]
+        for d in sorted(self.devices, key=lambda x: x["id"]):
+            sym = self.symbol_types.get(d["type"], {})
+            tag = "[CAM]" if sym.get("is_camera") else (
+                "[RP] " if sym.get("is_run_point") else "     ")
+            candidates.append((
+                f' {tag}  {d["id"]:6s}  {d["type"]:5s}  '
+                f'{sym.get("label", d["type"])[:34]}',
+                d["id"],
+            ))
+
+        def populate(query: str = "") -> None:
+            lb.delete(0, tk.END)
+            q = query.lower().strip()
+            shown = []
+            for disp, did in candidates:
+                if not q or q in disp.lower() or (did and q in did.lower()):
+                    lb.insert(tk.END, disp)
+                    shown.append((disp, did))
+            # Pre-select the current row
+            for i, (_, did) in enumerate(shown):
+                if did == cur_did:
+                    lb.selection_set(i); lb.see(i); break
+            return shown
+
+        shown = populate()
+        search_var.trace_add("write", lambda *_: shown.__init__(populate(search_var.get())))
 
         def apply():
-            choice = var.get()
-            new_did = None if choice == "(unassigned)" else choice.split(" ")[0]
-            old_did = route.get("device_id")
-            if new_did == old_did:
+            sel = lb.curselection()
+            if not sel:
+                return
+            visible = []
+            q = search_var.get().lower().strip()
+            for disp, did in candidates:
+                if not q or q in disp.lower() or (did and q in did.lower()):
+                    visible.append((disp, did))
+            _, new_did = visible[sel[0]]
+            if new_did == cur_did:
                 dlg.destroy(); return
             route["device_id"] = new_did
             self._mark_dirty()
             self._refresh_wire_list()
             self._refresh_device_list()
+            self._refresh_bom_tab()
             self._redraw()
             dlg.destroy()
 
-        btns = ttk.Frame(dlg); btns.pack(pady=8)
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=12, pady=10)
         ttk.Button(btns, text="Apply", command=apply).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        lb.bind("<Double-Button-1>", lambda _e: apply())
+        dlg.bind("<Return>", lambda _e: apply())
 
     def _clear_wires(self) -> None:
         if not self.wire_routes:
@@ -2401,23 +5269,63 @@ class CameraWireTool:
         self._post_command_refresh()
 
     # ============================================================ Status
+    def _flash_status(self, text: str, ttl_ms: int = 4000) -> None:
+        """Show a transient status-bar message that auto-clears after ttl_ms.
+        Subsequent calls (or a mode change) reset the timer."""
+        self.status_label.config(text=text)
+        if getattr(self, "_status_clear_id", None) is not None:
+            try:
+                self.root.after_cancel(self._status_clear_id)
+            except tk.TclError:
+                pass
+        def _restore():
+            self._status_clear_id = None
+            self._update_status()  # back to mode/selection breadcrumb
+        self._status_clear_id = self.root.after(ttl_ms, _restore)
+
     def _update_status(self) -> None:
+        # Default to Move so an unhandled mode never raises KeyError (which
+        # used to surface as a nonsense "obstacle grid" error from the
+        # routing exception handler).
         mode_str = {
             Mode.MOVE: "Move",
             Mode.WIRE: "Wire",
             Mode.CALIBRATE: "Calibrate",
             Mode.PLACE_DEVICE: f"Place {self._place_type or '?'}",
-        }[self.mode]
-        sel_str = ""
-        if self.selected_device is not None:
-            d = self.selected_device
+        }.get(self.mode, "Move")
+
+        parts = [f"Mode: {mode_str}"]
+        # Floor (only show when multi-floor)
+        if self._project is not None and len(self._project.floors) > 1:
+            parts.append(f"Floor: {self._project.active_floor}")
+
+        # Selection summary OR overall project counts (when nothing selected)
+        n_sel = len(self.selected_devices)
+        if n_sel == 1:
+            d = self.selected_devices[0]
             info = self.symbol_types.get(d["type"], {})
-            sel_str = f"  •  Selected: {d['id']} ({d['type']} – {info.get('label','?')})"
+            sel_str = f"Selected: {d['id']} ({d['type']} – {info.get('label','?')})"
             wires = [w for w in self.wire_routes if w.get("device_id") == d["id"]]
             if wires:
                 tot = sum(w.get("length_in", 0) or 0 for w in wires)
-                sel_str += f"  •  {len(wires)} run(s), {self._format_length(tot)}"
-        self.status_label.config(text=f"Mode: {mode_str}{sel_str}")
+                sel_str += f", {len(wires)} run(s), {self._format_length(tot)}"
+            parts.append(sel_str)
+        elif n_sel > 1:
+            parts.append(f"Selected: {n_sel} devices")
+        else:
+            # No selection — show useful project-wide counts as the
+            # always-visible default. Quiet, info-dense.
+            n_dev = len(self.devices)
+            n_cam = sum(1 for d in self.devices
+                        if self.symbol_types.get(d["type"], {}).get("is_camera"))
+            n_other = n_dev - n_cam
+            n_wire = len(self.wire_routes)
+            parts.append(
+                f"{n_dev} device(s) ({n_cam} cameras, {n_other} other)  •  "
+                f"{n_wire} wire run(s)"
+            )
+
+        self.status_label.config(text="  •  ".join(parts))
 
     # ============================================================ File operations
     def _file_open(self) -> None:
@@ -2589,69 +5497,786 @@ class CameraWireTool:
             return
 
         self._mark_clean()
+        self._cleanup_autosave()    # autosave is no longer needed
         push_recent_file(self.drawio_path)
         self._refresh_recent_menu()
-        messagebox.showinfo("Saved",
-            f"Saved:\n  Layout: {os.path.basename(self.drawio_path)}\n"
-            f"  Wires:  {os.path.basename(self.project_path)}",
+        # Quiet flash instead of a modal popup — the title bar's `*` going
+        # away and the "Saved just now" indicator already convey success.
+        self._flash_status(
+            f"✓ Saved {os.path.basename(self.drawio_path)} + "
+            f"{os.path.basename(self.project_path)}",
+            ttl_ms=3500,
         )
+
+    # ============================================================ Quick-jump (Ctrl+G / Ctrl+P)
+    def _open_quick_jump(self) -> None:
+        """Searchable quick-jump palette. Type to filter every device,
+        symbol type, and wire run. Enter selects it (centers the map +
+        sets the right selection), Esc cancels."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Quick jump")
+        dlg.geometry("520x420")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ttk.Label(dlg, text="Type to find any device, symbol, or wire:",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=10, pady=(8, 2))
+        q_var = tk.StringVar()
+        entry = ttk.Entry(dlg, textvariable=q_var, font=("Segoe UI", 11))
+        entry.pack(fill=tk.X, padx=10, pady=4)
+        entry.focus_set()
+
+        listbox = tk.Listbox(dlg, font=("Consolas", 10), activestyle="dotbox")
+        sb = ttk.Scrollbar(dlg, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.config(yscrollcommand=sb.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=4)
+        sb.pack(side=tk.LEFT, fill=tk.Y, pady=4)
+
+        # Build the candidate list — devices + symbol types + wires
+        candidates: list[tuple[str, str, callable]] = []
+        for d in self.devices:
+            info = self.symbol_types.get(d["type"], {})
+            label = (f" DEV   {d['id']:6s}  {d['type']:5s}  "
+                     f"{info.get('label', d['type'])}")
+            candidates.append((label, f"{d['id']} {d['type']} {info.get('label','')}",
+                               lambda d=d: self._jump_to_device(d)))
+        for code, info in sorted(self.symbol_types.items()):
+            n = sum(1 for d in self.devices if d["type"] == code)
+            tag = "[RP]" if info.get("is_run_point") else (
+                  "[CAM]" if info.get("is_camera") else "    ")
+            label = f" {tag:5s}  {code:5s}  symbol: {info.get('label', code)} (x{n})"
+            candidates.append((label, f"{code} {info.get('label','')} symbol",
+                               lambda c=code: self._jump_to_symbol(c)))
+        for i, r in enumerate(self.wire_routes):
+            did = r.get("device_id") or "—"
+            length = self._format_length(r.get("length_in") or 0) if r.get("length_in") else f"{r['length_px']:.0f}px"
+            label = f" WIRE  wire #{i+1}  to {did:6s}  {length}"
+            candidates.append((label, f"wire {did} {length}",
+                               lambda i=i: self._jump_to_wire(i)))
+
+        def populate(query: str = "") -> None:
+            listbox.delete(0, tk.END)
+            q = query.lower().strip()
+            for visible_label, search_text, _ in candidates:
+                if not q or all(tok in search_text.lower() for tok in q.split()):
+                    listbox.insert(tk.END, visible_label)
+            if listbox.size():
+                listbox.selection_set(0)
+        populate()
+
+        # Filter list as the user types
+        q_var.trace_add("write", lambda *_: populate(q_var.get()))
+
+        def filtered_candidates(query: str):
+            q = query.lower().strip()
+            return [c for c in candidates
+                    if not q or all(tok in c[1].lower() for tok in q.split())]
+
+        def commit():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            visible = filtered_candidates(q_var.get())
+            if sel[0] >= len(visible):
+                return
+            _, _, action = visible[sel[0]]
+            dlg.destroy()
+            action()
+
+        # Up/Down/Enter navigation while in entry
+        def on_arrow(direction):
+            cur = listbox.curselection()
+            n = listbox.size()
+            if n == 0: return
+            new = (cur[0] + direction if cur else 0) % n
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(new)
+            listbox.see(new)
+        entry.bind("<Down>", lambda _e: (on_arrow(1), "break"))
+        entry.bind("<Up>", lambda _e: (on_arrow(-1), "break"))
+        entry.bind("<Return>", lambda _e: (commit(), "break"))
+        listbox.bind("<Double-Button-1>", lambda _e: commit())
+        listbox.bind("<Return>", lambda _e: commit())
+
+    def _jump_to_device(self, device: dict) -> None:
+        self.selected_device = device
+        self._center_on_selected()
+        self._redraw()
+        self._notebook.select(0)   # Devices tab
+        self.status_label.config(
+            text=f"Jumped to {device['id']} ({device['type']}).")
+
+    def _jump_to_symbol(self, code: str) -> None:
+        self._notebook.select(2)   # Symbols tab
+        # Find the listbox row whose first non-tag token is the code
+        for i in range(self.sym_listbox.size()):
+            text = self.sym_listbox.get(i).strip()
+            if any(tok == code for tok in text.split()):
+                self.sym_listbox.selection_clear(0, tk.END)
+                self.sym_listbox.selection_set(i)
+                self.sym_listbox.see(i)
+                break
+        self.status_label.config(text=f"Jumped to symbol {code}.")
+
+    def _jump_to_wire(self, route_index: int) -> None:
+        self._notebook.select(1)   # Wires tab
+        self._select_wire_in_listbox(route_index)
+        # Pan canvas to the wire's midpoint so user sees it
+        if 0 <= route_index < len(self.wire_routes):
+            r = self.wire_routes[route_index]
+            mid = r["points"][len(r["points"]) // 2]
+            cw = self.canvas.winfo_width() or 800
+            ch = self.canvas.winfo_height() or 600
+            self.offset_x = cw / 2 - mid[0] * self.zoom
+            self.offset_y = ch / 2 - mid[1] * self.zoom
+        self._redraw()
+        self.status_label.config(text=f"Jumped to wire #{route_index+1}.")
+
+    # ============================================================ Save indicator
+    def _tick_save_indicator(self) -> None:
+        """Refresh the 'Saved Xm ago / Modified' label and re-arm in 15s."""
+        if not hasattr(self, "save_indicator"):
+            return
+        import time as _t
+        if self._dirty:
+            self.save_indicator.config(text="● Modified",
+                                        foreground="#FF8C42")
+            tip = ("There are unsaved changes.\n"
+                   "Press Ctrl+S to save (or wait ≤60s for auto-save snapshot).")
+        elif self._last_save_time is not None:
+            elapsed = _t.time() - self._last_save_time
+            if elapsed < 15:
+                txt = "Saved just now"
+            elif elapsed < 60:
+                txt = f"Saved {int(elapsed)}s ago"
+            elif elapsed < 3600:
+                txt = f"Saved {int(elapsed/60)}m ago"
+            else:
+                txt = f"Saved {int(elapsed/3600)}h ago"
+            self.save_indicator.config(text=txt, foreground="#3ddc84")
+            stamp = _t.strftime("%H:%M:%S",
+                                 _t.localtime(self._last_save_time))
+            tip = f"Last saved at {stamp}\n(Ctrl+S to save now.)"
+        else:
+            self.save_indicator.config(text="", foreground="#888888")
+            tip = "No saves yet this session. Ctrl+S to save."
+        # Attach/refresh tooltip
+        if not hasattr(self, "_save_tip"):
+            self._save_tip = Tooltip(self.save_indicator, tip)
+        else:
+            self._save_tip.text = tip
+        # Re-arm
+        try:
+            self.root.after(15_000, self._tick_save_indicator)
+        except tk.TclError:
+            pass
+
+    # ============================================================ Auto-save / recovery
+    def _schedule_autosave(self) -> None:
+        """Re-arm the periodic-save timer (60s). Cheap to call repeatedly —
+        cancels any pending one first so we don't pile up callbacks."""
+        if self._autosave_id is not None:
+            try:
+                self.root.after_cancel(self._autosave_id)
+            except tk.TclError:
+                pass
+        self._autosave_id = self.root.after(60_000, self._auto_save_tick)
+
+    def _auto_save_tick(self) -> None:
+        self._autosave_id = None
+        try:
+            self._write_autosave()
+        except Exception as e:
+            log_error("Auto-save tick failed", e)
+        self._schedule_autosave()
+
+    def _write_autosave(self) -> None:
+        """Write a per-session recovery snapshot. Skipped if nothing's changed
+        since the last full save."""
+        if not self._dirty:
+            return
+        data = {
+            "format": "camera-wire-tool/autosave/v1",
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "drawio_file": os.path.basename(self.drawio_path),
+            "scale_factor": self.scale_factor,
+            "unit": self.unit_var.get(),
+            "next_device_id": self._next_device_id,
+            "devices": self.devices,
+            "symbol_types": self.symbol_types,
+            "cable_types": self.cable_types,
+            "wire_routes": [
+                {**{k: v for k, v in wr.items() if k != "points"},
+                 "points": [list(p) for p in wr["points"]]}
+                for wr in self.wire_routes
+            ],
+        }
+        tmp = self._autosave_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+            os.replace(tmp, self._autosave_path)
+        except OSError as e:
+            log_error(f"Auto-save write failed: {self._autosave_path}", e)
+
+    def _maybe_recover_autosave(self) -> None:
+        """Called once on startup. If a fresh autosave outranks the saved
+        files, prompt the user to recover. Stale autosaves are silently
+        cleaned up."""
+        if not os.path.exists(self._autosave_path):
+            return
+        try:
+            mt_auto = os.path.getmtime(self._autosave_path)
+            mt_drawio = os.path.getmtime(self.drawio_path)
+            mt_proj = (os.path.getmtime(self.project_path)
+                       if os.path.exists(self.project_path) else 0.0)
+        except OSError:
+            return
+        if mt_auto <= max(mt_drawio, mt_proj) + 1:
+            # Saved file is newer or essentially equal — autosave is stale
+            self._cleanup_autosave()
+            return
+        try:
+            with open(self._autosave_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            self._cleanup_autosave()
+            return
+        when = data.get("saved_at", "<unknown time>")
+        if not messagebox.askyesno(
+            "Recover unsaved changes?",
+            f"An auto-save from {when} is newer than the last manual save.\n\n"
+            f"Recover those changes?\n"
+            f"(YES → restore unsaved work and mark project dirty)\n"
+            f"(NO → discard the auto-save and load the saved version)"):
+            self._cleanup_autosave()
+            return
+        try:
+            self._apply_autosave(data)
+        except Exception as e:
+            log_error("Recovery apply failed", e)
+            messagebox.showerror("Recover failed",
+                                  f"Could not apply autosave:\n{e}")
+
+    def _apply_autosave(self, data: dict) -> None:
+        """Overlay recovered state onto the freshly-loaded project."""
+        if data.get("scale_factor") is not None:
+            self.scale_factor = float(data["scale_factor"])
+        if data.get("unit"):
+            self.unit_var.set(data["unit"])
+        if data.get("next_device_id"):
+            self._next_device_id = max(self._next_device_id,
+                                        int(data["next_device_id"]))
+        if data.get("symbol_types"):
+            self.symbol_types = data["symbol_types"]
+        if data.get("cable_types"):
+            self.cable_types = data["cable_types"]
+        if data.get("devices"):
+            self.devices = data["devices"]
+        # Wire routes: rebuild lengths
+        self.wire_routes = []
+        for wr in data.get("wire_routes", []):
+            pts = [tuple(p) for p in wr.get("points", [])]
+            if len(pts) < 2:
+                continue
+            px_len = self._calc_wire_length(pts)
+            real_in = (px_len * self.scale_factor) if self.scale_factor else None
+            entry = {
+                "points": pts, "length_px": px_len, "length_in": real_in,
+                "device_id": wr.get("device_id"),
+            }
+            if wr.get("cable_type"):
+                entry["cable_type"] = wr["cable_type"]
+            self.wire_routes.append(entry)
+        self._mark_dirty()
+        self._refresh_symbol_list()
+        self._refresh_device_list()
+        self._refresh_wire_list()
+        self._refresh_bom_tab()
+        self._redraw()
+        self.status_label.config(text="✓ Recovered unsaved changes from autosave.")
+
+    def _cleanup_autosave(self) -> None:
+        if os.path.exists(self._autosave_path):
+            try:
+                os.remove(self._autosave_path)
+            except OSError:
+                pass
+
+    # ============================================================ Map annotations
+    def _start_place_annotation(self) -> None:
+        """Tools → Add Map Annotation. Pops a tiny dialog asking for the
+        label text, then enters a one-shot placement mode where the next
+        canvas left-click drops the annotation at that position."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Add Map Annotation")
+        dlg.geometry("420x220")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ttk.Label(dlg, text="Drop a text label on the floor plan",
+                  font=("Segoe UI", 11, "bold"),
+                  ).pack(anchor=tk.W, padx=14, pady=(12, 2))
+        ttk.Label(dlg,
+                  text="Useful for room labels (Lobby, Server Room, IDF…), "
+                       "construction notes, and zone callouts.",
+                  wraplength=380, foreground="#888888", font=("Segoe UI", 9),
+                  ).pack(anchor=tk.W, padx=14, pady=(0, 8))
+
+        form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=14, pady=4)
+        ttk.Label(form, text="Text:", width=10).grid(row=0, column=0, sticky=tk.E, pady=4)
+        text_var = tk.StringVar(value="Server Room")
+        entry = ttk.Entry(form, textvariable=text_var, width=34)
+        entry.grid(row=0, column=1, sticky=tk.W, padx=4)
+        entry.select_range(0, tk.END); entry.focus_set()
+
+        ttk.Label(form, text="Size:", width=10).grid(row=1, column=0, sticky=tk.E, pady=4)
+        size_var = tk.IntVar(value=18)
+        ttk.Spinbox(form, textvariable=size_var, from_=8, to=72, width=6,
+                    increment=2,
+                    ).grid(row=1, column=1, sticky=tk.W, padx=4)
+
+        ttk.Label(form, text="Color:", width=10).grid(row=2, column=0, sticky=tk.E, pady=4)
+        color_row = ttk.Frame(form); color_row.grid(row=2, column=1, sticky=tk.W, padx=4)
+        color_var = tk.StringVar(value="#FFD060")
+        sw = tk.Label(color_row, bg=color_var.get(), width=4, height=1,
+                      relief=tk.RAISED, cursor="hand2")
+        sw.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(color_row, textvariable=color_var, width=10,
+                  font=("Consolas", 9)).pack(side=tk.LEFT)
+        def pick(_e=None):
+            c = colorchooser.askcolor(initialcolor=color_var.get(),
+                                       title="Annotation color")
+            if c and c[1]:
+                color_var.set(c[1].upper())
+                sw.config(bg=c[1].upper())
+        sw.bind("<Button-1>", pick)
+        ttk.Button(color_row, text="Pick…", command=pick).pack(side=tk.LEFT, padx=4)
+
+        def commit():
+            text = text_var.get().strip()
+            if not text:
+                messagebox.showerror("Error", "Annotation text can't be empty.")
+                return
+            self._placing_annotation = {
+                "text": text, "color": color_var.get(),
+                "font_size": int(size_var.get()),
+            }
+            self._set_mode(Mode.PLACE_DEVICE)   # reuse the cursor / banner
+            self._place_type = "__annotation__"   # sentinel so _do_place_device knows
+            self.status_label.config(
+                text=f"Click on the map to place '{text}' annotation. Esc cancels.")
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
+        ttk.Button(btns, text="Place on Map →",
+                   command=commit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: commit())
+
+    def _draw_annotations(self) -> None:
+        """Draw all map annotations as canvas text at their drawio coords."""
+        for ann in self.annotations:
+            ix, iy = self._drawio_to_img(ann["x"], ann["y"])
+            cx, cy = self._img_to_canvas(ix, iy)
+            # Scale font with zoom so annotations stay readable
+            fs = max(8, int(ann.get("font_size", 16) * self.zoom * self.dx_scale))
+            color = ann.get("color", "#FFD060")
+            text = ann.get("text", "")
+            # Background rectangle for legibility
+            t_id = self.canvas.create_text(
+                cx, cy, text=text, fill=color,
+                font=("Segoe UI", fs, "bold"),
+                anchor=tk.CENTER, tags=("annotation",))
+            bbox = self.canvas.bbox(t_id)
+            if bbox:
+                self.canvas.create_rectangle(
+                    bbox[0]-4, bbox[1]-2, bbox[2]+4, bbox[3]+2,
+                    fill="#1a1a1a", outline=color, width=1,
+                    tags=("annotation", "anno_bg"),
+                )
+                # Re-raise the text above the background
+                self.canvas.tag_raise(t_id)
+
+    def _annotation_at(self, ix: float, iy: float) -> dict | None:
+        """Image-coord hit test for annotations (for right-click menu)."""
+        # Use canvas item lookup since text bbox is easier to do that way
+        cx, cy = self._img_to_canvas(ix, iy)
+        for item in reversed(self.canvas.find_withtag("annotation")):
+            bbox = self.canvas.bbox(item)
+            if bbox and bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]:
+                # Map canvas position back to image-coord and find matching annotation
+                # by closest x/y in image coords
+                ix_a = (bbox[0] + bbox[2]) / 2
+                iy_a = (bbox[1] + bbox[3]) / 2
+                ix_img, iy_img = self._canvas_to_img(ix_a, iy_a)
+                best = None; best_d = float("inf")
+                for ann in self.annotations:
+                    a_ix, a_iy = self._drawio_to_img(ann["x"], ann["y"])
+                    d = math.hypot(ix_img - a_ix, iy_img - a_iy)
+                    if d < best_d:
+                        best_d = d; best = ann
+                return best
+        return None
+
+    def _edit_annotation(self, ann: dict) -> None:
+        """Tiny inline editor for an existing annotation."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Edit Annotation")
+        dlg.geometry("420x200")
+        dlg.transient(self.root); dlg.grab_set()
+        ttk.Label(dlg, text="Edit annotation",
+                  font=("Segoe UI", 11, "bold"),
+                  ).pack(anchor=tk.W, padx=14, pady=(12, 8))
+        form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=14)
+        ttk.Label(form, text="Text:", width=8).grid(row=0, column=0, sticky=tk.E, pady=4)
+        text_var = tk.StringVar(value=ann.get("text", ""))
+        ent = ttk.Entry(form, textvariable=text_var, width=34)
+        ent.grid(row=0, column=1, sticky=tk.W, padx=4)
+        ent.select_range(0, tk.END); ent.focus_set()
+        ttk.Label(form, text="Size:", width=8).grid(row=1, column=0, sticky=tk.E, pady=4)
+        size_var = tk.IntVar(value=int(ann.get("font_size", 18)))
+        ttk.Spinbox(form, textvariable=size_var, from_=8, to=72, width=6,
+                    increment=2,
+                    ).grid(row=1, column=1, sticky=tk.W, padx=4)
+        ttk.Label(form, text="Color:", width=8).grid(row=2, column=0, sticky=tk.E, pady=4)
+        color_row = ttk.Frame(form); color_row.grid(row=2, column=1, sticky=tk.W, padx=4)
+        color_var = tk.StringVar(value=ann.get("color", "#FFD060"))
+        sw = tk.Label(color_row, bg=color_var.get(), width=4, height=1,
+                      relief=tk.RAISED, cursor="hand2")
+        sw.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(color_row, textvariable=color_var, width=10,
+                  font=("Consolas", 9)).pack(side=tk.LEFT)
+        def pick(_e=None):
+            c = colorchooser.askcolor(initialcolor=color_var.get(),
+                                       title="Annotation color")
+            if c and c[1]:
+                color_var.set(c[1].upper()); sw.config(bg=c[1].upper())
+        sw.bind("<Button-1>", pick)
+        ttk.Button(color_row, text="Pick…", command=pick).pack(side=tk.LEFT, padx=4)
+
+        def commit():
+            t = text_var.get().strip()
+            if not t:
+                messagebox.showerror("Error", "Annotation text can't be empty.")
+                return
+            ann["text"] = t
+            ann["color"] = color_var.get()
+            ann["font_size"] = int(size_var.get())
+            self._mark_dirty()
+            self._redraw()
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
+        ttk.Button(btns, text="Save", command=commit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: commit())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+    def _delete_annotation(self, ann: dict) -> None:
+        try:
+            self.annotations.remove(ann)
+        except ValueError:
+            return
+        self._mark_dirty()
+        self._redraw()
+        self._flash_status("Annotation deleted.", ttl_ms=2000)
+
+    def _toggle_fullscreen(self) -> None:
+        try:
+            cur = bool(self.root.attributes("-fullscreen"))
+            self.root.attributes("-fullscreen", not cur)
+            self._flash_status(
+                "Fullscreen ON  (F11 to exit)" if not cur else "Fullscreen OFF",
+                ttl_ms=2500)
+        except tk.TclError:
+            pass
+
+    # ============================================================ Preferences dialog
+    def _open_preferences_dialog(self) -> None:
+        """A small Toplevel showing the per-user persisted settings,
+        with reset buttons. Changes auto-save (consistent with the
+        toolbar behavior). Also lets the user clear the recent-files
+        list and the autosave file."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Preferences")
+        dlg.geometry("520x440")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ttk.Label(dlg, text="Preferences",
+                  font=("Segoe UI", 14, "bold"),
+                  ).pack(anchor=tk.W, padx=14, pady=(12, 2))
+        ttk.Label(
+            dlg,
+            text="Changes here save automatically to "
+                 f"{SETTINGS_PATH.name} in your home folder, and apply "
+                 "to every project you open.",
+            wraplength=480, foreground="#7fc4ff",
+            font=("Segoe UI", 9, "italic"),
+        ).pack(anchor=tk.W, padx=14, pady=(0, 8))
+
+        # Defaults card
+        defaults = ttk.LabelFrame(dlg, text="BOM defaults")
+        defaults.pack(fill=tk.X, padx=14, pady=4)
+
+        row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(row, text="Display unit:", width=18).pack(side=tk.LEFT)
+        unit_combo = ttk.Combobox(
+            row, textvariable=self._unit_label_var,
+            values=[label for label, _val in self._unit_choices],
+            state="readonly", width=24,
+        )
+        unit_combo.pack(side=tk.LEFT)
+        def on_unit_pick(_e=None):
+            label = self._unit_label_var.get()
+            for lab, v in self._unit_choices:
+                if lab == label:
+                    self.unit_var.set(v); break
+            self._on_unit_change()
+        unit_combo.bind("<<ComboboxSelected>>", on_unit_pick)
+
+        row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(row, text="Currency:", width=18).pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._bom_currency_var,
+                   width=8).pack(side=tk.LEFT)
+        ttk.Label(row, text="(e.g. $, €, £, ¥)",
+                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  ).pack(side=tk.LEFT, padx=8)
+
+        row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(row, text="Default waste factor:", width=18).pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._bom_waste_var,
+                   width=8).pack(side=tk.LEFT)
+        ttk.Label(row, text="(1.10 = +10% material allowance)",
+                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  ).pack(side=tk.LEFT, padx=8)
+
+        row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(row, text="Default tax rate:", width=18).pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._bom_tax_var,
+                   width=8).pack(side=tk.LEFT)
+        ttk.Label(row, text="(decimal, e.g. 0.08 = 8%)",
+                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  ).pack(side=tk.LEFT, padx=8)
+
+        # Cleanup card
+        cleanup = ttk.LabelFrame(dlg, text="Per-user data")
+        cleanup.pack(fill=tk.X, padx=14, pady=10)
+
+        row = ttk.Frame(cleanup); row.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(row,
+                  text=f"Settings file: {SETTINGS_PATH.name}",
+                  font=("Consolas", 9),
+                  ).pack(side=tk.LEFT)
+
+        row = ttk.Frame(cleanup); row.pack(fill=tk.X, padx=8, pady=8)
+
+        def reset_defaults():
+            if not messagebox.askyesno(
+                "Reset preferences?",
+                "Reset BOM unit, currency, waste, and tax to factory "
+                "defaults?\n(Project files are not affected.)"):
+                return
+            self.unit_var.set("ft-in")
+            self._bom_currency_var.set("$")
+            self._bom_waste_var.set(1.10)
+            self._bom_tax_var.set(0.0)
+            for lab, v in self._unit_choices:
+                if v == "ft-in":
+                    self._unit_label_var.set(lab); break
+            self._persist_user_settings()
+            self._refresh_bom_tab()
+            self._refresh_wire_list()
+            self._flash_status("Preferences reset to defaults.")
+
+        def clear_recents():
+            if not messagebox.askyesno(
+                "Clear recent files?",
+                "Remove all entries from the File → Open Recent menu?"):
+                return
+            try:
+                if RECENT_FILES_PATH.exists():
+                    RECENT_FILES_PATH.unlink()
+            except OSError:
+                pass
+            self._refresh_recent_menu()
+            self._flash_status("Recent files cleared.")
+
+        ttk.Button(row, text="Reset BOM defaults",
+                   command=reset_defaults).pack(side=tk.LEFT, padx=4)
+        ttk.Button(row, text="Clear Recent Files",
+                   command=clear_recents).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(dlg, text="Close (Esc)",
+                   command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
 
     # ============================================================ Help dialogs
     def _show_shortcuts(self) -> None:
-        msg = (
-            "Modes\n"
-            "  M / W / C       Move / Wire / Calibrate\n"
-            "\n"
-            "Edit\n"
-            "  Ctrl+Z / Ctrl+Y  Undo / Redo\n"
-            "  Delete           Delete selected wire or device\n"
-            "  Esc              Cancel current action\n"
-            "\n"
-            "Navigation\n"
-            "  Mouse wheel      Zoom (toward cursor)\n"
-            "  Middle-drag      Pan\n"
-            "  Ctrl+drag        Pan\n"
-            "  Space (hold)     Temporary pan\n"
-            "  Home             Fit to view\n"
-            "  + / -            Zoom in / out\n"
-            "  [ / ]            Cycle through devices\n"
-            "\n"
-            "File\n"
-            "  Ctrl+O           Open\n"
-            "  Ctrl+S           Save\n"
-            "  Ctrl+Shift+S     Save As\n"
-            "\n"
-            "Other\n"
-            "  Ctrl+F           Focus search box on active tab\n"
-        )
-        messagebox.showinfo("Keyboard Shortcuts", msg)
+        """Friendlier-than-messagebox keyboard shortcuts dialog with
+        section headers, two-column layout, and a "Got it" close button."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Keyboard Shortcuts")
+        dlg.geometry("560x520")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        # Header
+        ttk.Label(dlg, text="Keyboard Shortcuts",
+                  font=("Segoe UI", 14, "bold"),
+                  ).pack(anchor=tk.W, padx=14, pady=(12, 2))
+        ttk.Label(dlg,
+                  text="Press F1 or ? at any time to open this list.",
+                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  ).pack(anchor=tk.W, padx=14, pady=(0, 8))
+
+        # Scrollable body
+        outer = ttk.Frame(dlg)
+        outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+        canvas = tk.Canvas(outer, bg="#1e1e1e", highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        body = ttk.Frame(canvas)
+        body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=body, anchor="nw", width=520)
+        canvas.config(yscrollcommand=sb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        sections = [
+            ("Modes", [
+                ("M",      "Move mode — click devices to select/drag"),
+                ("W",      "Wire mode — click points to draw a wire"),
+                ("C",      "Calibrate — set the real-world scale"),
+            ]),
+            ("Editing", [
+                ("Ctrl+Z",       "Undo last action"),
+                ("Ctrl+Y",       "Redo"),
+                ("Ctrl+A",       "Select all visible devices"),
+                ("Drag",         "Lasso-select (drag empty canvas in Move mode)"),
+                ("Shift+drag",   "Lasso-add to existing selection"),
+                ("Ctrl+click",   "Toggle a device in selection"),
+                ("Ctrl+C",       "Copy selected devices to clipboard"),
+                ("Ctrl+V",       "Paste devices at cursor position"),
+                ("Delete",       "Delete selected wire or device(s)"),
+                ("Escape",       "Cancel action / clear selection"),
+            ]),
+            ("Tabs", [
+                ("Ctrl+1 / 2 / 3 / 4", "Devices / Wires / Symbols / BOM"),
+                ("Ctrl+Tab",           "Cycle to next tab"),
+                ("Ctrl+Shift+Tab",     "Cycle to previous tab"),
+            ]),
+            ("View / Navigation", [
+                ("Mouse wheel",  "Zoom toward cursor"),
+                ("Middle-drag",  "Pan the canvas"),
+                ("Ctrl+drag",    "Pan (alternate)"),
+                ("Space + drag", "Temporary pan"),
+                ("Home",         "Fit floor plan to viewport"),
+                ("+ / −",        "Zoom in / out around viewport center"),
+                ("Z",            "Zoom to current selection"),
+                ("[ / ]",        "Cycle through devices in id order"),
+                ("Shift+[ / ]",  "Cycle through wires"),
+                ("R",            "Rotate selected camera's FOV by 15°"),
+                ("Shift+R",      "Rotate by 45° (Alt = counter-clockwise)"),
+            ]),
+            ("File", [
+                ("Ctrl+O",         "Open .drawio…"),
+                ("Ctrl+S",         "Save"),
+                ("Ctrl+Shift+S",   "Save As…"),
+            ]),
+            ("Wire drawing", [
+                ("Shift (hold)", "Lock segment to 0/45/90° from last point"),
+                ("(automatic)",  "Cursor snaps to nearby device centers, "
+                                 "wire endpoints, and other waypoints"),
+                ("Right-click",  "Finish current wire"),
+            ]),
+            ("Search & jump", [
+                ("Ctrl+F",       "Focus search on active tab"),
+                ("Ctrl+G",       "Quick jump (find any device/symbol/wire)"),
+                ("Ctrl+P",       "Quick jump (alias)"),
+                ("F1 or ?",      "Open this dialog"),
+            ]),
+        ]
+        for title, rows in sections:
+            ttk.Label(body, text=title,
+                      font=("Segoe UI", 11, "bold"),
+                      foreground="#7fc4ff",
+                      ).grid(sticky=tk.W, padx=4, pady=(8, 2),
+                              columnspan=2)
+            for keys, desc in rows:
+                ttk.Label(body, text=keys,
+                          font=("Consolas", 10),
+                          foreground="#FFD060",
+                          ).grid(sticky=tk.W, padx=(20, 16))
+                ttk.Label(body, text=desc, font=("Segoe UI", 10),
+                          ).grid(row=body.grid_size()[1] - 1, column=1,
+                                  sticky=tk.W)
+
+        # Footer
+        footer = ttk.Frame(dlg)
+        footer.pack(fill=tk.X, padx=14, pady=10)
+        ttk.Button(footer, text="Got it (Esc)",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
 
     def _show_about(self) -> None:
-        messagebox.showinfo(
-            "About Camera Wire Tool",
-            "Camera Wire Estimation Tool\n"
-            "v1.0.0 — killer features release\n\n"
-            "Tkinter app for estimating security-camera cable runs on draw.io floor plans.\n\n"
-            "Features:\n"
-            "  • Cable types + BOM with waste & tax\n"
-            "  • Camera FOV / DORI overlays (IEC 62676-4)\n"
-            "  • A* auto-routing between devices\n"
-            "  • Multi-floor with anchor-point alignment + risers\n"
-            "  • PDF + CSV report export\n\n"
-            "See PLAYBOOK.md for full documentation.\n"
-            "MIT License.",
-        )
+        dlg = tk.Toplevel(self.root)
+        dlg.title("About Camera Wire Tool")
+        dlg.geometry("520x460")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
-    # ============================================================ keyboard handlers (extra)
-    def _kbd_mode_autoroute(self, event):
-        if self._is_text_focus(event):
-            return
-        if not _HAS_ROUTING:
-            messagebox.showwarning(
-                "Auto-route unavailable",
-                "Auto-routing requires numpy. `pip install numpy` then restart.")
-            return
-        self._set_mode(Mode.AUTO_ROUTE)
+        # Big title
+        ttk.Label(dlg, text="Camera Wire Tool",
+                  font=("Segoe UI", 18, "bold"),
+                  ).pack(anchor=tk.W, padx=20, pady=(20, 0))
+        ttk.Label(dlg, text="v1.0.0  ·  estimation for security-camera cable runs",
+                  foreground="#7fc4ff", font=("Segoe UI", 10, "italic"),
+                  ).pack(anchor=tk.W, padx=20, pady=(0, 14))
+
+        # Feature bullets
+        feat = ttk.LabelFrame(dlg, text="What it does")
+        feat.pack(fill=tk.X, padx=20, pady=4)
+        for line in (
+            "• Loads draw.io plans, drag/drop devices, draw multi-point wire routes",
+            "• Cable types + BOM with cost, waste %, tax, currency",
+            "• Camera FOV / DORI overlays (IEC 62676-4)",
+            "• Multi-floor projects with anchor-point alignment + risers",
+            "• PDF + CSV report export",
+            "• Auto-save with crash recovery, undo/redo with batch ops",
+            "• Snap-to-orthogonal wire drawing, drag-to-reshape waypoints",
+        ):
+            ttk.Label(feat, text=line, font=("Segoe UI", 9),
+                      ).pack(anchor=tk.W, padx=10, pady=1)
+
+        # Stats card showing what's loaded
+        stats = ttk.LabelFrame(dlg, text="This project")
+        stats.pack(fill=tk.X, padx=20, pady=10)
+        n_dev = len(self.devices)
+        n_cam = sum(1 for d in self.devices
+                    if self.symbol_types.get(d["type"], {}).get("is_camera"))
+        n_wire = len(self.wire_routes)
+        n_floor = len(self._project.floors) if self._project else 1
+        for label, value in (
+            ("File:",    os.path.basename(self.drawio_path)),
+            ("Devices:", f"{n_dev}  ({n_cam} cameras, {n_dev - n_cam} other)"),
+            ("Wires:",   str(n_wire)),
+            ("Floors:",  str(n_floor)),
+            ("Scale:",   self._scale_label_text().replace("Scale:  ", "")),
+        ):
+            row = ttk.Frame(stats); row.pack(fill=tk.X, padx=8, pady=2)
+            ttk.Label(row, text=label, width=10,
+                      foreground="#888888", font=("Segoe UI", 9),
+                      ).pack(side=tk.LEFT)
+            ttk.Label(row, text=value, font=("Segoe UI", 9),
+                      ).pack(side=tk.LEFT)
+
+        # Footer
+        ttk.Label(
+            dlg,
+            text="MIT License  ·  See PLAYBOOK.md for the architecture",
+            foreground="#888", font=("Segoe UI", 8),
+        ).pack(anchor=tk.W, padx=20, pady=(10, 4))
+        ttk.Button(dlg, text="Close (Esc)",
+                   command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
 
     # ============================================================ right-click context menu
     def _on_right_click_with_menu(self, event) -> None:
@@ -2663,36 +6288,152 @@ class CameraWireTool:
                 self._cancel_current()
             return
         # In other action modes, right-click cancels rather than menuing.
-        if self.mode in (Mode.CALIBRATE, Mode.PLACE_DEVICE, Mode.AUTO_ROUTE):
+        if self.mode in (Mode.CALIBRATE, Mode.PLACE_DEVICE):
             self._cancel_current()
             return
+        # Right-click directly on a FOV handle → open the FOV editor for
+        # that camera. (Hit-test by canvas coords against cached handles.)
+        for did, (hx, hy, _ax, _ay) in self._fov_handles.items():
+            if math.hypot(event.x - hx, event.y - hy) <= 12:
+                target = next((dd for dd in self.devices
+                               if dd["id"] == did), None)
+                if target is not None:
+                    self._open_fov_dialog(target)
+                    return
+
         ix, iy = self._canvas_to_img(event.x, event.y)
+        # Annotation right-click takes priority — no device/wire conflicts.
+        ann = self._annotation_at(ix, iy)
+        if ann is not None:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label=f"Annotation: \"{ann['text']}\"",
+                             state=tk.DISABLED)
+            menu.add_separator()
+            menu.add_command(label="✏  Edit text / color / size…",
+                             command=lambda a=ann: self._edit_annotation(a))
+            menu.add_command(label="🗑  Delete annotation",
+                             command=lambda a=ann: self._delete_annotation(a))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
         dev = self._device_at(ix, iy)
+        # Wire under cursor (only when not on a device — devices win)
+        wire_idx = self._wire_at(ix, iy) if dev is None else None
         menu = tk.Menu(self.root, tearoff=0)
+        if wire_idx is not None and dev is None:
+            # Right-click directly on a wire line: show wire actions menu.
+            self._select_wire_in_listbox(wire_idx)
+            route = self.wire_routes[wire_idx]
+            did = route.get("device_id") or "—"
+            length = (self._format_length(route.get("length_in") or 0)
+                      if route.get("length_in") is not None
+                      else f"{route['length_px']:.0f}px")
+            menu.add_command(
+                label=f"Wire #{wire_idx+1} → {did}  ({length})",
+                state=tk.DISABLED,
+            )
+            menu.add_separator()
+            menu.add_command(label="🔁  Re-route this wire",
+                             command=self._reroute_selected_wire)
+            menu.add_command(label="✂  Simplify (drop colinear points)",
+                             command=self._simplify_selected_wire)
+            menu.add_command(label="🔗  Reassign to different device…",
+                             command=self._reassign_selected_wire)
+            menu.add_separator()
+            menu.add_command(label="🗑  Delete wire",
+                             command=self._delete_selected_wire,
+                             accelerator="Del")
+            try:
+                self._redraw()
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
         if dev is not None:
-            self.selected_device = dev
+            # Don't clobber existing multi-selection if user right-clicks
+            # one that's already in the multi-selection — just keep going.
+            if not any(d is dev for d in self.selected_devices):
+                self.selected_device = dev
             self._redraw()
             info = self.symbol_types.get(dev["type"], {})
             menu.add_command(label=f"Selected: {dev['id']} ({dev['type']})",
                              state=tk.DISABLED)
+            if len(self.selected_devices) > 1:
+                menu.add_command(
+                    label=f"({len(self.selected_devices)} devices in selection)",
+                    state=tk.DISABLED)
+            menu.add_separator()
+            menu.add_command(
+                label="📐  Draw wire from here…",
+                command=lambda d=dev: self._draw_wire_from(d),
+            )
+            menu.add_command(
+                label="🔁  Replace last wire (re-route)…",
+                command=lambda d=dev: self._reroute_last_wire_from(d),
+            )
+            wires_for_dev = [w for w in self.wire_routes
+                             if w.get("device_id") == dev["id"]]
+            if wires_for_dev:
+                menu.add_command(
+                    label=f"🗑  Clear all wires for this device "
+                          f"({len(wires_for_dev)} run(s))",
+                    command=lambda d=dev: self._clear_wires_for_device(d),
+                )
             menu.add_separator()
             if info.get("is_camera"):
-                menu.add_command(label="Edit FOV / DORI…",
+                menu.add_command(label="📷  Edit FOV / DORI…",
                                  command=lambda d=dev: self._open_fov_dialog(d))
+                menu.add_command(
+                    label=f"Apply default FOV for {dev['type']}",
+                    command=lambda d=dev: self._apply_default_fov_to_one(d),
+                )
                 menu.add_command(
                     label="Toggle FOV cone for this camera",
                     command=lambda d=dev: self._toggle_camera_fov(d),
                 )
                 menu.add_separator()
-            if _HAS_ROUTING:
-                menu.add_command(
-                    label="Auto-route from here…",
-                    command=lambda d=dev: self._auto_route_from(d),
-                )
-                menu.add_separator()
-            menu.add_command(label="Delete device",
-                             command=self._on_delete_key)
+            del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
+                         if len(self.selected_devices) > 1
+                         else "🗑  Delete device")
+            menu.add_command(label=del_label, command=self._on_delete_key,
+                             accelerator="Del")
         else:
+            # Empty canvas. If the user has anything selected, give them
+            # delete + clear-selection right at the top.
+            n_dev = len(self.selected_devices)
+            wire_sel = self.wire_listbox.curselection() if hasattr(
+                self, "wire_listbox") else ()
+            n_wire = len(wire_sel)
+            if n_dev > 0:
+                menu.add_command(
+                    label=f"🗑  Delete {n_dev} selected device(s)",
+                    command=self._on_delete_key, accelerator="Del")
+            if n_wire > 0:
+                menu.add_command(
+                    label=f"🗑  Delete {n_wire} selected wire(s)",
+                    command=lambda: (
+                        self._delete_selected_wires_multi(list(wire_sel))
+                        if n_wire > 1 else self._delete_selected_wire()),
+                    accelerator="Del")
+            if n_dev or n_wire:
+                menu.add_command(
+                    label="🔍 Fit to selection (Z)",
+                    command=self._kbd_zoom_to_selection)
+                menu.add_command(
+                    label="Clear selection",
+                    command=lambda: (
+                        setattr(self, "selected_device", None),
+                        self.wire_listbox.selection_clear(0, tk.END),
+                        self._redraw(), self._refresh_wire_list()))
+                menu.add_separator()
+            # When scale isn't set, surface the calibration action right
+            # where the user is right-clicking. Big first-time UX win.
+            if self.scale_factor is None:
+                menu.add_command(label="📏  Set Scale (calibrate)…",
+                                 command=self._start_calibration)
+                menu.add_separator()
             menu.add_command(label="Fit view",
                              command=lambda: (self._fit_image(), self._redraw()))
             menu.add_separator()
@@ -2732,7 +6473,29 @@ class CameraWireTool:
             self._bom_tree.delete(item)
         report = self._build_bom_report()
         cur = self._bom_currency_var.get() or "$"
-        for line in report.lines:
+
+        # Apply user sort to the BOM lines
+        sort_col, reverse = getattr(self, "_bom_sort_state", ("cable", False))
+        sort_key = {
+            "cable":    lambda l: l.cable_id.lower(),
+            "label":    lambda l: l.label.lower(),
+            "runs":     lambda l: l.runs,
+            "ft":       lambda l: l.total_ft,
+            "rate":     lambda l: l.cost_per_ft,
+            "subtotal": lambda l: l.subtotal,
+        }.get(sort_col, lambda l: l.cable_id.lower())
+        lines_sorted = sorted(report.lines, key=sort_key, reverse=reverse)
+
+        # Update column headers with arrow indicator
+        for c, base in (
+            ("cable", "Cable"), ("label", "Description"),
+            ("runs",  "Runs"),  ("ft", "Feet"),
+            ("rate",  "$/ft"),  ("subtotal", "Subtotal"),
+        ):
+            arrow = (" ▼" if reverse else " ▲") if c == sort_col else ""
+            self._bom_tree.heading(c, text=base + arrow)
+
+        for line in lines_sorted:
             self._bom_tree.insert(
                 "", tk.END,
                 values=(line.cable_id, line.label, line.runs,
@@ -2740,110 +6503,379 @@ class CameraWireTool:
                         f"{cur}{line.cost_per_ft:.4f}",
                         f"{cur}{line.subtotal:,.2f}"),
             )
-        unassigned = ""
-        if report.unassigned_runs:
-            unassigned = (
-                f"\n  ⚠ {report.unassigned_runs} unassigned wire(s) — "
-                f"{self._format_length(report.unassigned_inches)}"
-            )
-        self._bom_totals_label.config(text=(
-            f"Subtotal:    {cur}{report.subtotal:,.2f}\n"
-            f"Waste added: {cur}{report.waste_added:,.2f} (×{report.waste_factor:.2f})\n"
-            f"Tax:         {cur}{report.tax_amount:,.2f} ({report.tax_rate*100:.2f}%)\n"
-            f"GRAND TOTAL: {cur}{report.grand_total:,.2f}"
-            + unassigned
-        ))
+        if not lines_sorted:
+            # Friendly empty state instead of a blank table
+            self._bom_tree.insert(
+                "", tk.END,
+                values=("—", "(no wire runs yet — draw a wire first)",
+                        "", "", "", ""))
 
-    # ============================================================ Cable types editor
+        # Per-symbol inventory (cameras + access + intrusion etc.)
+        if hasattr(self, "_bom_devices_tree"):
+            for item in self._bom_devices_tree.get_children():
+                self._bom_devices_tree.delete(item)
+            inv = bom_mod.device_inventory(
+                self.devices, self.symbol_types, self.wire_routes,
+                self.cable_types,
+            )
+            cam_count = 0; cam_runs = 0; cam_in = 0.0
+            total_count = 0; total_runs = 0; total_in = 0.0
+            for line in inv:
+                is_cam = self.symbol_types.get(line.code, {}).get("is_camera")
+                tag = "cam" if is_cam else "other"
+                wire_str = (self._format_length(line.total_in)
+                            if line.total_in else "—")
+                self._bom_devices_tree.insert(
+                    "", tk.END,
+                    values=(line.code, line.label[:24],
+                            line.count, line.cable_id, line.runs, wire_str),
+                    tags=(tag,),
+                )
+                total_count += line.count
+                total_runs  += line.runs
+                total_in    += line.total_in
+                if is_cam:
+                    cam_count += line.count
+                    cam_runs  += line.runs
+                    cam_in    += line.total_in
+            # Subtotal rows
+            self._bom_devices_tree.insert(
+                "", tk.END,
+                values=("CAMS", "— cameras subtotal —",
+                        cam_count, "", cam_runs,
+                        self._format_length(cam_in) if cam_in else "—"),
+                tags=("subtotal",),
+            )
+            self._bom_devices_tree.insert(
+                "", tk.END,
+                values=("ALL", "— ALL devices —",
+                        total_count, "", total_runs,
+                        self._format_length(total_in) if total_in else "—"),
+                tags=("total",),
+            )
+            self._bom_devices_tree.tag_configure("cam",      foreground="#FFD060")
+            self._bom_devices_tree.tag_configure("other",    foreground="#A0C0FF")
+            self._bom_devices_tree.tag_configure("subtotal",
+                                                 background="#2a2a2a",
+                                                 foreground="#FFFFFF")
+            self._bom_devices_tree.tag_configure("total",
+                                                 background="#202060",
+                                                 foreground="#FFFFFF")
+
+        # Update pills if they exist (legacy code path before _build_ui sets them)
+        if hasattr(self, "_bom_pill_subtotal"):
+            self._bom_pill_subtotal.config(
+                text=f"Subtotal\n{cur}{report.subtotal:,.2f}")
+            self._bom_pill_waste.config(
+                text=f"Waste ×{report.waste_factor:.2f}\n"
+                     f"{cur}{report.waste_added:,.2f}")
+            self._bom_pill_tax.config(
+                text=f"Tax {report.tax_rate*100:.2f}%\n"
+                     f"{cur}{report.tax_amount:,.2f}")
+            self._bom_pill_total.config(
+                text=f"GRAND TOTAL\n{cur}{report.grand_total:,.2f}")
+        # Unassigned-wires warning lives on the side-panel total label
+        # (still shown; the pill row is fixed-width and doesn't include it)
+        if report.unassigned_runs:
+            warn = (f"\n  ⚠ {report.unassigned_runs} unassigned wire(s) — "
+                    f"{self._format_length(report.unassigned_inches)}")
+            self._bom_totals_label.config(text=warn, foreground="#FF8C42")
+
+    # ============================================================ BOM right-click
+    def _on_bom_cable_rclick(self, event) -> None:
+        """Right-click a row in the 'By cable type' Treeview → menu with
+        'Highlight wires of this cable' and 'Edit this cable type'."""
+        row = self._bom_tree.identify_row(event.y)
+        if not row:
+            return
+        self._bom_tree.selection_set(row)
+        values = self._bom_tree.item(row, "values")
+        if not values:
+            return
+        cable_id = values[0]
+        if cable_id == "—" or cable_id not in self.cable_types:
+            return
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=f"{cable_id} — {self.cable_types[cable_id].get('label','')}",
+                      state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(
+            label=f"🔍  Highlight wires using {cable_id}",
+            command=lambda c=cable_id: self._highlight_wires_by_cable(c),
+        )
+        m.add_command(
+            label=f"✏️  Edit cable type {cable_id}…",
+            command=self._open_cable_types_editor,
+        )
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _highlight_wires_by_cable(self, cable_id: str) -> None:
+        """Select every wire whose effective cable is `cable_id` so they
+        all light up red on the canvas + are visible in the listbox."""
+        # Resolve effective cable for each route via the same rule the BOM uses
+        devices_by_id = {d["id"]: d for d in self.devices}
+        matching: list[int] = []
+        for i, r in enumerate(self.wire_routes):
+            cid = bom_mod.cable_for_route(r, devices_by_id, self.symbol_types,
+                                          self.cable_types)
+            if cid == cable_id:
+                matching.append(i)
+        if not matching:
+            self._flash_status(f"No wires currently use {cable_id}.")
+            return
+        # Switch to Wires tab and select all matches
+        self._notebook.select(1)
+        self.wire_listbox.selection_clear(0, tk.END)
+        # Map route indices → listbox row indices via _wire_listbox_rows
+        for ri in matching:
+            try:
+                row = self._wire_listbox_rows.index(ri)
+                self.wire_listbox.selection_set(row)
+                self.wire_listbox.see(row)
+            except ValueError:
+                continue
+        self._redraw()
+        self._flash_status(
+            f"Highlighted {len(matching)} wire(s) using {cable_id}.",
+            ttl_ms=3500,
+        )
+
+    # ============================================================ Cable types editor (master-detail)
     def _open_cable_types_editor(self) -> None:
+        """Master-detail cable-types editor.
+
+        Top half is the cable list (with a colored swatch per row).
+        Bottom half is the always-visible edit form for whichever cable
+        is currently selected (or for a new one being added). Changes
+        autosave on focus-out / Enter — no per-row dialog dance.
+        """
         dlg = tk.Toplevel(self.root)
         dlg.title("Cable Types")
-        dlg.geometry("520x420")
+        dlg.geometry("560x520")
         dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
-        ttk.Label(dlg, text="Project cable catalog. Per-symbol cable assignment "
-                  "is in the Symbol editor.",
-                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=10, pady=(8, 4))
+        ttk.Label(
+            dlg,
+            text="These cables show up in the BOM. Click a row to edit it; "
+                 "click 'Add new cable…' for a fresh one.",
+            wraplength=520, foreground="#7fc4ff", font=("Segoe UI", 9),
+        ).pack(anchor=tk.W, padx=12, pady=(10, 4))
 
-        cols = ("id", "label", "color", "cost")
-        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=10)
-        for c, w, h in (("id", 70, "ID"), ("label", 200, "Label"),
-                         ("color", 80, "Color"), ("cost", 80, "$/ft")):
+        # ---------------- top: cable list with color swatches via tags
+        list_frame = ttk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        cols = ("id", "label", "cost", "swatch")
+        tree = ttk.Treeview(list_frame, columns=cols, show="headings",
+                             height=8, selectmode="browse")
+        for c, w, anchor, h in (
+            ("id",     70,  tk.W, "ID"),
+            ("label",  240, tk.W, "Description"),
+            ("cost",   90,  tk.E, "Cost / ft"),
+            ("swatch", 100, tk.W, "Color"),
+        ):
             tree.heading(c, text=h)
-            tree.column(c, width=w, anchor=tk.W)
-        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+            tree.column(c, width=w, anchor=anchor, stretch=False)
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.config(yscrollcommand=sb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        def repop():
+        # ---------------- bottom: detail form
+        form = ttk.LabelFrame(dlg, text="Edit cable")
+        form.pack(fill=tk.X, padx=12, pady=(8, 8))
+
+        ttk.Label(form, text="ID:").grid(row=0, column=0, sticky=tk.E, padx=8, pady=6)
+        id_var = tk.StringVar()
+        id_entry = ttk.Entry(form, textvariable=id_var, width=18)
+        id_entry.grid(row=0, column=1, sticky=tk.W, padx=4)
+        id_help = ttk.Label(form, text="(short identifier, e.g. Cat6 — can't change after add)",
+                            foreground="#888", font=("Segoe UI", 8, "italic"))
+        id_help.grid(row=0, column=2, sticky=tk.W, padx=4)
+
+        ttk.Label(form, text="Description:").grid(row=1, column=0, sticky=tk.E, padx=8, pady=6)
+        label_var = tk.StringVar()
+        ttk.Entry(form, textvariable=label_var, width=44).grid(
+            row=1, column=1, columnspan=2, sticky=tk.W, padx=4)
+
+        ttk.Label(form, text="Cost / ft ($):").grid(row=2, column=0, sticky=tk.E, padx=8, pady=6)
+        cost_var = tk.StringVar()
+        ttk.Entry(form, textvariable=cost_var, width=12).grid(
+            row=2, column=1, sticky=tk.W, padx=4)
+
+        ttk.Label(form, text="Color:").grid(row=3, column=0, sticky=tk.E, padx=8, pady=6)
+        color_var = tk.StringVar()
+        color_row = ttk.Frame(form)
+        color_row.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=4)
+        swatch = tk.Label(color_row, bg="#888888", width=4, height=1,
+                           relief=tk.RAISED, cursor="hand2")
+        swatch.pack(side=tk.LEFT, padx=(0, 6))
+        color_label = ttk.Label(color_row, textvariable=color_var, width=10,
+                                 font=("Consolas", 10))
+        color_label.pack(side=tk.LEFT)
+
+        def pick_color(_event=None):
+            c = colorchooser.askcolor(
+                initialcolor=color_var.get() or "#888888",
+                title="Cable color (used to color wires on the map)")
+            if c and c[1]:
+                color_var.set(c[1].upper())
+                swatch.config(bg=c[1].upper())
+        # Click directly on the swatch (or its label) to open the picker.
+        swatch.bind("<Button-1>", pick_color)
+        color_label.bind("<Button-1>", pick_color)
+        ttk.Button(color_row, text="Pick color…", command=pick_color).pack(side=tk.LEFT, padx=8)
+
+        # Detail-form state
+        editing_id: list[str | None] = [None]    # None when adding
+        is_dirty: list[bool] = [False]
+
+        def update_swatch(*_):
+            try:
+                swatch.config(bg=color_var.get() or "#888888")
+            except tk.TclError:
+                pass
+        color_var.trace_add("write", update_swatch)
+
+        def mark_dirty(*_):
+            is_dirty[0] = True
+        for v in (id_var, label_var, cost_var, color_var):
+            v.trace_add("write", mark_dirty)
+
+        # ---------------- repopulation of list
+        def repop(select_id: str | None = None) -> None:
             for it in tree.get_children():
                 tree.delete(it)
             for cid, ct in sorted(self.cable_types.items()):
+                color = ct.get("color", "#888888")
                 tree.insert("", tk.END, iid=cid,
-                            values=(cid, ct["label"], ct["color"],
-                                    f"{ct.get('cost_per_ft', 0):.4f}"))
+                            values=(cid, ct.get("label", cid),
+                                    f"${ct.get('cost_per_ft', 0):.4f}",
+                                    color),
+                            tags=(f"c_{cid}",))
+                # Color swatch via tag-coloring on the swatch column
+                tree.tag_configure(f"c_{cid}", background=color,
+                                    foreground=_text_for_bg(color))
+            if select_id and select_id in self.cable_types:
+                tree.selection_set(select_id)
+                tree.see(select_id)
+
+        # ---------------- form load/save
+        def load_into_form(cid: str | None) -> None:
+            editing_id[0] = cid
+            if cid is None:
+                id_var.set("")
+                label_var.set("")
+                cost_var.set("0.10")
+                color_var.set("#888888")
+                id_entry.config(state="normal")
+                id_help.grid()
+                form.config(text="Add new cable")
+            else:
+                ct = self.cable_types.get(cid, {})
+                id_var.set(cid)
+                label_var.set(ct.get("label", ""))
+                cost_var.set(f"{ct.get('cost_per_ft', 0):.4f}")
+                color_var.set(ct.get("color", "#888888"))
+                id_entry.config(state="disabled")
+                id_help.grid_remove()
+                form.config(text=f"Editing: {cid}")
+            is_dirty[0] = False
+
+        def commit_form() -> bool:
+            new_id = id_var.get().strip()
+            if not new_id:
+                messagebox.showerror("Required", "Cable ID is required")
+                id_entry.focus_set()
+                return False
+            try:
+                cost = float(cost_var.get())
+            except (ValueError, tk.TclError):
+                messagebox.showerror("Invalid", "Cost / ft must be a number")
+                return False
+            color = (color_var.get() or "#888888").upper()
+            label = label_var.get().strip() or new_id
+            old_id = editing_id[0]
+            if old_id is None and new_id in self.cable_types:
+                if not messagebox.askyesno(
+                    "Overwrite?",
+                    f"A cable named '{new_id}' already exists. Overwrite it?"):
+                    return False
+            self.cable_types[new_id] = {
+                "label": label, "color": color, "cost_per_ft": cost,
+            }
+            editing_id[0] = new_id
+            is_dirty[0] = False
+            self._mark_dirty()
+            self._refresh_bom_tab()
+            self._refresh_symbol_list()
+            self._redraw()
+            repop(select_id=new_id)
+            return True
+
+        def on_select(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            if is_dirty[0] and editing_id[0] is not None:
+                # Quietly persist the unsaved row before switching away
+                if not commit_form():
+                    return
+            load_into_form(sel[0])
+        tree.bind("<<TreeviewSelect>>", on_select)
+
+        # ---------------- buttons
+        button_row = ttk.Frame(dlg)
+        button_row.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(button_row, text="+ Add new cable",
+                   command=lambda: (load_into_form(None), id_entry.focus_set())
+                   ).pack(side=tk.LEFT)
+        save_btn = ttk.Button(button_row, text="Save changes",
+                               command=commit_form)
+        save_btn.pack(side=tk.LEFT, padx=8)
+
+        def on_delete():
+            cid = editing_id[0]
+            if cid is None or cid not in self.cable_types:
+                return
+            if not messagebox.askyesno(
+                "Delete cable",
+                f"Delete cable type '{cid}'?\n\n"
+                "Wires that use this cable will fall back to their device's "
+                "default cable in the BOM."):
+                return
+            self.cable_types.pop(cid, None)
+            self._mark_dirty()
+            self._refresh_bom_tab()
+            self._refresh_symbol_list()
+            self._redraw()
+            repop()
+            # Show the first remaining cable, or empty form
+            if self.cable_types:
+                first = sorted(self.cable_types.keys())[0]
+                tree.selection_set(first)
+                load_into_form(first)
+            else:
+                load_into_form(None)
+        ttk.Button(button_row, text="Delete", command=on_delete).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        # Enter in any form field commits
+        for w in (id_entry, ):  # easy fallthrough
+            pass
+        dlg.bind("<Return>", lambda _e: commit_form())
+
+        # Initial state — show the first cable selected
         repop()
-
-        def edit_dialog(cid: str | None):
-            edit = tk.Toplevel(dlg); edit.transient(dlg); edit.grab_set()
-            edit.title("Cable" if cid else "New Cable")
-            edit.geometry("340x230")
-            row = 0
-            ttk.Label(edit, text="ID:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
-            id_var = tk.StringVar(value=cid or "")
-            ttk.Entry(edit, textvariable=id_var, width=20,
-                      state=("disabled" if cid else "normal")).grid(row=row, column=1, sticky=tk.W)
-            row += 1
-            ttk.Label(edit, text="Label:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
-            label_var = tk.StringVar(value=self.cable_types.get(cid, {}).get("label", "") if cid else "")
-            ttk.Entry(edit, textvariable=label_var, width=28).grid(row=row, column=1, sticky=tk.W)
-            row += 1
-            ttk.Label(edit, text="Color:").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
-            color_var = tk.StringVar(value=self.cable_types.get(cid, {}).get("color", "#888888") if cid else "#888888")
-            color_frame = ttk.Frame(edit); color_frame.grid(row=row, column=1, sticky=tk.W)
-            sw = tk.Label(color_frame, bg=color_var.get(), width=4, height=1, relief=tk.RAISED)
-            sw.pack(side=tk.LEFT, padx=(0, 4))
-            ttk.Label(color_frame, textvariable=color_var, width=10).pack(side=tk.LEFT)
-            def pick():
-                c = colorchooser.askcolor(initialcolor=color_var.get())
-                if c and c[1]:
-                    color_var.set(c[1].upper()); sw.config(bg=c[1])
-            ttk.Button(color_frame, text="Pick…", command=pick).pack(side=tk.LEFT, padx=4)
-            row += 1
-            ttk.Label(edit, text="Cost/ft ($):").grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
-            cost_var = tk.DoubleVar(value=self.cable_types.get(cid, {}).get("cost_per_ft", 0.10) if cid else 0.10)
-            ttk.Entry(edit, textvariable=cost_var, width=10).grid(row=row, column=1, sticky=tk.W)
-            row += 1
-            def save():
-                new_id = id_var.get().strip()
-                if not new_id:
-                    messagebox.showerror("Error", "ID required"); return
-                self.cable_types[new_id] = {
-                    "label": label_var.get().strip() or new_id,
-                    "color": color_var.get().upper(),
-                    "cost_per_ft": float(cost_var.get()),
-                }
-                self._mark_dirty()
-                repop()
-                self._refresh_bom_tab()
-                self._redraw()
-                edit.destroy()
-            ttk.Button(edit, text="Save", command=save).grid(row=row, column=0, columnspan=2, pady=10)
-
-        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Button(btns, text="Add", command=lambda: edit_dialog(None)).pack(side=tk.LEFT)
-        def on_edit():
-            sel = tree.selection()
-            if sel: edit_dialog(sel[0])
-        ttk.Button(btns, text="Edit", command=on_edit).pack(side=tk.LEFT, padx=4)
-        def on_del():
-            sel = tree.selection()
-            if not sel: return
-            cid = sel[0]
-            if messagebox.askyesno("Delete", f"Delete cable type '{cid}'?"):
-                self.cable_types.pop(cid, None)
-                self._mark_dirty(); repop()
-                self._refresh_bom_tab(); self._redraw()
-        ttk.Button(btns, text="Delete", command=on_del).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+        if self.cable_types:
+            first = sorted(self.cable_types.keys())[0]
+            tree.selection_set(first)
+            load_into_form(first)
+        else:
+            load_into_form(None)
 
     # ============================================================ FOV / DORI editor
     def _open_fov_dialog_for_selected(self) -> None:
@@ -2856,6 +6888,284 @@ class CameraWireTool:
                                 f"{self.selected_device['id']} is not flagged as a camera.")
             return
         self._open_fov_dialog(self.selected_device)
+
+    # ============================================================ Device-list context menu
+    def _on_dev_listbox_rclick(self, event) -> None:
+        """Right-click anywhere in the Devices list — context menu.
+
+        Preserves multi-selection: if the user right-clicks a row that's
+        already part of the multi-selection, we don't replace it. If the
+        clicked row isn't in the selection, we switch to single-select on
+        that row (standard Windows behavior).
+        """
+        idx = self.dev_listbox.nearest(event.y)
+        if idx < 0 or not hasattr(self, "_dev_listbox_rows"):
+            return
+        if idx >= len(self._dev_listbox_rows):
+            return
+        device = self._dev_listbox_rows[idx]
+        if device is None:
+            # Group header → offer "Select all in group"
+            self._show_dev_group_menu(event, idx)
+            return
+        existing_sel = self.dev_listbox.curselection()
+        if idx in existing_sel:
+            # Clicked-on row is already part of the multi-selection — keep it
+            self._primary_selected = device
+        else:
+            self.dev_listbox.selection_clear(0, tk.END)
+            self.dev_listbox.selection_set(idx)
+            self.selected_device = device
+        self._redraw()
+
+        info = self.symbol_types.get(device["type"], {})
+        wires = [w for w in self.wire_routes if w.get("device_id") == device["id"]]
+        wire_total_in = sum(w.get("length_in", 0) or 0 for w in wires)
+
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=f"{device['id']} ({device['type']} – {info.get('label','?')})",
+                       state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(label="📐  Draw wire from here…",
+                       command=lambda d=device: self._draw_wire_from(d))
+        if wires:
+            m.add_command(label=f"🔁  Re-route last wire ({len(wires)} run(s), "
+                                 f"{self._format_length(wire_total_in)})",
+                           command=lambda d=device: self._reroute_last_wire_from(d))
+            m.add_command(label=f"🗑  Clear all wires for this device "
+                                 f"({len(wires)} run(s))",
+                           command=lambda d=device: self._clear_wires_for_device(d))
+        else:
+            m.add_command(label="(no wires assigned yet)", state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(label="🎯  Center on map",
+                       command=self._center_on_selected)
+        if info.get("is_camera"):
+            m.add_command(label="📷  Edit FOV / DORI…",
+                           command=lambda d=device: self._open_fov_dialog(d))
+        m.add_separator()
+        del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
+                     if len(self.selected_devices) > 1
+                     else "🗑  Delete device")
+        m.add_command(label=del_label, command=self._on_delete_key,
+                       accelerator="Del")
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _show_wire_group_menu(self, event, header_idx: int) -> None:
+        """Right-click on a group header in the Wires listbox → bulk actions."""
+        # Collect contiguous non-None route indices following the header
+        group_indices: list[int] = []
+        group_rows: list[int] = []
+        for i in range(header_idx + 1, len(self._wire_listbox_rows)):
+            row = self._wire_listbox_rows[i]
+            if row is None:
+                break
+            group_indices.append(row)
+            group_rows.append(i)
+        if not group_indices:
+            return
+        header_text = self.wire_listbox.get(header_idx).strip()
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=header_text, state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(
+            label=f"Select all {len(group_indices)} wire(s) in this group",
+            command=lambda r=group_rows: self._select_wire_rows(r))
+        m.add_command(
+            label=f"Delete all {len(group_indices)} wire(s) in this group",
+            command=lambda r=group_rows: self._delete_selected_wires_multi_force(r))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _select_wire_rows(self, rows: list[int]) -> None:
+        self.wire_listbox.selection_clear(0, tk.END)
+        for r in rows:
+            self.wire_listbox.selection_set(r)
+        if rows:
+            self.wire_listbox.see(rows[0])
+        self._redraw()
+
+    def _delete_selected_wires_multi_force(self, rows: list[int]) -> None:
+        """Same as _delete_selected_wires_multi but skips the per-call
+        confirmation since we just collected the group via right-click."""
+        self._delete_selected_wires_multi(rows)
+
+    def _show_dev_group_menu(self, event, header_idx: int) -> None:
+        """Right-click on a group header in the Devices listbox →
+        actions that operate on the whole group."""
+        # Find which devices belong to this group: contiguous non-None
+        # entries in _dev_listbox_rows immediately after header_idx.
+        group_devs: list[dict] = []
+        for i in range(header_idx + 1, len(self._dev_listbox_rows)):
+            row = self._dev_listbox_rows[i]
+            if row is None:
+                break
+            group_devs.append(row)
+        if not group_devs:
+            return
+        header_text = self.dev_listbox.get(header_idx).strip()
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=header_text, state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(
+            label=f"Select all {len(group_devs)} in this group",
+            command=lambda devs=group_devs: self._select_devices_group(devs))
+        m.add_command(
+            label=f"Zoom to fit this group",
+            command=lambda devs=group_devs: self._zoom_to_devices(devs))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _select_devices_group(self, devs: list[dict]) -> None:
+        self.selected_devices = list(devs)
+        self._primary_selected = devs[-1]
+        self._flash_status(
+            f"Selected all {len(devs)} device(s) in this group.")
+        self._redraw()
+
+    def _zoom_to_devices(self, devs: list[dict]) -> None:
+        if not devs:
+            return
+        xs0 = [d["x"] * self.dx_scale for d in devs]
+        xs1 = [(d["x"] + d["w"]) * self.dx_scale for d in devs]
+        ys0 = [d["y"] * self.dy_scale for d in devs]
+        ys1 = [(d["y"] + d["h"]) * self.dy_scale for d in devs]
+        self._zoom_to_image_bbox(min(xs0), min(ys0),
+                                  max(xs1), max(ys1), pad=120)
+
+    def _clear_wires_for_device(self, device: dict) -> None:
+        """Remove every wire associated with this device (undoable)."""
+        wires = [w for w in self.wire_routes if w.get("device_id") == device["id"]]
+        if not wires:
+            return
+        total_in = sum(w.get("length_in", 0) or 0 for w in wires)
+        if not messagebox.askyesno(
+            "Clear wires?",
+            f"Remove all {len(wires)} wire run(s) for {device['id']} "
+            f"({device['type']}) — total {self._format_length(total_in)}?\n\n"
+            "This is undoable (Ctrl+Z)."):
+            return
+        self._execute(ClearDeviceWiresCmd(self, device["id"]))
+        self._post_command_refresh()
+        self.status_label.config(
+            text=f"Cleared {len(wires)} wire run(s) on {device['id']}. "
+                 "Ctrl+Z to undo.")
+
+    # ============================================================ Direct wire entry
+    def _draw_wire_from(self, device: dict) -> None:
+        """Switch to Wire Mode with `device` as the source, with first point
+        already placed at the device's center. User just clicks subsequent
+        route points and right-clicks to finish."""
+        self.selected_device = device
+        self._set_mode(Mode.WIRE)
+        # Seed first point at device center (in image coords)
+        cx, cy = self._drawio_to_img(device["x"] + device["w"] / 2,
+                                     device["y"] + device["h"] / 2)
+        self.current_wire_points = [(cx, cy)]
+        info = self.symbol_types.get(device["type"], {})
+        self.status_label.config(
+            text=f"Drawing wire from {device['id']} ({info.get('label','?')}) — "
+                 f"click route points, right-click to finish")
+        self._redraw()
+        self.canvas.focus_set()
+
+    def _reroute_last_wire_from(self, device: dict) -> None:
+        """Find this device's most recent wire, delete it, and start a fresh
+        wire draw from the device. Useful when you want to revise a route."""
+        wires = [(i, w) for i, w in enumerate(self.wire_routes)
+                 if w.get("device_id") == device["id"]]
+        if not wires:
+            messagebox.showinfo(
+                "No wire yet",
+                f"No wire is associated with {device['id']}. "
+                "Use 'Draw wire from here…' to create one.")
+            self._draw_wire_from(device)
+            return
+        idx, route = wires[-1]
+        if not messagebox.askyesno(
+            "Replace wire?",
+            f"Delete the most recent wire on {device['id']} "
+            f"({len(route['points'])} points, "
+            f"{self._format_length(route.get('length_in') or 0)}) "
+            "and start a new one?"):
+            return
+        self._execute(DeleteWireCmd(self, idx, route))
+        self._post_command_refresh()
+        self._draw_wire_from(device)
+
+    # ============================================================ FOV bulk actions
+    def _apply_default_fov_all_cameras(self) -> None:
+        """Set the per-type default FOV on every camera that doesn't
+        already have one. Existing per-camera FOVs are preserved."""
+        camera_count = 0
+        applied = 0
+        skipped = 0
+        for d in self.devices:
+            info = self.symbol_types.get(d["type"], {})
+            if not info.get("is_camera"):
+                continue
+            camera_count += 1
+            if d.get("fov"):
+                skipped += 1
+                continue
+            d["fov"] = default_fov_for_type(d["type"])
+            applied += 1
+        if applied == 0 and skipped > 0:
+            self._flash_status(
+                f"All {camera_count} cameras already have FOV configured.",
+                ttl_ms=3500)
+        elif applied == 0:
+            self._flash_status(
+                "No cameras on this floor — place some cameras first.",
+                ttl_ms=3500)
+        else:
+            self._mark_dirty()
+            self._show_fov.set(True)   # auto-enable so the user sees them
+            self._redraw()
+            msg = f"Applied default FOV to {applied} camera(s)."
+            if skipped:
+                msg += f" Kept existing FOV on {skipped}."
+            self._flash_status(msg, ttl_ms=3500)
+
+    def _clear_fov_all_cameras(self) -> None:
+        """Remove all per-camera FOV configurations (cones revert to
+        type defaults via the fallback path in _draw_fov_cones)."""
+        n_have = sum(1 for d in self.devices if d.get("fov"))
+        if n_have == 0:
+            self._flash_status("No camera-specific FOVs to clear.")
+            return
+        if not messagebox.askyesno(
+            "Clear FOV configs?",
+            f"Remove FOV configuration from {n_have} camera(s)?\n\n"
+            "(They'll revert to the type defaults — cones still show "
+            "when 'Show FOV Cones' is on.)"):
+            return
+        for d in self.devices:
+            d.pop("fov", None)
+        self._mark_dirty()
+        self._redraw()
+        self._flash_status(f"Cleared FOV from {n_have} camera(s).")
+
+    def _apply_default_fov_to_one(self, device: dict) -> None:
+        """Apply the type-default FOV to a single camera, overwriting any
+        existing per-camera FOV (so this also acts as 'reset to default')."""
+        info = self.symbol_types.get(device["type"], {})
+        if not info.get("is_camera"):
+            return
+        device["fov"] = default_fov_for_type(device["type"])
+        self._show_fov.set(True)
+        self._mark_dirty()
+        self._redraw()
+        self._flash_status(
+            f"Applied default FOV to {device['id']} ({device['type']}). "
+            f"Right-click → Edit FOV to fine-tune.")
 
     def _toggle_camera_fov(self, device: dict) -> None:
         fov = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
@@ -2961,8 +7271,8 @@ class CameraWireTool:
                 row=i // 4, column=i % 4, padx=4, pady=2, sticky=tk.W)
 
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
-        def apply():
-            device["fov"] = {
+        def _settings_dict(include_az: bool = True) -> dict:
+            d = {
                 "enabled": True,
                 "show": show_var.get(),
                 "lens_mm": float(lens_var.get()),
@@ -2971,85 +7281,86 @@ class CameraWireTool:
                                                               [1920, 1080])),
                 "mount_height_ft": float(mh_var.get()),
                 "tilt_deg": float(tilt_var.get()),
-                "azimuth_deg": float(az_var.get()),
             }
+            if include_az:
+                d["azimuth_deg"] = float(az_var.get())
+            return d
+
+        def apply():
+            device["fov"] = _settings_dict(include_az=True)
             self._show_fov.set(True)
             self._mark_dirty()
             self._redraw()
             dlg.destroy()
+
+        def apply_to_type():
+            """Push the lens/sensor/resolution/mount/tilt settings to ALL
+            cameras of this type. Preserves each camera's own azimuth_deg
+            (which is intentionally per-camera since they point different
+            ways). Toggling 'show' is also per-camera."""
+            same_type = [d for d in self.devices if d["type"] == device["type"]]
+            if len(same_type) <= 1:
+                apply()  # nothing else to propagate to; just save this one
+                return
+            if not messagebox.askyesno(
+                "Apply to all?",
+                f"Update FOV settings for ALL {len(same_type)} cameras of "
+                f"type {device['type']}?\n\n"
+                "(Lens, sensor, resolution, mount-height, and tilt will be "
+                "pushed. Each camera keeps its own azimuth and show-flag.)"):
+                return
+            shared = _settings_dict(include_az=False)
+            for d in same_type:
+                old = d.get("fov") or default_fov_for_type(d["type"])
+                # Preserve per-camera azimuth + show flag; overwrite the rest
+                merged = {**old, **shared}
+                merged["azimuth_deg"] = old.get("azimuth_deg", 0.0)
+                if "show" in old:
+                    merged["show"] = old["show"]
+                d["fov"] = merged
+            # Also save the active camera's azimuth (the one the user was editing)
+            device["fov"]["azimuth_deg"] = float(az_var.get())
+            self._show_fov.set(True)
+            self._mark_dirty()
+            self._redraw()
+            self._flash_status(
+                f"Applied FOV settings to all {len(same_type)} {device['type']} cameras.",
+                ttl_ms=3500)
+            dlg.destroy()
+
         ttk.Button(btns, text="Apply", command=apply).pack(side=tk.LEFT)
+        if any(d["type"] == device["type"] and d["id"] != device["id"]
+                for d in self.devices):
+            ttk.Button(
+                btns,
+                text=f"Apply to all {device['type']} cameras…",
+                command=apply_to_type,
+            ).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
 
-    # ============================================================ Auto-routing (A*)
-    def _build_routing_ctx(self):
-        if self._routing_ctx is not None:
-            return self._routing_ctx
-        if not _HAS_ROUTING or routing_mod is None:
-            return None
-        try:
-            self.status_label.config(text="Building obstacle grid…")
-            self.root.update_idletasks()
-            # cell_px=25 + threshold=80 + no dilation tuned for typical
-            # architectural floor plans (lots of fine detail; dilation makes
-            # everything a wall).
-            grid = routing_mod.build_obstacle_grid(self.bg_image, cell_px=25,
-                                                    threshold=80, dilate_iters=0)
-            self._routing_ctx = routing_mod.RoutingContext(grid=grid, cell_px=25)
-            self._update_status()
-        except Exception as e:
-            log_error("Failed to build routing grid", e)
-            messagebox.showerror("Auto-route", f"Could not build obstacle grid:\n{e}")
-            return None
-        return self._routing_ctx
+    # ============================================================ Cable resolution
+    def _resolve_cable_for_pair(self, src: dict, dst: dict | None) -> str:
+        """Pick the cable type for a wire run between two endpoints.
 
-    def _start_auto_route(self):
-        if not _HAS_ROUTING:
-            messagebox.showwarning(
-                "Auto-route unavailable",
-                "Auto-routing requires numpy. `pip install numpy` then restart.")
-            return
-        self._set_mode(Mode.AUTO_ROUTE)
-        self._auto_route_first = None
-        self.status_label.config(
-            text="Auto-route: click first device, then click second device. Esc to cancel.")
-
-    def _auto_route_from(self, device: dict):
-        self._start_auto_route()
-        self._auto_route_first = device
-        self.status_label.config(
-            text=f"Auto-route: now click destination device (started at {device['id']})")
-
-    def _do_auto_route(self, src: dict, dst: dict):
-        ctx = self._build_routing_ctx()
-        if ctx is None:
-            return
-        sx, sy = self._drawio_to_img(src["x"] + src["w"]/2, src["y"] + src["h"]/2)
-        gx, gy = self._drawio_to_img(dst["x"] + dst["w"]/2, dst["y"] + dst["h"]/2)
-        try:
-            waypoints = routing_mod.route_between(ctx, (sx, sy), (gx, gy))
-        except Exception as e:
-            log_error("A* failed", e)
-            messagebox.showerror("Auto-route", f"Route failed:\n{e}")
-            return
-        if not waypoints:
-            messagebox.showwarning("Auto-route",
-                                   "No path found (all routes blocked by walls)")
-            return
-        px_len = self._calc_wire_length(waypoints)
-        real_in = px_len * self.scale_factor if self.scale_factor else None
-        route = {
-            "points": [tuple(p) for p in waypoints],
-            "length_px": px_len,
-            "length_in": real_in,
-            "device_id": src["id"],
-        }
-        self._execute(AddWireCmd(self, route))
-        self.selected_device = src
-        self._post_command_refresh()
-        self.status_label.config(
-            text=f"Auto-routed {src['id']} → {dst['id']}: "
-                 f"{len(waypoints)} waypoints, "
-                 f"{self._format_length(real_in) if real_in else f'{px_len:.0f}px'}")
+        Rule: prefer the *device's* cable over a run point's cable. If
+        neither endpoint is a run point, prefer the source's. If both
+        are run points, prefer the source's (arbitrary but consistent).
+        """
+        src_info = self.symbol_types.get(src["type"], {})
+        src_cable = (src_info.get("cable_type")
+                     or bom_mod.default_cable_for(src_info))
+        if dst is None:
+            return src_cable
+        dst_info = self.symbol_types.get(dst["type"], {})
+        dst_cable = (dst_info.get("cable_type")
+                     or bom_mod.default_cable_for(dst_info))
+        src_rp = bool(src_info.get("is_run_point"))
+        dst_rp = bool(dst_info.get("is_run_point"))
+        if src_rp and not dst_rp:
+            return dst_cable    # the actual device wins over the run point
+        if dst_rp and not src_rp:
+            return src_cable
+        return src_cable        # both regular OR both run points → source
 
     # ============================================================ Multi-floor
     def _refresh_floor_menu(self) -> None:
@@ -3323,6 +7634,119 @@ class CameraWireTool:
         except OSError as e:
             messagebox.showerror("Export failed", str(e))
 
+    def _export_map_png(self) -> None:
+        """Save a PNG snapshot of the canvas — what's currently visible
+        on the map (devices + wires + legend, but not the mode banner /
+        mini-map / hover popups)."""
+        path = filedialog.asksaveasfilename(
+            title="Save map snapshot",
+            defaultextension=".png",
+            initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_map.png",
+            filetypes=[("PNG", "*.png")],
+        )
+        if not path:
+            return
+        # Ephemerally hide on-canvas chrome so the snapshot is clean
+        self.canvas.delete("hover_info")
+        was_minimap_built = self._minimap_built
+        try:
+            self._minimap_photo = None       # skip mini-map render
+            self._minimap_built = True
+            saved_show_walls = False         # (no walls to hide here, just safe)
+            self._redraw()
+            # Use Win32 PrintWindow against the canvas widget so we capture
+            # exactly what's on the canvas, even if other windows overlap.
+            try:
+                import ctypes
+                from PIL import Image
+                hwnd = ctypes.windll.user32.GetParent(self.canvas.winfo_id())
+                # Dimensions of the Tk root, since canvas is embedded
+                rect_root = self._win_rect(hwnd)
+                # Compute the canvas's screen position to crop after capture
+                cx = self.canvas.winfo_rootx()
+                cy = self.canvas.winfo_rooty()
+                cw = self.canvas.winfo_width()
+                ch = self.canvas.winfo_height()
+                full = self._capture_root_window()
+                if full is None:
+                    raise RuntimeError("PrintWindow returned no bitmap")
+                # Translate root-window coords → bitmap coords
+                root_x = rect_root[0]; root_y = rect_root[1]
+                cb = full.crop((cx - root_x, cy - root_y,
+                                 cx - root_x + cw, cy - root_y + ch))
+                cb.save(path)
+            except Exception as e:
+                log_error("Map snapshot failed", e)
+                messagebox.showerror("Export failed", str(e))
+                return
+        finally:
+            self._minimap_built = was_minimap_built
+            self._build_minimap_image()
+            self._redraw()
+        self._flash_status(f"✓ Saved map snapshot to {os.path.basename(path)}",
+                            ttl_ms=3500)
+
+    @staticmethod
+    def _win_rect(hwnd):
+        import ctypes
+        from ctypes import wintypes
+        class R(ctypes.Structure):
+            _fields_ = [("L", wintypes.LONG), ("T", wintypes.LONG),
+                        ("R", wintypes.LONG), ("B", wintypes.LONG)]
+        r = R()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+        return (r.L, r.T, r.R, r.B)
+
+    def _capture_root_window(self):
+        """Snapshot the Tk root window via Win32 PrintWindow — works even
+        when other apps overlap. Returns a PIL.Image or None."""
+        try:
+            import ctypes
+            from PIL import Image
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hwnd_root = user32.GetParent(self.canvas.winfo_id())
+            l, t, r, b = self._win_rect(hwnd_root)
+            w, h = r - l, b - t
+            if w <= 0 or h <= 0:
+                return None
+            hdc = user32.GetDC(0)
+            hdc_mem = gdi32.CreateCompatibleDC(hdc)
+            hbm = gdi32.CreateCompatibleBitmap(hdc, w, h)
+            gdi32.SelectObject(hdc_mem, hbm)
+            user32.PrintWindow(hwnd_root, hdc_mem, 2)
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", ctypes.c_uint32),
+                    ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32),
+                    ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16),
+                    ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32),
+                    ("biXPelsPerMeter", ctypes.c_int32),
+                    ("biYPelsPerMeter", ctypes.c_int32),
+                    ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32),
+                ]
+            class BMI(ctypes.Structure):
+                _fields_ = [("h", BITMAPINFOHEADER), ("c", ctypes.c_uint32 * 3)]
+            bmi = BMI()
+            bmi.h.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.h.biWidth = w; bmi.h.biHeight = -h
+            bmi.h.biPlanes = 1; bmi.h.biBitCount = 32
+            buf = (ctypes.c_uint8 * (w * h * 4))()
+            gdi32.GetDIBits(hdc_mem, hbm, 0, h, buf, ctypes.byref(bmi), 0)
+            img = Image.frombuffer("RGBA", (w, h), bytes(buf), "raw", "BGRA", 0, 1)
+            gdi32.DeleteObject(hbm)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(0, hdc)
+            return img
+        except Exception as e:
+            log_error("Capture-root-window failed", e)
+            return None
+
     def _export_pdf(self) -> None:
         if not _HAS_EXPORT or not export_mod._HAS_REPORTLAB:
             messagebox.showwarning(
@@ -3365,13 +7789,45 @@ class CameraWireTool:
         Uses inches_per_pixel = 1/scale_factor to convert DORI radii (inches)
         into image-pixel coords. Falls back to 0.5 if no scale set.
         """
+        # Skip rendering entirely at very low zoom — cones become unreadable
+        # noise and dominate render time. User can zoom in to see them.
+        if self.zoom < 0.18:
+            self._fov_handles = {}
+            return
+        # Reset handle cache; it gets repopulated as we draw cones.
+        self._fov_handles = {}
         ipp = (1.0 / self.scale_factor) if self.scale_factor else 0.5
+        # 'Only selected' filter: when active and there's a single primary
+        # selection that's a camera, render only that one's cone.
+        only_selected = self._show_only_selected_fov.get()
+        sel_id = (self._primary_selected["id"]
+                  if self._primary_selected is not None else None)
+        # Viewport culling — skip cones whose camera is far outside the
+        # visible canvas region. Cones extend FROM the camera, so we still
+        # render any camera that could project a cone into the view.
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        ix0, iy0 = self._canvas_to_img(0, 0)
+        ix1, iy1 = self._canvas_to_img(cw, ch)
+        slack = max((ix1 - ix0), (iy1 - iy0))
         for d in self.devices:
-            f = d.get("fov")
-            if not f or not f.get("show", True):
-                continue
             info = self.symbol_types.get(d["type"], {})
             if not info.get("is_camera"):
+                continue
+            if only_selected and (sel_id is None or d["id"] != sel_id):
+                continue
+            cam_ix = (d["x"] + d["w"]/2) * self.dx_scale
+            cam_iy = (d["y"] + d["h"]/2) * self.dy_scale
+            if not (ix0 - slack <= cam_ix <= ix1 + slack
+                    and iy0 - slack <= cam_iy <= iy1 + slack):
+                continue
+            f = d.get("fov")
+            # If the camera doesn't have its own FOV configured, fall back
+            # to the per-type preset so toggling 'Show FOV' shows ALL
+            # cameras' coverage immediately, even on a fresh project.
+            if not f:
+                f = default_fov_for_type(d["type"])
+            elif not f.get("show", True):
                 continue
             cone = fov_mod.compute_fov(f)
             # Camera apex in image coords
@@ -3404,6 +7860,45 @@ class CameraWireTool:
                     stipple="gray25",  # semi-transparent feel
                     tags=("fov", f"fov_{d['id']}"),
                 )
+            # Draw the rotation handle — only on the SELECTED camera (or
+            # when "Show only selected" is on, which already filtered above).
+            # Handle sits at the tip of the cone's center axis, at the
+            # Detection radius. Drag it to rotate.
+            sel_id_now = (self._primary_selected["id"]
+                          if self._primary_selected is not None else None)
+            if d["id"] == sel_id_now or only_selected:
+                d_radius_in = cone.distances_in.get("D", 0)
+                if d_radius_in > 0:
+                    radius_px = d_radius_in / ipp
+                    az_rad = math.radians(cone.azimuth_deg)
+                    tip_ix = apex_ix + math.sin(az_rad) * radius_px
+                    tip_iy = apex_iy - math.cos(az_rad) * radius_px
+                    cx_, cy_ = self._img_to_canvas(tip_ix, tip_iy)
+                    apex_cx, apex_cy = self._img_to_canvas(apex_ix, apex_iy)
+                    # Line from apex to handle, then a circle handle
+                    self.canvas.create_line(
+                        apex_cx, apex_cy, cx_, cy_,
+                        fill="#FFFFFF", width=2, dash=(4, 3),
+                        tags=("fov", "fov_axis", f"fov_axis_{d['id']}"),
+                    )
+                    self.canvas.create_oval(
+                        cx_-9, cy_-9, cx_+9, cy_+9,
+                        fill="#FFFFFF", outline="#202060", width=2,
+                        tags=("fov", "fov_handle", f"fov_handle_{d['id']}"),
+                    )
+                    # Cache the handle position (image coords + camera apex)
+                    # for hit-testing in _on_left_press.
+                    self._fov_handles[d["id"]] = (cx_, cy_, apex_cx, apex_cy)
+                    # Floating azimuth readout
+                    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                    compass = dirs[round(cone.azimuth_deg / 45) % 8]
+                    self.canvas.create_text(
+                        cx_+14, cy_+14,
+                        text=f"{int(cone.azimuth_deg)}° ({compass})",
+                        fill="#FFFFFF", font=("Segoe UI", 9, "bold"),
+                        anchor=tk.W,
+                        tags=("fov", f"fov_label_{d['id']}"),
+                    )
 
 
 # ============================================================ Entry point
