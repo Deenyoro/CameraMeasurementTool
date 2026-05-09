@@ -1041,6 +1041,25 @@ class CameraWireTool:
         self._initial_pref_unit = prefs.get("unit")
         self._user_settings = prefs
 
+        # Restore view toggles from prefs (initialized to defaults above).
+        # Use `if key in prefs` so we don't clobber the default with False
+        # for users who haven't set the pref yet.
+        for key, var in (
+            ("show_fov",        self._show_fov),
+            ("show_dori",       self._show_dori),
+            ("show_grid",       self._show_grid),
+            ("show_device_ids", self._show_device_ids),
+            ("show_legend",     self._show_legend),
+        ):
+            if key in prefs:
+                try:
+                    var.set(bool(prefs[key]))
+                except tk.TclError:
+                    pass
+            # Persist on change so the next session inherits the state.
+            var.trace_add("write",
+                          lambda *_, _self=self: _self._persist_user_settings())
+
         # Auto-save (writes per-session recovery file every minute)
         self._autosave_path = self.project_path + ".autosave.json"
         self._autosave_id: str | None = None
@@ -5374,17 +5393,23 @@ class CameraWireTool:
         self._persist_user_settings()
 
     def _persist_user_settings(self) -> None:
-        """Write current UI prefs (unit, currency, waste, tax) to the
-        per-user settings file. Cheap; called whenever any of those vars
-        change."""
+        """Write current UI prefs to the per-user settings file. Cheap;
+        called whenever any of these change. Includes the view toggles
+        so users don't have to re-enable FOV / grid / IDs / legend every
+        session."""
         try:
             prefs = {
                 "unit":          self.unit_var.get(),
                 "currency":      self._bom_currency_var.get() or "$",
                 "waste_factor":  float(self._bom_waste_var.get()),
                 "tax_rate":      float(self._bom_tax_var.get()),
+                "show_fov":         bool(self._show_fov.get()),
+                "show_dori":        bool(self._show_dori.get()),
+                "show_grid":        bool(self._show_grid.get()),
+                "show_device_ids":  bool(self._show_device_ids.get()),
+                "show_legend":      bool(self._show_legend.get()),
             }
-        except (tk.TclError, ValueError):
+        except (tk.TclError, ValueError, AttributeError):
             return
         save_settings(prefs)
 
