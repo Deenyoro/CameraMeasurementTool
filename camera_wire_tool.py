@@ -1323,6 +1323,10 @@ class CameraWireTool:
         self.canvas.bind("<Configure>", lambda _e: self._on_canvas_configure())
         # Right-click: finish/cancel wire, otherwise show context menu
         self.canvas.bind("<Button-3>", self._on_right_click_with_menu)
+        # Double-click: open the most-relevant editor for the thing
+        # under the cursor (FOV for cameras, reassign for wires, edit
+        # for annotations). One of the most common UX expectations.
+        self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
         # Clear cursor coord readout when cursor leaves the canvas
         self.canvas.bind("<Leave>", lambda _e: self.cursor_label.config(text=""))
 
@@ -6563,6 +6567,8 @@ class CameraWireTool:
                 ("Drag",         "Lasso-select (drag empty canvas in Move mode)"),
                 ("Shift+drag",   "Lasso-add to existing selection"),
                 ("Ctrl+click",   "Toggle a device in selection"),
+                ("Double-click", "Edit (FOV for cameras / reassign for wires / "
+                                 "text for annotations)"),
                 ("Ctrl+C",       "Copy selected devices to clipboard"),
                 ("Ctrl+V",       "Paste devices at cursor position"),
                 ("Ctrl+D",       "Duplicate selected devices in place"),
@@ -6688,6 +6694,47 @@ class CameraWireTool:
                    command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
 
     # ============================================================ right-click context menu
+    def _on_canvas_double_click(self, event) -> None:
+        """Double-click → open the most-relevant editor for whatever's
+        under the cursor. Falls through to single-click behavior on
+        empty canvas."""
+        # Don't fight other modes — only act in MOVE mode
+        if self.mode != Mode.MOVE:
+            return
+        ix, iy = self._canvas_to_img(event.x, event.y)
+        # 1) Annotation
+        ann = self._annotation_at(ix, iy)
+        if ann is not None:
+            self._edit_annotation(ann)
+            return
+        # 2) Device
+        dev = self._device_at(ix, iy)
+        if dev is not None:
+            info = self.symbol_types.get(dev["type"], {})
+            if info.get("is_camera"):
+                self._open_fov_dialog(dev)
+            else:
+                self._center_on_device(dev)
+            return
+        # 3) Wire
+        widx = self._wire_at(ix, iy)
+        if widx is not None:
+            # Drop into the wire-reassign dialog (matches the wire-list
+            # double-click behavior — single discoverable shortcut)
+            self._select_wire_in_listbox(widx)
+            self._reassign_selected_wire()
+            return
+
+    def _center_on_device(self, dev: dict) -> None:
+        """Pan the view so `dev` ends up in the canvas center, no zoom."""
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        cx_img = (dev["x"] + dev["w"] / 2) * self.dx_scale
+        cy_img = (dev["y"] + dev["h"] / 2) * self.dy_scale
+        self.offset_x = cw / 2 - cx_img * self.zoom
+        self.offset_y = ch / 2 - cy_img * self.zoom
+        self._redraw()
+
     def _on_right_click_with_menu(self, event) -> None:
         # In Wire Mode, right-click finishes (≥2 points) or cancels.
         if self.mode == Mode.WIRE:
