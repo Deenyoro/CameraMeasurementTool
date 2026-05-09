@@ -2542,8 +2542,14 @@ class CameraWireTool:
         if marker == "__never_saved__":
             return  # never persisted in this session, dirty stays
         top = self.history[-1] if self.history else None
+        was_dirty = self._dirty
         if top is marker:
             self._dirty = False
+            if was_dirty:
+                # Visible nudge so the user knows the title cleared on purpose
+                self._flash_status(
+                    "Back at last-saved state — no unsaved changes.",
+                    ttl_ms=2500)
         else:
             self._dirty = True
         self._update_title()
