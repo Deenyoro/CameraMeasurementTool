@@ -3418,11 +3418,12 @@ class CameraWireTool:
 
         if self.current_wire_points:
             pts_canvas = [self._img_to_canvas(*p) for p in self.current_wire_points]
-            for j in range(len(pts_canvas) - 1):
+            # Single polyline (matches the committed-wire renderer).
+            if len(pts_canvas) >= 2:
+                flat = [c for pt in pts_canvas for c in pt]
                 self.canvas.create_line(
-                    pts_canvas[j][0], pts_canvas[j][1],
-                    pts_canvas[j+1][0], pts_canvas[j+1][1],
-                    fill="#00BFFF", width=2, dash=(6, 3), tags="wip_wire",
+                    *flat, fill="#00BFFF", width=2, dash=(6, 3),
+                    tags="wip_wire",
                 )
             for cx, cy in pts_canvas:
                 self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3,
