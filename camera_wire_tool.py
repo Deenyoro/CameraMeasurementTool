@@ -1003,7 +1003,31 @@ class CalibrateCmd(Command):
 
 
 # ============================================================ Theme
+def _tk_callback_exception(exc_type, exc_value, exc_tb):
+    """Tk's default exception handler prints to stderr — invisible in
+    a GUI app. Route unhandled callback errors to our log file so
+    they're at least diagnosable, and surface a friendly messagebox
+    so the user knows something went wrong rather than the app just
+    'freezing' silently."""
+    try:
+        log_error("Unhandled Tk callback exception",
+                   exc_value if isinstance(exc_value, BaseException)
+                   else exc_type(exc_value))
+    except Exception:
+        pass
+    try:
+        messagebox.showerror(
+            "Unexpected error",
+            f"{exc_type.__name__}: {exc_value}\n\n"
+            f"Details written to {LOG_PATH.name} in your home folder.\n"
+            f"Continue using the app; if it happens again, check the log.")
+    except Exception:
+        pass
+
+
 def apply_theme(root: tk.Tk) -> None:
+    # Route unhandled callback exceptions to the log + a messagebox.
+    root.report_callback_exception = _tk_callback_exception
     if _HAS_SVTTK:
         try:
             sv_ttk.set_theme("dark")
