@@ -2906,9 +2906,19 @@ class CameraWireTool:
             "You have unsaved changes. Save before closing?",
         )
         if ans is None:
-            return False
+            return False   # Cancel → user wants to stay
         if ans:
             self._save_drawio()
+            # If the save failed (e.g., disk full, file locked) the
+            # dirty flag stays True; abort the close so the user
+            # doesn't silently lose work.
+            if self._dirty:
+                messagebox.showwarning(
+                    "Save failed",
+                    "Save did not complete — your changes are still "
+                    "in memory. Close cancelled so you can fix the "
+                    "issue and try again.")
+                return False
         return True
 
     # ============================================================ Symbol list
