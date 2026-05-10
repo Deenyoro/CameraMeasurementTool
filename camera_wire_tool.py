@@ -5863,8 +5863,25 @@ class CameraWireTool:
             filetypes=[("Draw.io files", "*.drawio")])
         if not path:
             return
+        # If the user picked a path that doesn't exist yet, _save_drawio's
+        # ET.parse(self.drawio_path) would fail because we'd already have
+        # repointed at the not-yet-written destination. Copy the current
+        # source over first, then redirect — that way the save can still
+        # re-parse and rewrite normally.
+        if not os.path.exists(path):
+            try:
+                import shutil
+                shutil.copyfile(self.drawio_path, path)
+            except OSError as e:
+                log_error(f"Save As copy failed: {self.drawio_path} → {path}", e)
+                messagebox.showerror(
+                    "Save As failed",
+                    f"Could not initialize destination:\n{e}")
+                return
         self.drawio_path = path
         self.project_path = os.path.splitext(path)[0] + ".wiremap.json"
+        # Reset autosave path so it tracks the new project file
+        self._autosave_path = self.project_path + ".autosave.json"
         self._update_title()
         self._save_drawio()
 
