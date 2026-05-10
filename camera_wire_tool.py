@@ -190,9 +190,26 @@ def _text_for_bg(hex_color: str) -> str:
 
 
 # ============================================================ Logging
+_LOG_MAX_BYTES = 512 * 1024   # cap log file at ~512 KB
+
+
 def log_error(msg: str, exc: BaseException | None = None) -> None:
-    """Append a timestamped error to the user log file. Best-effort; never raises."""
+    """Append a timestamped error to the user log file. Best-effort; never raises.
+
+    Also rotates once the log crosses _LOG_MAX_BYTES so it can't grow
+    unbounded across many sessions of errors. Single rotation: the
+    previous file moves to .old (overwriting any prior .old)."""
     try:
+        # Cheap rotation when the file gets too big — single .old keeps
+        # one generation of history without unbounded growth.
+        try:
+            if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+                old = LOG_PATH.with_suffix(LOG_PATH.suffix + ".old")
+                if old.exists():
+                    old.unlink()
+                LOG_PATH.rename(old)
+        except OSError:
+            pass
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
             if exc is not None:
