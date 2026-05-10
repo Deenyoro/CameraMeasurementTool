@@ -3923,6 +3923,20 @@ class CameraWireTool:
             return
         sel = self.wire_listbox.curselection()
         is_selected = bool(sel) and self._wire_index_for_listbox(sel[0]) == idx
+        # Viewport culling — quick bbox check skips wires entirely off
+        # screen. Skip the cull for the selected wire so its glow still
+        # renders even when it's parked offscreen during navigation.
+        if not is_selected:
+            xs = [p[0] for p in route["points"]]
+            ys = [p[1] for p in route["points"]]
+            canvas_w = self.canvas.winfo_width() or 800
+            canvas_h = self.canvas.winfo_height() or 600
+            cx0, cy0 = self._img_to_canvas(min(xs), min(ys))
+            cx1, cy1 = self._img_to_canvas(max(xs), max(ys))
+            margin = 30
+            if (cx1 < -margin or cy1 < -margin
+                    or cx0 > canvas_w + margin or cy0 > canvas_h + margin):
+                return
 
         did = route.get("device_id")
         wire_color = "#00BFFF"
