@@ -3468,7 +3468,7 @@ class CameraWireTool:
         x0 = max(40, (cw - 540) // 2)
         y0 = 48
         x1 = x0 + 540
-        y1 = y0 + 78
+        y1 = y0 + 96   # tall enough to hold the F1 footer hint
 
         self.canvas.create_rectangle(
             x0, y0, x1, y1,
@@ -3510,6 +3510,15 @@ class CameraWireTool:
                 tags="welcome",
             )
             sx += 270  # next column
+        # Footer hint pointing at the shortcuts dialog — most discoverable
+        # surface in the app once you know it exists.
+        self.canvas.create_text(
+            x0 + 16, y1 - 16, anchor=tk.NW,
+            text="Press  F1  for keyboard shortcuts  ·  "
+                 "Right-click anywhere for contextual actions",
+            fill="#6f7a90", font=("Segoe UI", 8, "italic"),
+            tags="welcome",
+        )
 
     # ============================================================ Grid overlay
     def _draw_grid_overlay(self) -> None:
