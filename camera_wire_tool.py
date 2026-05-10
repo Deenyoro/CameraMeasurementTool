@@ -27,6 +27,7 @@ v0.2.0 polish pass adds:
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import math
@@ -1523,9 +1524,8 @@ class CameraWireTool:
             return
         # Deep-copy so edits to the original after Ctrl+C don't leak
         # into the clipboard snapshot at paste time.
-        import copy as _copy
         self._device_clipboard = [
-            {k: _copy.deepcopy(v) for k, v in d.items() if k != "id"}
+            {k: copy.deepcopy(v) for k, v in d.items() if k != "id"}
             for d in self.selected_devices
         ]
         self._flash_status(
@@ -1661,13 +1661,12 @@ class CameraWireTool:
         # ~24 drawio-units offset = visibly distinct without sliding off-screen
         offset = 24.0
         new_devices: list[dict] = []
-        import copy as _copy
         for src in self.selected_devices:
             new_id = f"s{self._next_device_id}"
             self._next_device_id += 1
             # Deepcopy whole src so nested lists (fov.resolution, etc.)
             # aren't aliased between original and duplicate.
-            d_new = _copy.deepcopy(src)
+            d_new = copy.deepcopy(src)
             d_new["id"] = new_id
             d_new["x"] = src["x"] + offset
             d_new["y"] = src["y"] + offset
@@ -1722,14 +1721,13 @@ class CameraWireTool:
         delta_dy = anchor_dy - ref_dy
 
         new_devices: list[dict] = []
-        import copy as _copy
         for src in clip:
             new_id = f"s{self._next_device_id}"
             self._next_device_id += 1
             # Deepcopy the whole source so each pasted instance is
             # independent — without this, pasting twice would share
             # nested fov dicts/lists between the two new devices.
-            d_new = _copy.deepcopy(src)
+            d_new = copy.deepcopy(src)
             d_new["id"] = new_id
             d_new["x"] = src["x"] + delta_dx
             d_new["y"] = src["y"] + delta_dy
