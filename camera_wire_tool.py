@@ -1304,7 +1304,15 @@ class CameraWireTool:
         # Restore map annotations for the active floor
         self.annotations = [dict(a) for a in (active.annotations or [])]
         for wr in active.wire_routes:
-            pts = [tuple(p) for p in wr.get("points", [])]
+            # Defensive coerce: a hand-edited project file could carry
+            # string coords, malformed pairs, or None points — skip the
+            # whole route rather than crashing the loader downstream.
+            pts = []
+            for p in wr.get("points", []):
+                try:
+                    pts.append((float(p[0]), float(p[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
             if len(pts) < 2:
                 continue
             px_len = self._calc_wire_length(pts)
@@ -6828,7 +6836,14 @@ class CameraWireTool:
         # Wire routes: rebuild lengths
         self.wire_routes = []
         for wr in data.get("wire_routes", []):
-            pts = [tuple(p) for p in wr.get("points", [])]
+            # Same defensive coerce as _load_project — autosave can be
+            # corrupted by a power cut mid-write.
+            pts = []
+            for p in wr.get("points", []):
+                try:
+                    pts.append((float(p[0]), float(p[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
             if len(pts) < 2:
                 continue
             px_len = self._calc_wire_length(pts)
