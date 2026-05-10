@@ -8040,6 +8040,11 @@ class CameraWireTool:
         def apply():
             old_fov = dict(device["fov"]) if device.get("fov") else None
             new_fov = _settings_dict(include_az=True)
+            # No-op when nothing actually changed — don't pollute the
+            # undo history with a redundant entry.
+            if old_fov == new_fov:
+                dlg.destroy()
+                return
             self._execute(EditFovCmd(self, [(device, old_fov, new_fov)]))
             self._show_fov.set(True)
             self._post_command_refresh()
@@ -8073,7 +8078,18 @@ class CameraWireTool:
                     merged["show"] = base["show"]
                 if d is device:
                     merged["azimuth_deg"] = float(az_var.get())
+                # Skip entries that wouldn't actually change anything —
+                # keeps a no-op "Apply to all" out of the undo stack.
+                if old_snapshot == merged:
+                    continue
                 entries.append((d, old_snapshot, merged))
+            if not entries:
+                self._flash_status(
+                    "All cameras already have these FOV settings — "
+                    "nothing to apply.",
+                    ttl_ms=3000)
+                dlg.destroy()
+                return
             self._execute(EditFovCmd(self, entries))
             self._show_fov.set(True)
             self._post_command_refresh()
