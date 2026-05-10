@@ -2641,7 +2641,10 @@ class CameraWireTool:
         dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
         compass = dirs[round(new_az / 45) % 8]
         self._show_fov.set(True)
-        self._post_command_refresh()
+        # Lightweight redraw — rotating an FOV cone doesn't change BOM
+        # totals, wire counts, or device lists, so a full refresh just
+        # flickers all three side-panel listboxes for nothing.
+        self._redraw()
         self._flash_status(
             f"Camera {dev['id']} → azimuth {new_az}° ({compass})  "
             f"[Ctrl+Z to undo]",
