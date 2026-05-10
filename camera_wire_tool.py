@@ -5320,14 +5320,25 @@ class CameraWireTool:
         """Shift+[ / Shift+] — pick the previous/next wire in the listbox."""
         if not self.wire_routes:
             return
+        # Respect any active wire filter so we don't jump to a wire the
+        # user can't see in the listbox.
+        pool = (self._filtered_wire_indices
+                if (hasattr(self, "_filtered_wire_indices")
+                    and self._filtered_wire_indices)
+                else list(range(len(self.wire_routes))))
+        if not pool:
+            return
         sel = self.wire_listbox.curselection()
-        # Find the currently selected route index (skip header rows)
         cur_route_idx = None
         if sel and hasattr(self, "_wire_listbox_rows"):
             row_val = self._wire_listbox_rows[sel[0]] if sel[0] < len(self._wire_listbox_rows) else None
             cur_route_idx = row_val
-        nxt = (cur_route_idx + direction) if cur_route_idx is not None else 0
-        nxt = nxt % len(self.wire_routes)
+        if cur_route_idx in pool:
+            cur_pos = pool.index(cur_route_idx)
+        else:
+            cur_pos = -1
+        nxt_pos = (cur_pos + direction) % len(pool)
+        nxt = pool[nxt_pos]
         self._select_wire_in_listbox(nxt)
         # Center on its midpoint
         r = self.wire_routes[nxt]
@@ -5338,8 +5349,10 @@ class CameraWireTool:
             self.offset_x = cw / 2 - mid[0] * self.zoom
             self.offset_y = ch / 2 - mid[1] * self.zoom
         self._redraw()
-        self._flash_status(f"Wire {nxt+1}/{len(self.wire_routes)} selected.",
-                            ttl_ms=2500)
+        self._flash_status(
+            f"Wire {nxt_pos + 1}/{len(pool)} selected"
+            f"{' (filtered)' if len(pool) < len(self.wire_routes) else ''}.",
+            ttl_ms=2500)
 
     def _kbd_zoom_to_selection(self, event=None) -> None:
         """Z key — zoom and center the viewport so the current selection
