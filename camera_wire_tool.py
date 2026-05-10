@@ -6126,7 +6126,8 @@ class CameraWireTool:
             "Re-route wire?",
             f"Delete this wire ({len(route['points'])} points, "
             f"{self._format_length(route.get('length_in') or 0)}) "
-            "and start a new one in its place?"):
+            "and start a new one in its place?\n\n"
+            "Undo (Ctrl+Z) restores the original wire."):
             return
         self._execute(DeleteWireCmd(self, idx, route))
         self._post_command_refresh()
