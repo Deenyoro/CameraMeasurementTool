@@ -5674,14 +5674,21 @@ class CameraWireTool:
                 routes_to_remove.append((ridx, self.wire_routes[ridx]))
         if not routes_to_remove:
             return
+        total = sum((r.get("length_in") or 0) for _, r in routes_to_remove)
+        total_str = (f", total {self._format_length(total)}" if total else "")
         if not messagebox.askyesno(
-            "Delete", f"Delete {len(routes_to_remove)} wire run(s)?"):
+            "Delete",
+            f"Delete {len(routes_to_remove)} wire run(s){total_str}?\n\n"
+            f"Undo with Ctrl+Z."):
             return
         # Issue DeleteWireCmd in reverse-index order so insert positions
         # stay valid for undo.
         for ridx, route in sorted(routes_to_remove, key=lambda x: -x[0]):
             self._execute(DeleteWireCmd(self, ridx, route))
         self._post_command_refresh()
+        self._flash_status(
+            f"Deleted {len(routes_to_remove)} wire(s). Ctrl+Z to undo.",
+            ttl_ms=3000)
 
     def _cycle_device(self, direction: int) -> None:
         # Respect any active filter — without this, [ / ] jump to devices
