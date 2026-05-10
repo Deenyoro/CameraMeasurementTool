@@ -5468,6 +5468,10 @@ class CameraWireTool:
         self.status_label.config(
             text="Nothing selected — click a device or wire first, then press Z.")
 
+    # Cap zoom-to-bbox below the global ZOOM_MAX so pressing Z on a
+    # tiny device doesn't blast the user up to 15x and lose all context.
+    _ZOOM_TO_BBOX_CAP = 3.0
+
     def _zoom_to_image_bbox(self, ix0, iy0, ix1, iy1, pad: float = 60) -> None:
         """Set zoom + offset so the given image-coord rectangle fills most
         of the visible canvas, with a margin of `pad` canvas-pixels."""
@@ -5477,7 +5481,8 @@ class CameraWireTool:
         bh = max(1.0, iy1 - iy0)
         zx = max(0.0, cw - 2 * pad) / bw
         zy = max(0.0, ch - 2 * pad) / bh
-        self.zoom = max(C.ZOOM_MIN, min(C.ZOOM_MAX, min(zx, zy)))
+        self.zoom = max(C.ZOOM_MIN,
+                         min(self._ZOOM_TO_BBOX_CAP, min(zx, zy)))
         cx_img = (ix0 + ix1) / 2
         cy_img = (iy0 + iy1) / 2
         self.offset_x = cw / 2 - cx_img * self.zoom
