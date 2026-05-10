@@ -7315,10 +7315,12 @@ class CameraWireTool:
             "• Loads draw.io plans, drag/drop devices, draw multi-point wire routes",
             "• Cable types + BOM with cost, waste %, tax, currency",
             "• Camera FOV / DORI overlays (IEC 62676-4)",
-            "• Multi-floor projects with anchor-point alignment + risers",
+            "• Multi-floor projects with anchor-point alignment",
             "• PDF + CSV report export",
-            "• Auto-save with crash recovery, undo/redo with batch ops",
-            "• Snap-to-orthogonal wire drawing, drag-to-reshape waypoints",
+            "• Auto-save with crash recovery, full-coverage undo/redo",
+            "• Snap-to-orthogonal wire drawing (Shift), drag-to-reshape, "
+            "drag-to-reassign endpoints",
+            "• Map annotations, arrow-key nudge, jump-to-unwired-camera (Ctrl+U)",
         ):
             ttk.Label(feat, text=line, font=("Segoe UI", 9),
                       ).pack(anchor=tk.W, padx=10, pady=1)
