@@ -1423,6 +1423,19 @@ class CameraWireTool:
         b("<plus>", _canvas_only(lambda: self._zoom_button(1)))
         b("<equal>", _canvas_only(lambda: self._zoom_button(1)))
         b("<minus>", _canvas_only(lambda: self._zoom_button(-1)))
+        # Arrow keys — nudge selected device(s) by 1 drawio-unit (10 with Shift).
+        # Standard CAD pattern; honors text-widget focus.
+        def _arrow(dx, dy):
+            def _w(_e):
+                if self._is_text_focus(_e):
+                    return
+                step = 10 if (_e.state & 0x0001) else 1   # Shift = 10x
+                self._nudge_selected_devices(dx * step, dy * step)
+            return _w
+        b("<Left>",  _arrow(-1, 0))
+        b("<Right>", _arrow(1, 0))
+        b("<Up>",    _arrow(0, -1))
+        b("<Down>",  _arrow(0, 1))
         # Z key — zoom to selected device or wire
         b("<KeyPress-z>", self._kbd_zoom_to_selection)
         b("<KeyPress-Z>", self._kbd_zoom_to_selection)
@@ -1515,6 +1528,40 @@ class CameraWireTool:
             f"Copied {len(self._device_clipboard)} device(s) to clipboard.",
             ttl_ms=2500,
         )
+
+    def _nudge_selected_devices(self, dx: float, dy: float) -> None:
+        """Move every selected device by (dx, dy) drawio-units. Goes
+        through Move*Cmd so it's undoable, and reuses the existing
+        wire-follow logic so anchored wire endpoints come along."""
+        if not self.selected_devices:
+            return
+        if len(self.selected_devices) == 1:
+            d = self.selected_devices[0]
+            old_x, old_y = d["x"], d["y"]
+            new_x, new_y = old_x + dx, old_y + dy
+            d["x"], d["y"] = new_x, new_y
+            _follow_wires_with_device(self, d["id"], old_x, old_y, new_x, new_y)
+            cmd = MoveDeviceCmd(self, d, old_x, old_y, new_x, new_y)
+        else:
+            deltas = []
+            for d in self.selected_devices:
+                old_xy = (d["x"], d["y"])
+                new_xy = (d["x"] + dx, d["y"] + dy)
+                d["x"], d["y"] = new_xy
+                deltas.append((d["id"], old_xy, new_xy))
+                _follow_wires_with_device(self, d["id"],
+                                            old_xy[0], old_xy[1],
+                                            new_xy[0], new_xy[1])
+            cmd = MoveDevicesCmd(self, deltas)
+        # Append + clear future the same way the drag-end path does
+        # (state was already mutated, so don't re-call .do()).
+        self.history.append(cmd)
+        if len(self.history) > C.HISTORY_LIMIT:
+            self.history.pop(0)
+        self.future.clear()
+        self._mark_dirty()
+        self._update_undo_redo_state()
+        self._redraw()
 
     def _duplicate_selected_devices(self) -> None:
         """Ctrl+D — duplicate the current selection at a small fixed
@@ -7067,6 +7114,8 @@ class CameraWireTool:
                 ("Ctrl+C",       "Copy selected devices to clipboard"),
                 ("Ctrl+V",       "Paste devices at cursor position"),
                 ("Ctrl+D",       "Duplicate selected devices in place"),
+                ("Arrow keys",   "Nudge selected device(s) by 1 unit"),
+                ("Shift+Arrow",  "Nudge by 10 units"),
                 ("Delete",       "Delete selected wire or device(s)"),
                 ("Escape",       "Cancel action / clear selection"),
             ]),
