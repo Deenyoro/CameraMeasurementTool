@@ -1512,7 +1512,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         if not self.selected_devices:
             self._flash_status("Nothing selected to copy.", ttl_ms=2000)
@@ -1605,7 +1606,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         if not self.selected_devices:
             self._flash_status("Nothing selected to duplicate.", ttl_ms=2000)
@@ -1638,7 +1640,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         clip = getattr(self, "_device_clipboard", None)
         if not clip:
@@ -1703,7 +1706,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         if not self.devices:
             return
@@ -2618,7 +2622,11 @@ class CameraWireTool:
 
     def _is_text_focus(self, event) -> bool:
         w = event.widget if hasattr(event, "widget") else None
-        return isinstance(w, (ttk.Entry, tk.Entry, tk.Text))
+        # Spinbox + Combobox derive from Entry-style widgets and accept
+        # text input — without them, arrow keys typed in those fields
+        # also nudged selected devices on the canvas.
+        return isinstance(w, (ttk.Entry, tk.Entry, tk.Text,
+                              ttk.Spinbox, ttk.Combobox))
 
     # ============================================================ Auto-pan during drag
     def _maybe_autopan(self, event) -> None:
@@ -2755,7 +2763,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         if not self.history:
             self._flash_status("Nothing to undo.", ttl_ms=2000)
@@ -2773,7 +2782,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         if not self.future:
             self._flash_status("Nothing to redo.", ttl_ms=2000)
@@ -5538,7 +5548,8 @@ class CameraWireTool:
             focused = self.root.focus_get()
         except Exception:
             focused = None
-        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text, ttk.Spinbox)):
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
             return
         # Prefer wires if any wire-list rows are selected (supports multi)
         if self.wire_listbox.curselection():
