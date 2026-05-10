@@ -1529,36 +1529,70 @@ class CameraWireTool:
             ttl_ms=2500,
         )
 
+    _NUDGE_COALESCE_S = 0.6
+
     def _nudge_selected_devices(self, dx: float, dy: float) -> None:
         """Move every selected device by (dx, dy) drawio-units. Goes
-        through Move*Cmd so it's undoable, and reuses the existing
-        wire-follow logic so anchored wire endpoints come along."""
+        through Move*Cmd so it's undoable. Coalesces consecutive
+        nudges on the same selection within ~0.6s into one undo step,
+        so holding an arrow key (which Tk auto-repeats) doesn't bury
+        the undo stack."""
         if not self.selected_devices:
             return
+        import time as _time
+        now = _time.monotonic()
+        sel_ids = tuple(d["id"] for d in self.selected_devices)
+        prev = getattr(self, "_last_nudge", None)
+        coalesce = (
+            prev is not None
+            and prev["sel_ids"] == sel_ids
+            and (now - prev["ts"]) <= self._NUDGE_COALESCE_S
+            and self.history
+            and self.history[-1] is prev["cmd"]
+        )
+
         if len(self.selected_devices) == 1:
             d = self.selected_devices[0]
             old_x, old_y = d["x"], d["y"]
             new_x, new_y = old_x + dx, old_y + dy
             d["x"], d["y"] = new_x, new_y
             _follow_wires_with_device(self, d["id"], old_x, old_y, new_x, new_y)
-            cmd = MoveDeviceCmd(self, d, old_x, old_y, new_x, new_y)
+            if coalesce and isinstance(prev["cmd"], MoveDeviceCmd):
+                prev["cmd"].new = (new_x, new_y)
+                cmd = prev["cmd"]
+            else:
+                cmd = MoveDeviceCmd(self, d, old_x, old_y, new_x, new_y)
+                self.history.append(cmd)
+                if len(self.history) > C.HISTORY_LIMIT:
+                    self.history.pop(0)
+                self.future.clear()
         else:
-            deltas = []
+            new_deltas = []
             for d in self.selected_devices:
                 old_xy = (d["x"], d["y"])
                 new_xy = (d["x"] + dx, d["y"] + dy)
                 d["x"], d["y"] = new_xy
-                deltas.append((d["id"], old_xy, new_xy))
+                new_deltas.append((d["id"], old_xy, new_xy))
                 _follow_wires_with_device(self, d["id"],
                                             old_xy[0], old_xy[1],
                                             new_xy[0], new_xy[1])
-            cmd = MoveDevicesCmd(self, deltas)
-        # Append + clear future the same way the drag-end path does
-        # (state was already mutated, so don't re-call .do()).
-        self.history.append(cmd)
-        if len(self.history) > C.HISTORY_LIMIT:
-            self.history.pop(0)
-        self.future.clear()
+            if coalesce and isinstance(prev["cmd"], MoveDevicesCmd):
+                # Replace each entry's new_xy with the freshly-set value;
+                # keep the original old_xy from the FIRST nudge.
+                old_by_id = {did: old for did, old, _new in prev["cmd"].deltas}
+                merged = [
+                    (did, old_by_id.get(did, old), new)
+                    for did, old, new in new_deltas
+                ]
+                prev["cmd"].deltas = merged
+                cmd = prev["cmd"]
+            else:
+                cmd = MoveDevicesCmd(self, new_deltas)
+                self.history.append(cmd)
+                if len(self.history) > C.HISTORY_LIMIT:
+                    self.history.pop(0)
+                self.future.clear()
+        self._last_nudge = {"cmd": cmd, "sel_ids": sel_ids, "ts": now}
         self._mark_dirty()
         self._update_undo_redo_state()
         self._redraw()
