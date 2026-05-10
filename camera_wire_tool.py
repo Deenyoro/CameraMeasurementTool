@@ -6245,11 +6245,21 @@ class CameraWireTool:
 
     def _clear_wires(self) -> None:
         if not self.wire_routes:
+            self._flash_status("No wires to clear.", ttl_ms=2000)
             return
-        if not messagebox.askyesno("Confirm", "Clear all wire routes?"):
+        n = len(self.wire_routes)
+        total = sum((r.get("length_in") or 0) for r in self.wire_routes)
+        total_str = (f", total {self._format_length(total)}" if total else "")
+        if not messagebox.askyesno(
+                "Clear all wires?",
+                f"Remove all {n} wire run(s){total_str}?\n\n"
+                f"This is undoable (Ctrl+Z)."):
             return
         self._execute(ClearWiresCmd(self, self.wire_routes))
         self._post_command_refresh()
+        self._flash_status(
+            f"Cleared {n} wire run(s). Ctrl+Z to undo.",
+            ttl_ms=3500)
 
     # ============================================================ Status
     def _flash_status(self, text: str, ttl_ms: int = 4000) -> None:
