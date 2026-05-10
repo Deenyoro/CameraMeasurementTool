@@ -1692,6 +1692,13 @@ class CameraWireTool:
         edit_menu.add_command(label="Undo", command=self._undo, accelerator="Ctrl+Z")
         edit_menu.add_command(label="Redo", command=self._redo, accelerator="Ctrl+Y")
         edit_menu.add_separator()
+        edit_menu.add_command(label="Select All Devices",
+                              command=self._select_all_devices,
+                              accelerator="Ctrl+A")
+        edit_menu.add_command(label="Duplicate Selected",
+                              command=self._duplicate_selected_devices,
+                              accelerator="Ctrl+D")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Delete Selected", command=self._on_delete_key,
                               accelerator="Del")
         edit_menu.add_command(label="Clear All Wires…", command=self._clear_wires)
@@ -1931,6 +1938,10 @@ class CameraWireTool:
             toolbar, text="—",
             font=("Segoe UI", 10, "bold"))
         self.total_toolbar_label.pack(side=tk.RIGHT, padx=10)
+        Tooltip(self.total_toolbar_label,
+                "Live project totals: device + camera count, "
+                "wire-run count, total cable footage, and grand-total cost "
+                "(from the BOM tab's waste/tax inputs).")
 
         # Main split. Using legacy tk.PanedWindow (NOT ttk) specifically so
         # we can set opaqueresize=False — that turns sash drag into a fast
@@ -2222,6 +2233,11 @@ class CameraWireTool:
                                 command=self._bom_devices_tree.yview)
         self._bom_devices_tree.config(yscrollcommand=sb_dev.set)
         self._bom_devices_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Right-click → jump-to / select all of this type. Without this
+        # the device-inventory tree was display-only — asymmetric with
+        # the cable tree above which DOES have a right-click menu.
+        self._bom_devices_tree.bind("<Button-3>",
+                                     self._on_bom_devices_rclick)
         sb_dev.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Totals — laid out as 4 pills + 1 prominent grand-total
@@ -2808,6 +2824,15 @@ class CameraWireTool:
                     tk.END,
                     f' {tag:5s} {code:5s} {info["label"][:28]:28s} {cable:8s} x{n}',
                 )
+
+        # Empty-state placeholder so users know the search is what's
+        # hiding everything — matches the Devices/Wires tabs.
+        if self.sym_listbox.size() == 0:
+            placeholder = ("(no symbol types yet — Add to create one)"
+                           if not self.symbol_types
+                           else "(no matches for current search)")
+            self.sym_listbox.insert(tk.END, placeholder)
+            self.sym_listbox.itemconfig(0, foreground="#888888")
 
         # update place combobox
         self.place_combo["values"] = self._sym_keys
@@ -7533,6 +7558,60 @@ class CameraWireTool:
             self._bom_totals_label.config(text="", foreground="#FF8C42")
 
     # ============================================================ BOM right-click
+    def _on_bom_devices_rclick(self, event) -> None:
+        """Right-click a row in the 'By device type' Treeview → select
+        every device of that code on the map and zoom to fit them."""
+        row = self._bom_devices_tree.identify_row(event.y)
+        if not row:
+            return
+        self._bom_devices_tree.selection_set(row)
+        values = self._bom_devices_tree.item(row, "values")
+        if not values:
+            return
+        code = values[0]
+        # Skip subtotal rows (CAMS / ALL / placeholder)
+        if code in ("CAMS", "ALL", "—") or code not in self.symbol_types:
+            return
+        devs = [d for d in self.devices if d["type"] == code]
+        if not devs:
+            return
+        info = self.symbol_types.get(code, {})
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=f"{code} — {info.get('label', code)} "
+                            f"({len(devs)} device(s))",
+                       state=tk.DISABLED)
+        m.add_separator()
+        m.add_command(
+            label=f"Select all {len(devs)} on map",
+            command=lambda devs=devs: self._select_devices_group(devs))
+        m.add_command(
+            label=f"Zoom to fit all {len(devs)}",
+            command=lambda devs=devs: self._zoom_to_devices(devs))
+        m.add_command(
+            label=f"Edit symbol type '{code}'…",
+            command=lambda c=code: self._edit_symbol_type_by_code(c))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _edit_symbol_type_by_code(self, code: str) -> None:
+        """Programmatically open the symbol editor for `code`. Used by
+        the BOM device-tree right-click 'Edit symbol type' action."""
+        # Set the symbols listbox selection so _edit_symbol_type picks
+        # up `code` via _selected_symbol_code, then fire the editor.
+        if not hasattr(self, "sym_listbox"):
+            return
+        for i in range(self.sym_listbox.size()):
+            row = self.sym_listbox.get(i)
+            # _selected_symbol_code parses the display row; matching by
+            # leading code token is enough.
+            if row.lstrip().split()[:2] and code in row.split():
+                self.sym_listbox.selection_clear(0, tk.END)
+                self.sym_listbox.selection_set(i)
+                break
+        self._edit_symbol_type()
+
     def _on_bom_cable_rclick(self, event) -> None:
         """Right-click a row in the 'By cable type' Treeview → menu with
         'Highlight wires of this cable' and 'Edit this cable type'."""
