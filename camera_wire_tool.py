@@ -4255,6 +4255,15 @@ class CameraWireTool:
                 messagebox.showerror("Error", "Distance must be positive")
                 return
             new_scale = total_in / px_dist
+            # Skip the round-trip if the user happened to recalibrate to
+            # the same scale (rare but possible — and it's wasted history).
+            if (self.scale_factor is not None
+                    and abs(self.scale_factor - new_scale) < 1e-9):
+                self._flash_status(
+                    f"Scale unchanged ({self._scale_label_text()}).",
+                    ttl_ms=2500)
+                dlg.destroy()
+                return
             self._execute(CalibrateCmd(self, self.scale_factor, new_scale))
             self.scale_label.config(text=self._scale_label_text())
             self._refresh_wire_list()
