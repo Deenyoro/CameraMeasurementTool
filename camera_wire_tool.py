@@ -3567,7 +3567,8 @@ class CameraWireTool:
         self._post_command_refresh()
         # Flash a 'placed!' marker around it for ~1.2s
         self._flash_placement(dx_click, dy_click, code, new_id)
-        cam_hint = "  FOV cone auto-applied." if info.get("is_camera") else ""
+        cam_hint = ("  FOV cone auto-applied — press R to rotate."
+                    if info.get("is_camera") else "")
         if repeat:
             self.status_label.config(
                 text=f"✓ Placed {code} ({new_id}).{cam_hint}  "
