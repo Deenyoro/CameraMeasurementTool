@@ -8270,6 +8270,12 @@ class CameraWireTool:
         if info.get("is_camera"):
             m.add_command(label="📷  Edit FOV / DORI…",
                            command=lambda d=device: self._open_fov_dialog(d))
+        same_type = [d for d in self.devices if d["type"] == device["type"]]
+        if len(same_type) > 1:
+            m.add_command(
+                label=f"☑  Select all {len(same_type)} {device['type']}",
+                command=lambda devs=same_type:
+                    self._select_devices_group(devs))
         m.add_separator()
         del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
                      if len(self.selected_devices) > 1
