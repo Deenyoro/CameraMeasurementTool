@@ -105,6 +105,17 @@ def project_to_floor(line_of_sight_m: float, mount_height_ft: float) -> float:
     return math.sqrt(line_of_sight_m ** 2 - height_m ** 2)
 
 
+def _safe_float(value, default: float) -> float:
+    """Coerce `value` to float, falling back to `default` on failure.
+    Legacy / hand-edited project files can carry "4mm" or "" or None
+    where a number is expected — keep compute_fov resilient instead
+    of letting ValueError propagate."""
+    try:
+        return float(value) if value not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 def compute_fov(fov: dict) -> FOVCone:
     """Compute FOV geometry from a per-camera FOVSettings dict.
 
@@ -113,10 +124,13 @@ def compute_fov(fov: dict) -> FOVCone:
     """
     sensor = fov.get("sensor", '1/2.8"')
     sensor_w_mm, sensor_h_mm = SENSORS.get(sensor, SENSORS['1/2.8"'])
-    lens_mm = float(fov.get("lens_mm", 4.0))
-    resolution = fov.get("resolution") or [1920, 1080]
-    image_w = int(resolution[0])
-    mount_ft = float(fov.get("mount_height_ft", 9.0))
+    lens_mm = _safe_float(fov.get("lens_mm"), 4.0)
+    raw_res = fov.get("resolution") or [1920, 1080]
+    try:
+        image_w = int(raw_res[0])
+    except (TypeError, ValueError, IndexError):
+        image_w = 1920
+    mount_ft = _safe_float(fov.get("mount_height_ft"), 9.0)
 
     distances_in: dict[str, float] = {}
     for ring, ppm in DORI_PPM.items():
@@ -128,7 +142,7 @@ def compute_fov(fov: dict) -> FOVCone:
         aov_h_deg=horizontal_aov(sensor_w_mm, lens_mm),
         aov_v_deg=vertical_aov(sensor_h_mm, lens_mm),
         distances_in=distances_in,
-        azimuth_deg=float(fov.get("azimuth_deg", 0.0)),
+        azimuth_deg=_safe_float(fov.get("azimuth_deg"), 0.0),
     )
 
 

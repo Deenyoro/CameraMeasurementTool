@@ -51,6 +51,23 @@ def test_compute_fov_basic():
     assert cone.distances_in["R"] >= cone.distances_in["I"]
 
 
+def test_compute_fov_tolerates_bad_input():
+    """Legacy or hand-edited project files may carry strings or None
+    where compute_fov expects numbers. Should not raise — fall back
+    to defaults silently."""
+    # Strings where floats are expected
+    cone = fov.compute_fov({"lens_mm": "4mm",
+                              "sensor": '1/2.8"',
+                              "resolution": [1920, 1080],
+                              "mount_height_ft": "",
+                              "azimuth_deg": None})
+    assert cone.aov_h_deg > 0     # used default lens 4mm
+    assert cone.azimuth_deg == 0.0
+    # Bad resolution
+    cone2 = fov.compute_fov({"lens_mm": 4.0, "resolution": "garbage"})
+    assert set(cone2.distances_in.keys()) == {"D", "O", "R", "I"}
+
+
 def test_project_to_floor_zero_when_below_height():
     # If a target is "closer than the camera is tall", floor projection is 0.
     height_m = 9 * 0.3048  # 9 ft
