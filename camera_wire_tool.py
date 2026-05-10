@@ -3960,18 +3960,19 @@ class CameraWireTool:
         pts_canvas = [self._img_to_canvas(*p) for p in route["points"]]
         # If the wire's selected, draw a soft dim glow underneath so the
         # red line really pops against busy floor-plan backgrounds.
+        # Tk's create_line takes a flat list of x,y,x,y,... and renders
+        # the whole polyline as a single item — way cheaper than one
+        # create_line per segment, especially on simplified routes
+        # that still have a dozen waypoints.
+        flat = [c for pt in pts_canvas for c in pt]
         if is_selected:
-            for j in range(len(pts_canvas) - 1):
-                self.canvas.create_line(
-                    pts_canvas[j][0], pts_canvas[j][1],
-                    pts_canvas[j+1][0], pts_canvas[j+1][1],
-                    fill="#FFFFFF", width=8,
-                    tags=(f"wire_{idx}", "wire_glow"),
-                )
-        for j in range(len(pts_canvas) - 1):
-            self.canvas.create_line(pts_canvas[j][0], pts_canvas[j][1],
-                                    pts_canvas[j+1][0], pts_canvas[j+1][1],
-                                    fill=color, width=width, tags=f"wire_{idx}")
+            self.canvas.create_line(
+                *flat, fill="#FFFFFF", width=8,
+                tags=(f"wire_{idx}", "wire_glow"),
+            )
+        self.canvas.create_line(
+            *flat, fill=color, width=width, tags=f"wire_{idx}",
+        )
         # When a wire is selected ALL its points become big draggable
         # handles. Source endpoint is GREEN, destination is ORANGE,
         # intermediate points are white circles — visual flow direction.
