@@ -3111,6 +3111,12 @@ class CameraWireTool:
                 "is_run_point": runpoint_var.get(),
                 "cable_type": cable_var.get(),
             }
+            # Skip the round-trip when nothing actually changed (editing
+            # an existing symbol and the user clicked Apply unchanged).
+            if (not is_new and new_code == old_code
+                    and new_info == info):
+                dlg.destroy()
+                return
             cmd = EditSymbolCmd(self, old_code, info, new_code, new_info, is_new)
             self._execute(cmd)
             self._post_command_refresh()
