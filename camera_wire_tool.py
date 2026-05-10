@@ -7598,17 +7598,16 @@ class CameraWireTool:
     def _edit_symbol_type_by_code(self, code: str) -> None:
         """Programmatically open the symbol editor for `code`. Used by
         the BOM device-tree right-click 'Edit symbol type' action."""
-        # Set the symbols listbox selection so _edit_symbol_type picks
-        # up `code` via _selected_symbol_code, then fire the editor.
-        if not hasattr(self, "sym_listbox"):
+        if not hasattr(self, "sym_listbox") or code not in self.symbol_types:
             return
+        # Walk the listbox looking for the row whose tokens include this
+        # exact code — same matching logic _selected_symbol_code uses.
         for i in range(self.sym_listbox.size()):
-            row = self.sym_listbox.get(i)
-            # _selected_symbol_code parses the display row; matching by
-            # leading code token is enough.
-            if row.lstrip().split()[:2] and code in row.split():
+            tokens = self.sym_listbox.get(i).split()
+            if code in tokens:
                 self.sym_listbox.selection_clear(0, tk.END)
                 self.sym_listbox.selection_set(i)
+                self.sym_listbox.see(i)
                 break
         self._edit_symbol_type()
 

@@ -7,12 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Auto-routing removed.** A* pathfinding produced too many paths through
+  walls and around them awkwardly on real construction blueprints; the user
+  preferred manual wire drawing with snap-to-orthogonal (Shift) and
+  snap-to-points. The `cwt.routing` module is retained for tests and a
+  potential future rework but is no longer wired into the UI.
+- Drawing wires manually is now the only path (Wire mode + click points,
+  or right-click a device → "Draw wire from here…").
+- Map annotations: drop styled text labels on the floor plan with full
+  undo coverage and per-floor persistence.
+- Atomic file writes (drawio + project + autosave + settings + recents).
+- Wires follow their associated device when the device is moved (smart-
+  follow with tolerance).
+- Cable type per-wire override via right-click menu.
+- Universal undo coverage: every catalog/state mutation goes through a
+  Command, including FOV (single + bulk + clear + rotate-coalescing),
+  cable-type catalog edits, annotations, and wire-cable overrides.
+
 ### Roadmap
 
-- **v1.1.0** — Auto-detected wall opening; route-quality slider per cable
-  run; persistent FOV defaults per camera type; per-room reports.
-- **v1.2.0** — 3D riser-stack diagram view; cloud sync; per-installer
-  field app for checkoff & photos.
+- **v1.1.0** — Auto-detected wall opening (re-attempt routing once the
+  wall geometry is reliable); per-room reports; per-camera FOV defaults
+  saved with the symbol type.
+- **v1.2.0** — Cloud sync; per-installer field app for checkoff & photos.
 
 ## [1.0.0] - 2026-05-07
 
@@ -43,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Quick presets: Lobby, Hallway, Reception desk, Parking, Loading dock,
     Long corridor, Server room
   - Right-click camera → Edit FOV…
-- **A\* auto-routing**:
+- **A\* auto-routing** *(removed in unreleased — see top of changelog)*:
   - Wall detection from background-image threshold (lazy-built obstacle grid)
   - Soft-walls A* (walls penalized 8× rather than impassable — matches
     real cable behavior through ceiling/conduit penetrations)

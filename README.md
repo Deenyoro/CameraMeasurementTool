@@ -18,13 +18,16 @@ First Floor) but works on any draw.io plan.
 - **Camera FOV / DORI overlays** — per-camera lens / sensor / resolution /
   mount-height → IEC EN 62676-4 Detection/Observation/Recognition/Identification
   zones drawn on the map. Quick presets for Lobby, Hallway, Parking…
-- **A\* auto-routing** — click two devices, system finds the optimal cable
-  path. Soft-walls model (cable can cross walls through conduit/ceiling),
-  diagonal-penalized so paths prefer orthogonal — matches real conduit runs.
+- **Manual wire routing** — click points to draw a wire; Shift snaps to
+  0/45/90° from the previous point; cursor snaps to nearby device centers
+  and wire endpoints automatically. Drag any waypoint to reshape; drag
+  the source endpoint onto another device to reassign.
 - **Multi-floor + anchor-point alignment** — multiple floor plans in one
   project; pick 2 reference points per floor and the system computes the
-  alignment transform automatically. Risers between floors roll into the BOM.
-- **PDF + CSV export** — multi-page PDF report (cover, BOM, per-device, risers),
+  alignment transform automatically.
+- **Map annotations** — drop styled text labels (room names, zone callouts)
+  on the floor plan. Persist per-floor, fully undoable.
+- **PDF + CSV export** — multi-page PDF report (cover, BOM, per-device),
   3-CSV bundle (BOM + devices + wires) for procurement & installer hand-off.
 
 Plus everything from v0.2: dark Sun Valley theme, segmented mode bar, 3-tab
