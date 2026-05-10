@@ -2766,6 +2766,18 @@ class CameraWireTool:
         if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
                                   ttk.Spinbox, ttk.Combobox)):
             return
+        # Wire-mode mid-draw: Ctrl+Z undoes the last clicked waypoint
+        # rather than rolling back unrelated history. Matches the
+        # mental model — "the last action was clicking a point."
+        if (self.mode == Mode.WIRE
+                and self.current_wire_points):
+            self.current_wire_points.pop()
+            self._wire_snap = None
+            self._redraw()
+            self._flash_status(
+                f"Removed last point ({len(self.current_wire_points)} left).",
+                ttl_ms=1800)
+            return
         if not self.history:
             self._flash_status("Nothing to undo.", ttl_ms=2000)
             return
