@@ -4011,9 +4011,12 @@ class CameraWireTool:
                         tags=(f"wire_{idx}", "wp_handle"),
                     )
         else:
-            for cx, cy in pts_canvas:
-                self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=color,
-                                        outline="white", tags=f"wire_{idx}")
+            # Tiny waypoint dots are pretty but expensive on dense plans —
+            # skip at low zoom where they'd just be visual noise anyway.
+            if self.zoom >= 0.35:
+                for cx, cy in pts_canvas:
+                    self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=color,
+                                            outline="white", tags=f"wire_{idx}")
         # Direction chevron on the selected wire's midpoint segment so
         # the user can see source → destination at a glance.
         if is_selected and len(pts_canvas) >= 2:
