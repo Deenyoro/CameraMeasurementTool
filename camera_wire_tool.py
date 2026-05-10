@@ -6574,7 +6574,10 @@ class CameraWireTool:
     def _draw_annotations(self) -> None:
         """Draw all map annotations as canvas text at their drawio coords.
         Skips malformed entries (missing coords or text) instead of
-        crashing — recovered/corrupted files may carry partial data."""
+        crashing — recovered/corrupted files may carry partial data.
+        Viewport-culls offscreen labels for parity with devices/wires."""
+        canvas_w = self.canvas.winfo_width() or 800
+        canvas_h = self.canvas.winfo_height() or 600
         for ann in self.annotations:
             text = ann.get("text", "")
             if not isinstance(text, str) or not text.strip():
@@ -6585,7 +6588,12 @@ class CameraWireTool:
                 continue
             ix, iy = self._drawio_to_img(ax, ay)
             cx, cy = self._img_to_canvas(ix, iy)
-            # Scale font with zoom so annotations stay readable
+            # Bigger margin than device cull because text bbox is wider
+            # than the anchor point itself.
+            margin = 100
+            if (cx < -margin or cy < -margin
+                    or cx > canvas_w + margin or cy > canvas_h + margin):
+                continue
             fs = max(8, int(ann.get("font_size", 16) * self.zoom * self.dx_scale))
             color = ann.get("color", "#FFD060") or "#FFD060"
             t_id = self.canvas.create_text(
