@@ -7067,6 +7067,12 @@ class CameraWireTool:
                              command=self._simplify_selected_wire)
             menu.add_command(label="🔗  Reassign to different device…",
                              command=self._reassign_selected_wire)
+            cable_sub = self._build_cable_type_submenu(
+                menu, self._set_selected_wire_cable_type)
+            if cable_sub is not None:
+                cur_cable = route.get("cable_type") or "(auto)"
+                menu.add_cascade(label=f"🎚  Cable type: {cur_cable}",
+                                  menu=cable_sub)
             menu.add_separator()
             menu.add_command(label="🗑  Delete wire",
                              command=self._delete_selected_wire,
