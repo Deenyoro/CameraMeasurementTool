@@ -5741,10 +5741,24 @@ class CameraWireTool:
         self._persist_user_settings()
 
     def _persist_user_settings(self) -> None:
-        """Write current UI prefs to the per-user settings file. Cheap;
-        called whenever any of these change. Includes the view toggles
-        so users don't have to re-enable FOV / grid / IDs / legend every
-        session."""
+        """Schedule a settings-file write. Debounced 250ms so that
+        typing into the tax/waste fields character-by-character coalesces
+        into a single disk hit instead of one per keystroke."""
+        if getattr(self, "_settings_save_id", None) is not None:
+            try:
+                self.root.after_cancel(self._settings_save_id)
+            except tk.TclError:
+                pass
+        try:
+            self._settings_save_id = self.root.after(
+                250, self._do_persist_user_settings)
+        except tk.TclError:
+            # Root window already destroyed (e.g. during shutdown trace)
+            self._do_persist_user_settings()
+
+    def _do_persist_user_settings(self) -> None:
+        """Actual write — invoked by the debounce timer."""
+        self._settings_save_id = None
         try:
             prefs = {
                 "unit":          self.unit_var.get(),
