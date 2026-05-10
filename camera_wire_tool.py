@@ -921,6 +921,31 @@ class ReassignWireCmd(Command):
         self.route["device_id"] = self.old_did
 
 
+class SetWireCableTypeCmd(Command):
+    """Set explicit cable_type override on one or more wire routes
+    (None to clear and fall back to the device-default resolution).
+    Single undoable step for the bulk path."""
+
+    def __init__(self, app: "CameraWireTool",
+                 entries: list[tuple[dict, str | None, str | None]]):
+        self.app = app
+        self.entries = entries  # (route, old_cable, new_cable)
+
+    def do(self):
+        for route, _old, new in self.entries:
+            if new is None:
+                route.pop("cable_type", None)
+            else:
+                route["cable_type"] = new
+
+    def undo(self):
+        for route, old, _new in self.entries:
+            if old is None:
+                route.pop("cable_type", None)
+            else:
+                route["cable_type"] = old
+
+
 class CalibrateCmd(Command):
     def __init__(self, app: "CameraWireTool", old_scale: float | None, new_scale: float):
         self.app = app
@@ -2584,6 +2609,8 @@ class CameraWireTool:
             "DeleteSymbolCmd":    lambda c: f"delete symbol {c.code}",
             "ReassignWireCmd":    lambda c: (
                 f"reassign wire {c.old_did or '—'} → {c.new_did or '—'}"),
+            "SetWireCableTypeCmd": lambda c: (
+                f"set cable type on {len(c.entries)} wire(s)"),
             "EditFovCmd":         lambda c: (
                 f"edit FOV ({len(c.entries)} cameras)"
                 if len(c.entries) > 1 else
@@ -5596,6 +5623,64 @@ class CameraWireTool:
             return
         save_settings(prefs)
 
+    def _build_cable_type_submenu(self, parent: tk.Menu,
+                                    apply_fn) -> tk.Menu | None:
+        """Submenu listing every cable type + an 'Auto (device default)'
+        entry. `apply_fn(cable_id_or_None)` runs on click."""
+        if not self.cable_types:
+            return None
+        sub = tk.Menu(parent, tearoff=0)
+        sub.add_command(label="Auto — use device default",
+                         command=lambda: apply_fn(None))
+        sub.add_separator()
+        for cid in sorted(self.cable_types.keys()):
+            ct = self.cable_types[cid]
+            label = f"{cid}  ({ct.get('label', cid)[:24]})"
+            sub.add_command(label=label,
+                             command=lambda c=cid: apply_fn(c))
+        return sub
+
+    def _set_selected_wire_cable_type(self, cable_id: str | None) -> None:
+        sel = self.wire_listbox.curselection()
+        if not sel:
+            return
+        idx = self._wire_index_for_listbox(sel[0])
+        if idx is None:
+            return
+        route = self.wire_routes[idx]
+        old = route.get("cable_type")
+        if old == cable_id:
+            self._flash_status("Cable type unchanged.", ttl_ms=2000)
+            return
+        self._execute(SetWireCableTypeCmd(self, [(route, old, cable_id)]))
+        self._post_command_refresh()
+        label = cable_id or "auto (device default)"
+        self._flash_status(f"Set cable type → {label}. Ctrl+Z to undo.",
+                            ttl_ms=2500)
+
+    def _set_selected_wires_cable_type(self, list_indices: list[int],
+                                         cable_id: str | None) -> None:
+        entries: list[tuple[dict, str | None, str | None]] = []
+        for li in list_indices:
+            ridx = self._wire_index_for_listbox(li)
+            if ridx is None:
+                continue
+            route = self.wire_routes[ridx]
+            old = route.get("cable_type")
+            if old != cable_id:
+                entries.append((route, old, cable_id))
+        if not entries:
+            self._flash_status("All selected wires already use that cable.",
+                                ttl_ms=2500)
+            return
+        self._execute(SetWireCableTypeCmd(self, entries))
+        self._post_command_refresh()
+        label = cable_id or "auto (device default)"
+        self._flash_status(
+            f"Set cable type → {label} on {len(entries)} wire(s). "
+            f"Ctrl+Z to undo.",
+            ttl_ms=3000)
+
     def _on_wire_listbox_rclick(self, event) -> None:
         """Right-click on a wire-list row → context menu.
 
@@ -5626,6 +5711,11 @@ class CameraWireTool:
                           command=self._reroute_selected_wire)
             m.add_command(label="🔗  Reassign device…",
                           command=self._reassign_selected_wire)
+            cable_sub = self._build_cable_type_submenu(
+                m, self._set_selected_wire_cable_type)
+            if cable_sub is not None:
+                m.add_cascade(label="🎚  Set cable type",
+                               menu=cable_sub)
             m.add_separator()
             m.add_command(label="🗑  Delete wire",
                           command=self._delete_selected_wire,
@@ -5633,6 +5723,14 @@ class CameraWireTool:
         else:
             m.add_command(label=f"({n_selected} wires selected)",
                           state=tk.DISABLED)
+            m.add_separator()
+            cable_sub = self._build_cable_type_submenu(
+                m, lambda cid: self._set_selected_wires_cable_type(
+                    list(self.wire_listbox.curselection()), cid))
+            if cable_sub is not None:
+                m.add_cascade(
+                    label=f"🎚  Set cable type for all {n_selected}",
+                    menu=cable_sub)
             m.add_separator()
             m.add_command(label=f"🗑  Delete {n_selected} selected wires",
                           command=lambda: self._delete_selected_wires_multi(
