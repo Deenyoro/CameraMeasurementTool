@@ -1467,6 +1467,9 @@ class CameraWireTool:
         # Ctrl+D — duplicate selection in place at small offset
         b("<Control-d>", lambda _e: self._duplicate_selected_devices())
         b("<Control-D>", lambda _e: self._duplicate_selected_devices())
+        # Ctrl+U — jump to next unwired camera (site-survey helper)
+        b("<Control-u>", lambda _e: self._jump_to_next_unwired_camera())
+        b("<Control-U>", lambda _e: self._jump_to_next_unwired_camera())
         b("<bracketleft>", _canvas_only(lambda: self._cycle_device(-1)))
         b("<bracketright>", _canvas_only(lambda: self._cycle_device(1)))
         b("<braceleft>", _canvas_only(lambda: self._cycle_wire(-1)))   # Shift+[
@@ -1531,6 +1534,49 @@ class CameraWireTool:
         )
 
     _NUDGE_COALESCE_S = 0.6
+
+    def _jump_to_next_unwired_camera(self) -> None:
+        """Find the next camera (cycling from the current selection)
+        that has no wire associations and zoom to it. Site-survey
+        helper — answers 'which camera did I forget to wire?'."""
+        try:
+            focused = self.root.focus_get()
+        except Exception:
+            focused = None
+        if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
+                                  ttk.Spinbox, ttk.Combobox)):
+            return
+        cameras = [d for d in self.devices
+                   if self.symbol_types.get(d["type"], {}).get("is_camera")]
+        if not cameras:
+            self._flash_status("No cameras placed yet.", ttl_ms=2500)
+            return
+        wired_ids = {w.get("device_id") for w in self.wire_routes
+                      if w.get("device_id")}
+        unwired = [c for c in cameras if c["id"] not in wired_ids]
+        if not unwired:
+            self._flash_status(
+                f"All {len(cameras)} cameras have at least one wire 🎉",
+                ttl_ms=3000)
+            return
+        # Cycle from current primary selection so repeated presses walk
+        # the unwired set in order.
+        cur = self._primary_selected
+        try:
+            start = (cameras.index(cur) + 1) if cur in cameras else 0
+        except ValueError:
+            start = 0
+        for i in range(len(cameras)):
+            cam = cameras[(start + i) % len(cameras)]
+            if cam["id"] not in wired_ids:
+                self.selected_device = cam
+                self._sync_dev_listbox_to_canvas()
+                self._zoom_to_devices([cam])
+                self._flash_status(
+                    f"Unwired: {cam['id']} ({cam['type']})  —  "
+                    f"{len(unwired)} unwired camera(s) remain.",
+                    ttl_ms=3500)
+                return
 
     def _nudge_selected_devices(self, dx: float, dy: float) -> None:
         """Move every selected device by (dx, dy) drawio-units. Goes
@@ -1886,6 +1932,9 @@ class CameraWireTool:
         tools_menu.add_separator()
         tools_menu.add_command(label="Add Map Annotation…",
                                command=self._start_place_annotation)
+        tools_menu.add_command(label="Jump to next unwired camera",
+                               command=self._jump_to_next_unwired_camera,
+                               accelerator="Ctrl+U")
         tools_menu.add_separator()
         tools_menu.add_command(label="Preferences…",
                                command=self._open_preferences_dialog)
@@ -7181,6 +7230,7 @@ class CameraWireTool:
                 ("Ctrl+C",       "Copy selected devices to clipboard"),
                 ("Ctrl+V",       "Paste devices at cursor position"),
                 ("Ctrl+D",       "Duplicate selected devices in place"),
+                ("Ctrl+U",       "Jump to next unwired camera"),
                 ("Arrow keys",   "Nudge selected device(s) by 1 unit"),
                 ("Shift+Arrow",  "Nudge by 10 units"),
                 ("Delete",       "Delete selected wire or device(s)"),
