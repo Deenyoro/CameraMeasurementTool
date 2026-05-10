@@ -6148,10 +6148,22 @@ class CameraWireTool:
         # Reset autosave path so it tracks the new project file
         self._autosave_path = self.project_path + ".autosave.json"
         self._update_title()
-        self._save_drawio()
+        # force=True so Save-As to a clean project still writes the new
+        # destination (otherwise the fast-path no-op would skip it).
+        self._save_drawio(force=True)
 
-    def _save_drawio(self) -> None:
-        """Write all changes back to .drawio + companion .wiremap.json."""
+    def _save_drawio(self, *, force: bool = False) -> None:
+        """Write all changes back to .drawio + companion .wiremap.json.
+        `force=True` bypasses the clean-project fast-path (used by Save
+        As, which needs to write even if the in-memory state matches
+        the original source)."""
+        # Fast path: nothing to save. Re-parsing + rewriting both files
+        # on a clean project just to be safe is wasted disk I/O.
+        if not self._dirty and not force:
+            self._flash_status(
+                "Already saved — no changes since last save.",
+                ttl_ms=2500)
+            return
         try:
             tree = ET.parse(self.drawio_path)
         except (ET.ParseError, OSError) as e:
