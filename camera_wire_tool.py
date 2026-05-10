@@ -34,6 +34,7 @@ import math
 import os
 import re
 import sys
+import time
 import traceback
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
@@ -1586,8 +1587,7 @@ class CameraWireTool:
         the undo stack."""
         if not self.selected_devices:
             return
-        import time as _time
-        now = _time.monotonic()
+        now = time.monotonic()
         sel_ids = tuple(d["id"] for d in self.selected_devices)
         prev = getattr(self, "_last_nudge", None)
         coalesce = (
@@ -2620,8 +2620,7 @@ class CameraWireTool:
             step = -step
         old_az = (dev.get("fov") or {}).get("azimuth_deg", 0)
         new_az = (old_az + step) % 360
-        import time as _time
-        cmd = RotateFovCmd(self, dev, old_az, new_az, _time.monotonic())
+        cmd = RotateFovCmd(self, dev, old_az, new_az, time.monotonic())
         # Coalesce with the previous rotation if it was on the same camera,
         # very recently. Without this, a user pressing R 8 times burns 8
         # undo slots and Ctrl+Z restores one tick at a time.
@@ -2922,8 +2921,7 @@ class CameraWireTool:
 
     def _mark_clean(self) -> None:
         self._dirty = False
-        import time as _t
-        self._last_save_time = _t.time()
+        self._last_save_time = time.time()
         # Snapshot the top-of-history pointer so undo back to here can
         # detect "I'm at the saved state" and clear the dirty flag.
         self._saved_marker = (
@@ -5088,9 +5086,8 @@ class CameraWireTool:
                 # Push a single undoable command for the whole drag.
                 # The live mousemove already applied the new az; do() is
                 # a harmless no-op for the current state, undo restores.
-                import time as _time
                 cmd = RotateFovCmd(self, dev, old_az, new_az,
-                                    _time.monotonic())
+                                    time.monotonic())
                 cmd._fov_was_missing = fov_was_missing
                 self._execute(cmd)
                 self._post_command_refresh()
@@ -5234,8 +5231,7 @@ class CameraWireTool:
         # Throttled: at most one update every 33ms (~30fps) to avoid
         # spamming canvas redraws when the user moves the cursor fast.
         if self.mode == Mode.MOVE:
-            import time as _t
-            now = _t.monotonic()
+            now = time.monotonic()
             last = getattr(self, "_hover_last_ts", 0.0)
             if now - last < 0.033:
                 return
@@ -6665,14 +6661,13 @@ class CameraWireTool:
         """Refresh the 'Saved Xm ago / Modified' label and re-arm in 15s."""
         if not hasattr(self, "save_indicator"):
             return
-        import time as _t
         if self._dirty:
             self.save_indicator.config(text="● Modified",
                                         foreground="#FF8C42")
             tip = ("There are unsaved changes.\n"
                    "Press Ctrl+S to save (or wait ≤60s for auto-save snapshot).")
         elif self._last_save_time is not None:
-            elapsed = _t.time() - self._last_save_time
+            elapsed = time.time() - self._last_save_time
             if elapsed < 15:
                 txt = "Saved just now"
             elif elapsed < 60:
@@ -6682,8 +6677,8 @@ class CameraWireTool:
             else:
                 txt = f"Saved {int(elapsed/3600)}h ago"
             self.save_indicator.config(text=txt, foreground="#3ddc84")
-            stamp = _t.strftime("%H:%M:%S",
-                                 _t.localtime(self._last_save_time))
+            stamp = time.strftime("%H:%M:%S",
+                                   time.localtime(self._last_save_time))
             tip = f"Last saved at {stamp}\n(Ctrl+S to save now.)"
         else:
             self.save_indicator.config(text="", foreground="#888888")
