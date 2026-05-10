@@ -8934,11 +8934,20 @@ class CameraWireTool:
             filetypes=[("CSV", "*.csv")])
         if not path:
             return
+        # Atomic — write to .tmp then rename so a crash mid-write
+        # doesn't leave a partial CSV under the user's chosen name.
+        tmp_path = path + ".tmp"
         try:
-            bom_mod.write_csv(self._build_bom_report(), path,
+            bom_mod.write_csv(self._build_bom_report(), tmp_path,
                               currency=self._bom_currency_var.get() or "$")
+            os.replace(tmp_path, path)
             messagebox.showinfo("Exported", f"BOM written:\n{path}")
         except OSError as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
             messagebox.showerror("Export failed", str(e))
 
     def _export_csv_bundle(self) -> None:
@@ -9088,12 +9097,16 @@ class CameraWireTool:
             filetypes=[("PDF", "*.pdf")])
         if not path:
             return
+        # Atomic write — reportlab can crash mid-stream; without staging
+        # the user could be left with a half-written PDF that opens
+        # blank in Acrobat. Identical pattern to _save_drawio.
+        tmp_path = path + ".tmp"
         try:
             project_name = (self._project.project_name if self._project else "")
             project_name = project_name or os.path.splitext(
                 os.path.basename(self.drawio_path))[0]
             export_mod.write_pdf_report(
-                path,
+                tmp_path,
                 project_name=project_name,
                 devices=self.devices,
                 symbol_types=self.symbol_types,
@@ -9105,9 +9118,15 @@ class CameraWireTool:
                 format_length=self._format_length,
                 currency=self._bom_currency_var.get() or "$",
             )
+            os.replace(tmp_path, path)
             messagebox.showinfo("Exported", f"PDF written:\n{path}")
         except Exception as e:
             log_error("PDF export failed", e)
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
             messagebox.showerror("Export failed", str(e))
 
     # ============================================================ FOV rendering helper
