@@ -5301,12 +5301,18 @@ class CameraWireTool:
         self._post_command_refresh()
 
     def _cycle_device(self, direction: int) -> None:
-        if not self.devices:
+        # Respect any active filter — without this, [ / ] jump to devices
+        # the user can't see in the listbox.
+        pool = (self._filtered_devices
+                if hasattr(self, "_filtered_devices") and self._filtered_devices
+                else self.devices)
+        if not pool:
             return
-        cur = (self.devices.index(self.selected_device)
-               if self.selected_device in self.devices else -1)
-        nxt = (cur + direction) % len(self.devices)
-        self.selected_device = self.devices[nxt]
+        cur = (pool.index(self.selected_device)
+               if self.selected_device in pool else -1)
+        nxt = (cur + direction) % len(pool)
+        self.selected_device = pool[nxt]
+        self._sync_dev_listbox_to_canvas()
         self._center_on_selected()
         self._redraw()
 
