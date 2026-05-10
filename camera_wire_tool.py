@@ -2026,6 +2026,12 @@ class CameraWireTool:
 
         ttk.Button(tab_dev, text="Center on Selected (Enter)",
                    command=self._center_on_selected).pack(anchor=tk.W, padx=6, pady=4)
+        # Bottom totals footer — parallel with the Wires tab's total label.
+        # Updated alongside the listbox in _refresh_device_list.
+        self._dev_total_label = ttk.Label(
+            tab_dev, text="—",
+            font=("Segoe UI", 9), foreground="#888888")
+        self._dev_total_label.pack(anchor=tk.W, padx=8, pady=(2, 6))
 
         # --- Tab 2: Wires ---
         tab_wire = ttk.Frame(notebook)
@@ -2934,6 +2940,22 @@ class CameraWireTool:
             self.dev_listbox.insert(tk.END, placeholder)
             self._dev_listbox_rows.append(None)
             self.dev_listbox.itemconfig(0, foreground="#888888")
+
+        # Footer totals — surfaces the same numbers the toolbar shows
+        # but scoped to the current filter so the user can see what the
+        # search just narrowed them down to.
+        if hasattr(self, "_dev_total_label"):
+            n_total = len(self.devices)
+            n_filtered = len(self._filtered_devices)
+            n_cam_filtered = sum(
+                1 for d in self._filtered_devices
+                if self.symbol_types.get(d["type"], {}).get("is_camera"))
+            if query and n_filtered != n_total:
+                txt = (f"{n_filtered} of {n_total} device(s) match "
+                       f"({n_cam_filtered} cameras)")
+            else:
+                txt = f"{n_total} device(s) ({n_cam_filtered} cameras)"
+            self._dev_total_label.config(text=txt)
 
     # ============================================================ Symbol editor dialog
     def _edit_symbol_type(self) -> None:
