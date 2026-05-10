@@ -7504,6 +7504,15 @@ class CameraWireTool:
                           f"({len(wires_for_dev)} run(s))",
                     command=lambda d=dev: self._clear_wires_for_device(d),
                 )
+            # Quick way to grab every instance of this type — useful for
+            # bulk move / delete / cable-type apply.
+            same_type = [d for d in self.devices if d["type"] == dev["type"]]
+            if len(same_type) > 1:
+                menu.add_command(
+                    label=f"☑  Select all {len(same_type)} {dev['type']} "
+                          f"on this floor",
+                    command=lambda devs=same_type:
+                        self._select_devices_group(devs))
             menu.add_separator()
             if info.get("is_camera"):
                 menu.add_command(label="📷  Edit FOV / DORI…",
