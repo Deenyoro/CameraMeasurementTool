@@ -963,6 +963,30 @@ class SetWireCableTypeCmd(Command):
                 route["cable_type"] = old
 
 
+class EditCableTypeCmd(Command):
+    """Add or update a cable type in the catalog. `old_info` is None for
+    a brand-new cable; undo restores absence."""
+
+    def __init__(self, app: "CameraWireTool", cable_id: str,
+                 old_info: dict | None, new_info: dict | None):
+        self.app = app
+        self.cable_id = cable_id
+        self.old_info = dict(old_info) if old_info else None
+        self.new_info = dict(new_info) if new_info else None
+
+    def do(self):
+        if self.new_info is None:
+            self.app.cable_types.pop(self.cable_id, None)
+        else:
+            self.app.cable_types[self.cable_id] = dict(self.new_info)
+
+    def undo(self):
+        if self.old_info is None:
+            self.app.cable_types.pop(self.cable_id, None)
+        else:
+            self.app.cable_types[self.cable_id] = dict(self.old_info)
+
+
 class CalibrateCmd(Command):
     def __init__(self, app: "CameraWireTool", old_scale: float | None, new_scale: float):
         self.app = app
@@ -2229,10 +2253,14 @@ class CameraWireTool:
             justify=tk.CENTER,
         )
         self._bom_pill_total.pack(side=tk.RIGHT, padx=(8, 0))
-        # Keep the legacy label name for callers that still reference it,
-        # but make it a no-op stub.
-        self._bom_totals_label = ttk.Label(tab_bom, text="")
-        # not packed — the pills above are the visible totals now
+        # Warning band — surfaces "scale not set" / "N unassigned wires"
+        # written by _refresh_bom_tab. Packed so it's actually visible
+        # (was a no-op stub for several rounds — bug fixed).
+        self._bom_totals_label = ttk.Label(tab_bom, text="",
+                                            foreground="#FF8C42",
+                                            font=("Segoe UI", 9))
+        self._bom_totals_label.pack(anchor=tk.W, padx=8, pady=(0, 4),
+                                     fill=tk.X)
 
         bom_btns = ttk.Frame(tab_bom)
         bom_btns.pack(fill=tk.X, padx=6, pady=6)
@@ -2283,11 +2311,16 @@ class CameraWireTool:
             idx = self._notebook.index("current")
         except tk.TclError:
             return
-        self._active_search_entry = (
-            self._dev_search_entry if idx == 0
-            else self._wire_search_entry if idx == 1
-            else self._sym_search_entry
-        )
+        # BOM tab (3) has no search entry — clear so Ctrl+F doesn't
+        # silently jump focus into the (invisible) Symbols search.
+        if idx == 0:
+            self._active_search_entry = self._dev_search_entry
+        elif idx == 1:
+            self._active_search_entry = self._wire_search_entry
+        elif idx == 2:
+            self._active_search_entry = self._sym_search_entry
+        else:
+            self._active_search_entry = None
 
     def _refresh_recent_menu(self) -> None:
         self._recent_menu.delete(0, tk.END)
@@ -2628,6 +2661,10 @@ class CameraWireTool:
                 f"reassign wire {c.old_did or '—'} → {c.new_did or '—'}"),
             "SetWireCableTypeCmd": lambda c: (
                 f"set cable type on {len(c.entries)} wire(s)"),
+            "EditCableTypeCmd":   lambda c: (
+                f"delete cable type {c.cable_id}" if c.new_info is None else
+                f"add cable type {c.cable_id}" if c.old_info is None else
+                f"edit cable type {c.cable_id}"),
             "EditFovCmd":         lambda c: (
                 f"edit FOV ({len(c.entries)} cameras)"
                 if len(c.entries) > 1 else
@@ -5129,12 +5166,6 @@ class CameraWireTool:
                     text=f"Wire route: {total_px:.0f}px  |  Right-click to finish{shift_hint}",
                 )
 
-    def _on_right_click(self, _event) -> None:
-        if self.mode == Mode.WIRE and len(self.current_wire_points) >= 2:
-            self._finish_wire_route()
-        else:
-            self._cancel_current()
-
     def _finish_wire_route(self) -> None:
         if len(self.current_wire_points) < 2:
             self._cancel_current(); return
@@ -6413,6 +6444,7 @@ class CameraWireTool:
                 for wr in self.wire_routes
             ],
             "annotations": list(self.annotations),
+            "legend_box": dict(self.legend_box) if self.legend_box else None,
         }
         tmp = self._autosave_path + ".tmp"
         try:
@@ -6480,6 +6512,11 @@ class CameraWireTool:
         if "annotations" in data and isinstance(data["annotations"], list):
             self.annotations = [dict(a) for a in data["annotations"]
                                 if isinstance(a, dict)]
+        # Legend position (recovered if user moved it before crash)
+        if isinstance(data.get("legend_box"), dict):
+            for k in ("x", "y", "w", "title"):
+                if k in data["legend_box"]:
+                    self.legend_box[k] = data["legend_box"][k]
         # Wire routes: rebuild lengths
         self.wire_routes = []
         for wr in data.get("wire_routes", []):
@@ -7718,15 +7755,17 @@ class CameraWireTool:
                     "Overwrite?",
                     f"A cable named '{new_id}' already exists. Overwrite it?"):
                     return False
-            self.cable_types[new_id] = {
-                "label": label, "color": color, "cost_per_ft": cost,
-            }
+            new_info = {"label": label, "color": color, "cost_per_ft": cost}
+            old_info = self.cable_types.get(new_id)
+            # No-op skip — same payload, no point pushing to history
+            if old_info == new_info:
+                editing_id[0] = new_id
+                is_dirty[0] = False
+                return True
+            self._execute(EditCableTypeCmd(self, new_id, old_info, new_info))
             editing_id[0] = new_id
             is_dirty[0] = False
-            self._mark_dirty()
-            self._refresh_bom_tab()
-            self._refresh_symbol_list()
-            self._redraw()
+            self._post_command_refresh()
             repop(select_id=new_id)
             return True
 
@@ -7759,13 +7798,11 @@ class CameraWireTool:
                 "Delete cable",
                 f"Delete cable type '{cid}'?\n\n"
                 "Wires that use this cable will fall back to their device's "
-                "default cable in the BOM."):
+                "default cable in the BOM.\n\nUndo with Ctrl+Z."):
                 return
-            self.cable_types.pop(cid, None)
-            self._mark_dirty()
-            self._refresh_bom_tab()
-            self._refresh_symbol_list()
-            self._redraw()
+            old_info = dict(self.cable_types[cid])
+            self._execute(EditCableTypeCmd(self, cid, old_info, None))
+            self._post_command_refresh()
             repop()
             # Show the first remaining cable, or empty form
             if self.cable_types:
@@ -8111,6 +8148,7 @@ class CameraWireTool:
         dlg.title(f"FOV / DORI — {device['id']}")
         dlg.geometry("560x540")
         dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text=f"Camera {device['id']} ({device['type']})",
                   font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 4))
@@ -8199,24 +8237,47 @@ class CameraWireTool:
                 row=i // 4, column=i % 4, padx=4, pady=2, sticky=tk.W)
 
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
-        def _settings_dict(include_az: bool = True) -> dict:
+        def _safe_float(var, fallback) -> float | None:
+            """Return a float from a tk.Var, or None when the user typed
+            non-numeric garbage. Lets callers surface a friendly error
+            instead of letting raw TclError bubble out of float()."""
+            try:
+                v = var.get()
+                return float(v) if v != "" else fallback
+            except (ValueError, tk.TclError):
+                return None
+
+        def _settings_dict(include_az: bool = True) -> dict | None:
+            lens_v = _safe_float(lens_var, None)
+            mh_v   = _safe_float(mh_var, None)
+            tilt_v = _safe_float(tilt_var, None)
+            az_v   = _safe_float(az_var, None) if include_az else 0.0
+            for name, val in (("Lens", lens_v), ("Mount height", mh_v),
+                                ("Tilt", tilt_v),
+                                ("Azimuth", az_v if include_az else 0.0)):
+                if val is None:
+                    messagebox.showerror(
+                        "Invalid", f"{name} must be a number.")
+                    return None
             d = {
                 "enabled": True,
                 "show": show_var.get(),
-                "lens_mm": float(lens_var.get()),
+                "lens_mm": lens_v,
                 "sensor": sensor_var.get(),
                 "resolution": list(lenses_mod.RESOLUTIONS.get(res_var.get(),
                                                               [1920, 1080])),
-                "mount_height_ft": float(mh_var.get()),
-                "tilt_deg": float(tilt_var.get()),
+                "mount_height_ft": mh_v,
+                "tilt_deg": tilt_v,
             }
             if include_az:
-                d["azimuth_deg"] = float(az_var.get())
+                d["azimuth_deg"] = az_v
             return d
 
         def apply():
-            old_fov = dict(device["fov"]) if device.get("fov") else None
             new_fov = _settings_dict(include_az=True)
+            if new_fov is None:
+                return   # validation already showed the error
+            old_fov = dict(device["fov"]) if device.get("fov") else None
             # No-op when nothing actually changed — don't pollute the
             # undo history with a redundant entry.
             if old_fov == new_fov:
@@ -8244,6 +8305,9 @@ class CameraWireTool:
                 "pushed. Each camera keeps its own azimuth and show-flag.)"):
                 return
             shared = _settings_dict(include_az=False)
+            if shared is None:
+                return
+            cur_az = _safe_float(az_var, 0.0) or 0.0
             entries: list[tuple[dict, dict | None, dict]] = []
             for d in same_type:
                 old_raw = d.get("fov")
@@ -8254,7 +8318,7 @@ class CameraWireTool:
                 if "show" in base:
                     merged["show"] = base["show"]
                 if d is device:
-                    merged["azimuth_deg"] = float(az_var.get())
+                    merged["azimuth_deg"] = cur_az
                 # Skip entries that wouldn't actually change anything —
                 # keeps a no-op "Apply to all" out of the undo stack.
                 if old_snapshot == merged:
@@ -8285,6 +8349,7 @@ class CameraWireTool:
                 command=apply_to_type,
             ).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: apply())
 
     # ============================================================ Cable resolution
     def _resolve_cable_for_pair(self, src: dict, dst: dict | None) -> str:
@@ -8354,6 +8419,7 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.title("New floor"); dlg.geometry("360x180")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         ttk.Label(dlg, text=f"Floor ID: {new_id}").pack(anchor=tk.W, padx=10, pady=4)
         ttk.Label(dlg, text="Name:").pack(anchor=tk.W, padx=10)
         name_var = tk.StringVar(value=os.path.splitext(os.path.basename(path))[0])
@@ -8369,9 +8435,15 @@ class CameraWireTool:
             rel = path
 
         def add():
+            try:
+                elev = float(elev_var.get())
+            except (ValueError, tk.TclError):
+                messagebox.showerror("Invalid",
+                                      "Elevation (ft) must be a number.")
+                return
             new_floor = mf_mod.FloorState(
                 id=new_id, name=name_var.get().strip() or new_id,
-                elevation_ft=float(elev_var.get()),
+                elevation_ft=elev,
                 drawio_file=rel,
             )
             self._project.floors.append(new_floor)
@@ -8382,6 +8454,7 @@ class CameraWireTool:
                 self._switch_floor(new_id)
 
         ttk.Button(dlg, text="Add", command=add).pack(pady=8)
+        dlg.bind("<Return>", lambda _e: add())
 
     def _switch_floor(self, floor_id: str) -> None:
         if self._project is None:
@@ -8440,6 +8513,7 @@ class CameraWireTool:
             return
 
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.title(f"Align floor {active.id} to reference")
         dlg.geometry("520x320")
 
@@ -8532,6 +8606,7 @@ class CameraWireTool:
             messagebox.showinfo("Floors", "No floors yet — use Add Floor.")
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.title("Manage floors"); dlg.geometry("520x320")
         cols = ("id", "name", "elevation", "drawio")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)

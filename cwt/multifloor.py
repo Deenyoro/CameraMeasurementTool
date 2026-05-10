@@ -176,15 +176,20 @@ def _make_empty_project(drawio_path: str) -> ProjectState:
 
 
 def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
-    """Wrap a v1 (single-floor) wiremap into a v2 project."""
+    """Wrap a v1 (single-floor) wiremap into a v2 project. Preserves
+    catalog-level state (cable_types, annotations) that older files
+    may have stored alongside the wire routes — silently dropping them
+    on first save would lose the user's customizations."""
     floor = FloorState(
         id="F1", name="First Floor", elevation_ft=0.0,
         drawio_file=os.path.basename(drawio_path),
         wire_routes=list(data.get("wire_routes", [])),
+        annotations=list(data.get("annotations", [])),
     )
     return ProjectState(
         version=2, active_floor="F1",
         floors=[floor],
+        cable_types=dict(data.get("cable_types", {})),
         scale_factor=data.get("scale_factor"),
         unit=data.get("unit", "ft-in"),
         next_device_id=int(data.get("next_device_id", 100) or 100),
