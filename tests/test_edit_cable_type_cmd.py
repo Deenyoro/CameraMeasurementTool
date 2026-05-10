@@ -1,0 +1,67 @@
+"""EditCableTypeCmd round-trips cable-catalog changes (add / edit /
+delete) through the undo stack."""
+
+from __future__ import annotations
+
+import os
+import sys
+import types
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import camera_wire_tool as cwt
+
+
+def _stub():
+    return types.SimpleNamespace(cable_types={
+        "Cat6": {"label": "Cat6 PoE", "color": "#0080FF",
+                  "cost_per_ft": 0.18},
+    })
+
+
+def test_add_new_cable_type():
+    app = _stub()
+    new = {"label": "Fiber OM4", "color": "#FF8000", "cost_per_ft": 1.20}
+    cmd = cwt.EditCableTypeCmd(app, "OM4", old_info=None, new_info=new)
+    cmd.do()
+    assert app.cable_types["OM4"] == new
+
+
+def test_undo_add_removes_key():
+    app = _stub()
+    new = {"label": "Fiber OM4", "color": "#FF8000", "cost_per_ft": 1.20}
+    cmd = cwt.EditCableTypeCmd(app, "OM4", old_info=None, new_info=new)
+    cmd.do()
+    cmd.undo()
+    assert "OM4" not in app.cable_types
+
+
+def test_edit_existing_cable_type():
+    app = _stub()
+    old = dict(app.cable_types["Cat6"])
+    new = {"label": "Cat6 23AWG", "color": "#0066CC", "cost_per_ft": 0.22}
+    cmd = cwt.EditCableTypeCmd(app, "Cat6", old_info=old, new_info=new)
+    cmd.do()
+    assert app.cable_types["Cat6"] == new
+    cmd.undo()
+    assert app.cable_types["Cat6"] == old
+
+
+def test_delete_cable_type():
+    app = _stub()
+    old = dict(app.cable_types["Cat6"])
+    cmd = cwt.EditCableTypeCmd(app, "Cat6", old_info=old, new_info=None)
+    cmd.do()
+    assert "Cat6" not in app.cable_types
+    cmd.undo()
+    assert app.cable_types["Cat6"] == old
+
+
+def test_redo_after_undo():
+    app = _stub()
+    new = {"label": "RG6", "color": "#101010", "cost_per_ft": 0.55}
+    cmd = cwt.EditCableTypeCmd(app, "RG6", old_info=None, new_info=new)
+    cmd.do()
+    cmd.undo()
+    cmd.do()
+    assert app.cable_types["RG6"] == new
