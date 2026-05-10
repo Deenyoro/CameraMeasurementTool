@@ -2219,6 +2219,16 @@ class CameraWireTool:
         self._bom_devices_tree = ttk.Treeview(
             dev_frame, columns=dev_cols, show="headings", height=10,
         )
+        # Sortable headers (matches the cable tree above) — click to
+        # sort, click again to reverse.
+        self._bom_devices_sort_state: tuple[str, bool] = ("code", False)
+        def _make_dev_sort_cmd(col_id):
+            def cmd():
+                cur, rev = self._bom_devices_sort_state
+                self._bom_devices_sort_state = (
+                    col_id, not rev if col_id == cur else False)
+                self._refresh_bom_tab()
+            return cmd
         for c, w, anchor, h in (
             ("code",  45,  tk.W, "Code"),
             ("label", 150, tk.W, "Label"),
@@ -2227,7 +2237,7 @@ class CameraWireTool:
             ("runs",  45,  tk.E, "Runs"),
             ("wire",  100, tk.E, "Wire"),
         ):
-            self._bom_devices_tree.heading(c, text=h)
+            self._bom_devices_tree.heading(c, text=h, command=_make_dev_sort_cmd(c))
             self._bom_devices_tree.column(c, width=w, anchor=anchor, stretch=False)
         sb_dev = ttk.Scrollbar(dev_frame, orient=tk.VERTICAL,
                                 command=self._bom_devices_tree.yview)
@@ -7482,6 +7492,24 @@ class CameraWireTool:
                 self.devices, self.symbol_types, self.wire_routes,
                 self.cable_types,
             )
+            # Apply user sort + arrow indicator (mirror the cable-tree path)
+            dev_sort_col, dev_reverse = getattr(
+                self, "_bom_devices_sort_state", ("code", False))
+            dev_sort_key = {
+                "code":  lambda l: l.code.lower(),
+                "label": lambda l: l.label.lower(),
+                "count": lambda l: l.count,
+                "cable": lambda l: l.cable_id.lower(),
+                "runs":  lambda l: l.runs,
+                "wire":  lambda l: l.total_in,
+            }.get(dev_sort_col, lambda l: l.code.lower())
+            inv = sorted(inv, key=dev_sort_key, reverse=dev_reverse)
+            for c, base in (
+                ("code", "Code"), ("label", "Label"), ("count", "Count"),
+                ("cable", "Cable"), ("runs", "Runs"), ("wire", "Wire"),
+            ):
+                arrow = (" ▼" if dev_reverse else " ▲") if c == dev_sort_col else ""
+                self._bom_devices_tree.heading(c, text=base + arrow)
             cam_count = 0; cam_runs = 0; cam_in = 0.0
             total_count = 0; total_runs = 0; total_in = 0.0
             for line in inv:
