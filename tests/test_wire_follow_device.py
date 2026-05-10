@@ -83,3 +83,29 @@ def test_lengths_recomputed_after_follow():
     # New length_px = hypot(0, 200) = 200
     assert app.wire_routes[0]["length_px"] == 200.0
     assert app.wire_routes[0]["length_in"] == 100.0   # 200 * 0.5
+
+
+def test_movedevicecmd_do_and_undo_chain_through_wire_follow():
+    """End-to-end: MoveDeviceCmd's do/undo should keep wires anchored
+    at the device's center in sync, including across redo."""
+    app = _make_app()
+    dev = app.devices[0]
+    app.wire_routes = [{"device_id": "s10",
+                         "points": [(230.0, 230.0), (400.0, 400.0)]}]
+    cmd = cwt.MoveDeviceCmd(app, dev,
+                              old_x=100.0, old_y=100.0,
+                              new_x=200.0, new_y=200.0)
+    # State pre-do (live drag already moved device — simulate by setting
+    # to new and letting do() be the catch-up call for wires).
+    dev["x"], dev["y"] = 100.0, 100.0   # back to old
+    cmd.do()
+    assert dev["x"] == 200.0 and dev["y"] == 200.0
+    # First point followed to new center (200+15)*2 = 430
+    assert app.wire_routes[0]["points"][0] == (430.0, 430.0)
+    cmd.undo()
+    assert dev["x"] == 100.0 and dev["y"] == 100.0
+    # Wire shifted back to (230, 230)
+    assert app.wire_routes[0]["points"][0] == (230.0, 230.0)
+    # Redo cycles forward again
+    cmd.do()
+    assert app.wire_routes[0]["points"][0] == (430.0, 430.0)
