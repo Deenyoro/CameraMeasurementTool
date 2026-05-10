@@ -4381,7 +4381,17 @@ class CameraWireTool:
         dlg.geometry("520x320")
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        # If the user closes the dialog without committing, reset the
+        # calibration state so the next click doesn't append a third
+        # point (which would silently break this calibration cycle).
+        def _reset_on_close():
+            self.cal_points = []
+            self._set_mode(Mode.MOVE)
+            self._redraw()
+        dlg.protocol("WM_DELETE_WINDOW",
+                      lambda: (_reset_on_close(), dlg.destroy()))
+        dlg.bind("<Escape>",
+                  lambda _e: (_reset_on_close(), dlg.destroy()))
 
         ttk.Label(
             dlg,
@@ -4435,16 +4445,22 @@ class CameraWireTool:
                 self._flash_status(
                     f"Scale unchanged ({self._scale_label_text()}).",
                     ttl_ms=2500)
+                _reset_on_close()
                 dlg.destroy()
                 return
             self._execute(CalibrateCmd(self, self.scale_factor, new_scale))
             self.scale_label.config(text=self._scale_label_text())
+            # Leave calibration state — same as cancel path so subsequent
+            # clicks don't accumulate stale yellow dots.
+            self.cal_points = []
+            self._set_mode(Mode.MOVE)
             self._refresh_wire_list()
             self._refresh_device_list()
             self._redraw()
             dlg.destroy()
 
         def cancel():
+            _reset_on_close()
             dlg.destroy()
 
         # Reference card with common distances — helps users pick a
