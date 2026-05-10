@@ -1654,6 +1654,13 @@ class CameraWireTool:
                 widget.select_range(0, tk.END)
             except tk.TclError:
                 pass
+        else:
+            # Visible tab has no search field (BOM). Tell the user
+            # rather than silently swallowing the keystroke.
+            self._flash_status(
+                "This tab has no search box. Try Ctrl+G for global "
+                "quick-jump (find any device / symbol / wire).",
+                ttl_ms=3000)
 
     # ============================================================ UI
     def _build_ui(self) -> None:
