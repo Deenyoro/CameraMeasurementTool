@@ -2040,6 +2040,15 @@ class CameraWireTool:
         export_menu.add_separator()
         export_menu.add_command(label="Map Snapshot (PNG)…",
                                 command=self._export_map_png)
+        # Grey out PDF / CSV-bundle when their backing module (reportlab
+        # / cwt.export) isn't installed — clearer than a click-pops-a-
+        # 'reportlab not installed' messagebox.
+        if not _HAS_EXPORT:
+            export_menu.entryconfig(
+                "All CSVs (BOM + Devices + Wires)…", state=tk.DISABLED)
+            export_menu.entryconfig("Project PDF Report…", state=tk.DISABLED)
+        elif not getattr(export_mod, "_HAS_REPORTLAB", False):
+            export_menu.entryconfig("Project PDF Report…", state=tk.DISABLED)
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
