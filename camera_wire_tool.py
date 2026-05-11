@@ -9036,9 +9036,11 @@ class CameraWireTool:
             # Quick manual nudge dialog using arrow keys
             n = tk.Toplevel(dlg); n.transient(dlg); n.grab_set()
             n.title("Manual nudge")
-            n.geometry("320x180")
-            ttk.Label(n, text="Use these buttons to nudge the alignment.\n"
-                              "1px steps; ×10 with shift modifier.").pack(padx=10, pady=8)
+            n.geometry("320x220")
+            n.bind("<Escape>", lambda _e: n.destroy())
+            ttk.Label(n, text="Buttons: 1px nudges and ×10 nudges.\n"
+                              "Or click the focus area then use arrow keys "
+                              "(Shift+Arrow = 10px).").pack(padx=10, pady=8)
             grid = ttk.Frame(n); grid.pack(pady=6)
             def nudge(dx, dy):
                 active.alignment["tx"] += dx
@@ -9053,6 +9055,18 @@ class CameraWireTool:
             ttk.Button(grid, text="←10", width=4, command=lambda: nudge(-10, 0)).grid(row=3, column=0)
             ttk.Button(grid, text="↓10", width=4, command=lambda: nudge(0, 10)).grid(row=3, column=1)
             ttk.Button(grid, text="→10", width=4, command=lambda: nudge(10, 0)).grid(row=3, column=2)
+            # Wire arrow keys (with Shift for 10x) to the same nudge fn —
+            # the doc comment promised it, now it actually works.
+            def _key(dx, dy):
+                def w(e):
+                    step = 10 if (e.state & 0x0001) else 1
+                    nudge(dx * step, dy * step)
+                return w
+            n.bind("<Up>",    _key(0, -1))
+            n.bind("<Down>",  _key(0, 1))
+            n.bind("<Left>",  _key(-1, 0))
+            n.bind("<Right>", _key(1, 0))
+            n.focus_set()
 
         def pick_anchors():
             ref = self._project.get_floor(ref_var.get())
