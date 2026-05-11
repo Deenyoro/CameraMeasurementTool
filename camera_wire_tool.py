@@ -9434,7 +9434,26 @@ def _discover_drawio_files() -> list[str]:
     return candidates
 
 
+def _enable_windows_dpi_awareness() -> None:
+    """Tell Windows we'll handle our own DPI scaling so the canvas
+    renders crisply on high-DPI displays. Without this, Tkinter apps
+    on Win10+ get bitmap-stretched by the OS and look blurry. Best-
+    effort; silently no-op on older Windows or non-Windows platforms."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2  (Win 8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (OSError, AttributeError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # legacy fallback
+        except (OSError, AttributeError):
+            pass
+
+
 def main() -> None:
+    _enable_windows_dpi_awareness()
     root = tk.Tk()
     apply_theme(root)
     root.title("Camera Wire Estimation Tool")
