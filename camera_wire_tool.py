@@ -2492,9 +2492,13 @@ class CameraWireTool:
                        command=self._export_pdf).pack(side=tk.LEFT, padx=4)
 
         # Refresh on every input change AND persist the new value so the
-        # next session opens with the same preferences.
+        # next session opens with the same preferences. Also refresh the
+        # wire list — its footer + the toolbar grand-total badge both
+        # compute against the BOM, so they need to follow waste/tax/
+        # currency changes too.
         def _bom_input_changed(*_):
             self._refresh_bom_tab()
+            self._refresh_wire_list()
             self._persist_user_settings()
         for var in (self._bom_waste_var, self._bom_tax_var, self._bom_currency_var):
             var.trace_add("write", _bom_input_changed)
