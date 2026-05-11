@@ -7538,7 +7538,9 @@ class CameraWireTool:
                 ("Ctrl+F",       "Focus search on active tab"),
                 ("Ctrl+G",       "Quick jump (find any device/symbol/wire)"),
                 ("Ctrl+P",       "Quick jump (alias)"),
+                ("Ctrl+U",       "Jump to next unwired camera"),
                 ("F1 or ?",      "Open this dialog"),
+                ("F11",          "Toggle fullscreen"),
             ]),
         ]
         for title, rows in sections:
