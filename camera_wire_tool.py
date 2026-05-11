@@ -2483,13 +2483,25 @@ class CameraWireTool:
 
         bom_btns = ttk.Frame(tab_bom)
         bom_btns.pack(fill=tk.X, padx=6, pady=6)
-        ttk.Button(bom_btns, text="Cable Types…",
-                   command=self._open_cable_types_editor).pack(side=tk.LEFT)
-        ttk.Button(bom_btns, text="Export CSV",
-                   command=self._export_bom_csv).pack(side=tk.LEFT, padx=4)
+        ct_btn = ttk.Button(bom_btns, text="Cable Types…",
+                             command=self._open_cable_types_editor)
+        ct_btn.pack(side=tk.LEFT)
+        Tooltip(ct_btn,
+                "Edit the cable catalog: add a cable type, change its "
+                "cost / color / label, or delete one.\n"
+                "Wires that referenced a deleted cable fall back to "
+                "their device's default.")
+        csv_btn = ttk.Button(bom_btns, text="Export CSV",
+                              command=self._export_bom_csv)
+        csv_btn.pack(side=tk.LEFT, padx=4)
+        Tooltip(csv_btn, "Export this BOM table as a single CSV file.")
         if _HAS_EXPORT:
-            ttk.Button(bom_btns, text="Export PDF",
-                       command=self._export_pdf).pack(side=tk.LEFT, padx=4)
+            pdf_btn = ttk.Button(bom_btns, text="Export PDF",
+                                  command=self._export_pdf)
+            pdf_btn.pack(side=tk.LEFT, padx=4)
+            Tooltip(pdf_btn,
+                    "Export a multi-page PDF report: cover, project "
+                    "stats, BOM table, per-device listing.")
 
         # Refresh on every input change AND persist the new value so the
         # next session opens with the same preferences. Also refresh the
