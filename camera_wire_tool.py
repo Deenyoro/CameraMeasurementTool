@@ -7823,11 +7823,13 @@ class CameraWireTool:
         }.get(sort_col, lambda l: l.cable_id.lower())
         lines_sorted = sorted(report.lines, key=sort_key, reverse=reverse)
 
-        # Update column headers with arrow indicator
+        # Update column headers with arrow indicator. Rate header uses
+        # the user's currency symbol so it stays consistent with the
+        # cell values and the pills below.
         for c, base in (
             ("cable", "Cable"), ("label", "Description"),
             ("runs",  "Runs"),  ("ft", "Feet"),
-            ("rate",  "$/ft"),  ("subtotal", "Subtotal"),
+            ("rate",  f"{cur}/ft"),  ("subtotal", "Subtotal"),
         ):
             arrow = (" ▼" if reverse else " ▲") if c == sort_col else ""
             self._bom_tree.heading(c, text=base + arrow)
