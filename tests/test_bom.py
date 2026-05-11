@@ -110,6 +110,42 @@ def test_rollup_includes_risers():
     assert abs(line.subtotal - 4.0) < 1e-6
 
 
+def test_device_inventory_basic():
+    devs = [
+        {"id": "s1", "type": "MD"},
+        {"id": "s2", "type": "MD"},
+        {"id": "s3", "type": "MD"},
+        {"id": "s4", "type": "CR"},
+    ]
+    routes = [
+        {"device_id": "s1", "length_in": 120.0},
+        {"device_id": "s2", "length_in":  60.0},
+        {"device_id": "s4", "length_in": 240.0},
+    ]
+    inv = bom.device_inventory(devs, SYMBOL_TYPES, routes, CABLE_TYPES)
+    by_code = {l.code: l for l in inv}
+    assert by_code["MD"].count == 3
+    assert by_code["MD"].runs == 2
+    assert abs(by_code["MD"].total_in - 180.0) < 1e-6
+    assert by_code["MD"].cable_id == "Cat6"
+    assert by_code["CR"].count == 1
+    assert by_code["CR"].runs == 1
+    assert abs(by_code["CR"].total_in - 240.0) < 1e-6
+
+
+def test_device_inventory_cameras_only():
+    devs = [
+        {"id": "s1", "type": "MD"},
+        {"id": "s2", "type": "CR"},   # not a camera
+        {"id": "s3", "type": "M"},    # not a camera
+    ]
+    routes = []
+    inv = bom.device_inventory(devs, SYMBOL_TYPES, routes, CABLE_TYPES,
+                                cameras_only=True)
+    codes = {l.code for l in inv}
+    assert codes == {"MD"}
+
+
 def test_csv_roundtrip(tmp_path):
     devs = [{"id": "s1", "type": "MD"}]
     routes = [{"device_id": "s1", "length_in": 1200.0}]
@@ -120,3 +156,22 @@ def test_csv_roundtrip(tmp_path):
     rows = list(csv.reader(p.open(encoding="utf-8")))
     assert rows[0][0] == "Cable"
     assert any("GRAND TOTAL" in r for r in (row for row in rows))
+
+
+def test_rollup_handles_corrupted_cable_type_entry():
+    """A non-dict entry in cable_types (corrupted project file) used to
+    crash rollup with AttributeError. Now treated as empty."""
+    bad_cable_types = {
+        "Cat6": "this should have been a dict",   # corrupted
+        "Cat5e": {"label": "Cat5e", "color": "#3060A0", "cost_per_ft": 0.10},
+    }
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [
+        {"device_id": "s1", "length_in": 120.0, "cable_type": "Cat6"},
+    ]
+    # Should not raise
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, bad_cable_types)
+    # Cat6 line still appears, just with default 0 cost
+    cat6 = next((l for l in rep.lines if l.cable_id == "Cat6"), None)
+    assert cat6 is not None
+    assert cat6.cost_per_ft == 0.0

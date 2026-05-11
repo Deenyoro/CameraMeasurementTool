@@ -144,8 +144,15 @@ def rollup(
     lines: list[BomLine] = []
     subtotal = 0.0
     for cid, data in sorted(totals.items()):
-        ct = cable_types.get(cid, {})
-        cost_per_ft = float(ct.get("cost_per_ft", 0.0))
+        ct = cable_types.get(cid) or {}
+        # Defensive: a corrupted project file could carry a non-dict
+        # value at the cable id — treat as empty rather than raising.
+        if not isinstance(ct, dict):
+            ct = {}
+        try:
+            cost_per_ft = float(ct.get("cost_per_ft", 0.0))
+        except (TypeError, ValueError):
+            cost_per_ft = 0.0
         ft = data["total_in"] / 12.0
         line_subtotal = ft * cost_per_ft
         subtotal += line_subtotal
@@ -176,6 +183,70 @@ def rollup(
         unassigned_runs=unassigned_runs,
         unassigned_inches=unassigned_in,
     )
+
+
+# ---------------- Per-symbol device inventory
+@dataclass
+class DeviceInventoryLine:
+    code: str
+    label: str
+    count: int                # devices on map of this symbol type
+    cable_id: str             # cable used (or "—" if none)
+    runs: int                 # wire runs assigned to devices of this type
+    total_in: float           # total wire inches across those runs
+
+
+def device_inventory(
+    devices: list[dict],
+    symbol_types: dict[str, dict],
+    wire_routes: list[dict],
+    cable_types: dict[str, dict],
+    *,
+    cameras_only: bool = False,
+) -> list[DeviceInventoryLine]:
+    """One row per symbol type, with placement count + per-device wire totals.
+
+    Useful for the BOM "by device type" panel — installer can see
+    "40 MD cameras, all on Cat6, 950 ft total".
+    """
+    devices_by_id = {d["id"]: d for d in devices}
+    counts: dict[str, int] = {}
+    runs: dict[str, int] = {}
+    totals: dict[str, float] = {}
+
+    for d in devices:
+        if cameras_only and not symbol_types.get(d["type"], {}).get("is_camera"):
+            continue
+        counts[d["type"]] = counts.get(d["type"], 0) + 1
+
+    for wr in wire_routes:
+        did = wr.get("device_id")
+        if not did or did not in devices_by_id:
+            continue
+        dt = devices_by_id[did]["type"]
+        if cameras_only and not symbol_types.get(dt, {}).get("is_camera"):
+            continue
+        runs[dt] = runs.get(dt, 0) + 1
+        totals[dt] = totals.get(dt, 0.0) + (wr.get("length_in") or 0)
+
+    out: list[DeviceInventoryLine] = []
+    seen = set()
+    for dt in sorted({*counts.keys(), *runs.keys()}):
+        sym = symbol_types.get(dt, {})
+        cable_id = (sym.get("cable_type")
+                    or default_cable_for(sym))
+        if cable_id not in cable_types:
+            cable_id = "—"
+        out.append(DeviceInventoryLine(
+            code=dt,
+            label=sym.get("label", dt),
+            count=counts.get(dt, 0),
+            cable_id=cable_id,
+            runs=runs.get(dt, 0),
+            total_in=totals.get(dt, 0.0),
+        ))
+        seen.add(dt)
+    return out
 
 
 # ---------------- CSV export
