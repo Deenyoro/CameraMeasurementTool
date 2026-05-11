@@ -1955,6 +1955,10 @@ class CameraWireTool:
         # Tools
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Set Scale (calibrate)…",
+                               command=self._start_calibration,
+                               accelerator="C")
+        tools_menu.add_separator()
         tools_menu.add_command(label="Cable Types Editor…",
                                command=self._open_cable_types_editor)
         tools_menu.add_command(label="Edit FOV for Selected Camera…",
