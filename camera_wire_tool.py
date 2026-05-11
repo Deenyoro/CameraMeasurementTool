@@ -2263,12 +2263,25 @@ class CameraWireTool:
 
         wbtns = ttk.Frame(tab_wire)
         wbtns.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Button(wbtns, text="Delete",
-                   command=self._delete_selected_wire).pack(side=tk.LEFT)
-        ttk.Button(wbtns, text="Reassign…",
-                   command=self._reassign_selected_wire).pack(side=tk.LEFT, padx=4)
-        ttk.Button(wbtns, text="Re-route",
-                   command=self._reroute_selected_wire).pack(side=tk.LEFT, padx=4)
+        del_btn = ttk.Button(wbtns, text="Delete",
+                              command=self._delete_selected_wire)
+        del_btn.pack(side=tk.LEFT)
+        Tooltip(del_btn,
+                "Delete the selected wire(s) from the project.\n"
+                "Undo with Ctrl+Z.")
+        ra_btn = ttk.Button(wbtns, text="Reassign…",
+                             command=self._reassign_selected_wire)
+        ra_btn.pack(side=tk.LEFT, padx=4)
+        Tooltip(ra_btn,
+                "Re-associate this wire with a different device (or "
+                "leave it unassigned). Double-click a wire row to open "
+                "the same dialog.")
+        rr_btn = ttk.Button(wbtns, text="Re-route",
+                             command=self._reroute_selected_wire)
+        rr_btn.pack(side=tk.LEFT, padx=4)
+        Tooltip(rr_btn,
+                "Delete this wire and start drawing a fresh route from "
+                "its source device. Original is restorable with Ctrl+Z.")
         simp_btn = ttk.Button(wbtns, text="Simplify",
                                command=self._simplify_selected_wire)
         simp_btn.pack(side=tk.LEFT, padx=4)
