@@ -2211,8 +2211,13 @@ class CameraWireTool:
         self.dev_listbox.bind("<Double-Button-1>", lambda _e: self._center_on_selected())
         self.dev_listbox.bind("<Button-3>", self._on_dev_listbox_rclick)
 
-        ttk.Button(tab_dev, text="Center on Selected (Enter)",
-                   command=self._center_on_selected).pack(anchor=tk.W, padx=6, pady=4)
+        center_btn = ttk.Button(tab_dev, text="Center on Selected (Enter)",
+                                  command=self._center_on_selected)
+        center_btn.pack(anchor=tk.W, padx=6, pady=4)
+        Tooltip(center_btn,
+                "Pan the floor plan so the selected device(s) end up "
+                "in the viewport center. Press Z instead to also "
+                "zoom-to-fit the selection.")
         # Bottom totals footer — parallel with the Wires tab's total label.
         # Updated alongside the listbox in _refresh_device_list.
         self._dev_total_label = ttk.Label(
