@@ -8833,7 +8833,8 @@ class CameraWireTool:
         m = self._floor_menu
         m.delete(0, tk.END)
         proj = self._project
-        if proj is None or not proj.floors:
+        n_floors = len(proj.floors) if proj is not None else 0
+        if not n_floors:
             m.add_command(label="(single-floor mode)", state=tk.DISABLED)
             m.add_separator()
         else:
@@ -8843,9 +8844,17 @@ class CameraWireTool:
                               command=lambda fid=f.id: self._switch_floor(fid))
             m.add_separator()
         m.add_command(label="Add Floor…", command=self._add_floor_dialog)
+        # Align + Manage Floors only make sense once there are floors —
+        # grey them out otherwise so the user isn't poking at menu items
+        # that just open a 'need at least one/two floors first' popup.
+        align_state = tk.NORMAL if n_floors >= 2 else tk.DISABLED
+        manage_state = tk.NORMAL if n_floors >= 1 else tk.DISABLED
         m.add_command(label="Align Floor to Reference…",
-                      command=self._open_alignment_dialog)
-        m.add_command(label="Manage Floors…", command=self._open_floor_manager)
+                      command=self._open_alignment_dialog,
+                      state=align_state)
+        m.add_command(label="Manage Floors…",
+                      command=self._open_floor_manager,
+                      state=manage_state)
 
     def _add_floor_dialog(self) -> None:
         path = filedialog.askopenfilename(
