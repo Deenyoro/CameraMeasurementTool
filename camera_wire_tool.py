@@ -8121,7 +8121,9 @@ class CameraWireTool:
         ttk.Entry(form, textvariable=label_var, width=44).grid(
             row=1, column=1, columnspan=2, sticky=tk.W, padx=4)
 
-        ttk.Label(form, text="Cost / ft ($):").grid(row=2, column=0, sticky=tk.E, padx=8, pady=6)
+        cur_symbol = self._bom_currency_var.get() or "$"
+        ttk.Label(form, text=f"Cost / ft ({cur_symbol}):").grid(
+            row=2, column=0, sticky=tk.E, padx=8, pady=6)
         cost_var = tk.StringVar()
         ttk.Entry(form, textvariable=cost_var, width=12).grid(
             row=2, column=1, sticky=tk.W, padx=4)
