@@ -21,6 +21,24 @@ except ImportError:
     _HAS_REPORTLAB = False
 
 
+def _atomic_csv_write(path: str, rows: list[list]) -> None:
+    """Write rows to path atomically via tmp+rename so a crash during
+    serialization doesn't leave a half-written CSV at the destination."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_devices_csv(devices: list[dict], symbol_types: dict[str, dict],
                       wire_routes: list[dict], format_length, path: str) -> None:
     """One row per device: id, type, label, position, wire totals."""
@@ -33,36 +51,34 @@ def write_devices_csv(devices: list[dict], symbol_types: dict[str, dict],
         wire_by_device[did]["runs"] += 1
         wire_by_device[did]["total_in"] += (wr.get("length_in") or 0)
 
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["Device ID", "Type", "Label", "x", "y", "Wire Runs",
-                    "Total Wire (in)", "Total Wire"])
-        for d in devices:
-            info = symbol_types.get(d["type"], {})
-            wi = wire_by_device.get(d["id"], {"runs": 0, "total_in": 0.0})
-            w.writerow([
-                d["id"], d["type"], info.get("label", ""),
-                f"{d['x']:.1f}", f"{d['y']:.1f}",
-                wi["runs"], f"{wi['total_in']:.2f}",
-                format_length(wi["total_in"]) if wi["total_in"] else "--",
-            ])
+    rows = [["Device ID", "Type", "Label", "x", "y", "Wire Runs",
+             "Total Wire (in)", "Total Wire"]]
+    for d in devices:
+        info = symbol_types.get(d["type"], {})
+        wi = wire_by_device.get(d["id"], {"runs": 0, "total_in": 0.0})
+        rows.append([
+            d["id"], d["type"], info.get("label", ""),
+            f"{d['x']:.1f}", f"{d['y']:.1f}",
+            wi["runs"], f"{wi['total_in']:.2f}",
+            format_length(wi["total_in"]) if wi["total_in"] else "--",
+        ])
+    _atomic_csv_write(path, rows)
 
 
 def write_wires_csv(wire_routes: list[dict], format_length, path: str) -> None:
     """One row per wire: device, segments, length."""
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["#", "Device", "Cable", "Segments", "Length (in)", "Length"])
-        for i, wr in enumerate(wire_routes):
-            length_in = wr.get("length_in") or 0
-            w.writerow([
-                i + 1,
-                wr.get("device_id") or "(unassigned)",
-                wr.get("cable_type") or "",
-                len(wr["points"]) - 1,
-                f"{length_in:.2f}",
-                format_length(length_in) if length_in else "--",
-            ])
+    rows = [["#", "Device", "Cable", "Segments", "Length (in)", "Length"]]
+    for i, wr in enumerate(wire_routes):
+        length_in = wr.get("length_in") or 0
+        rows.append([
+            i + 1,
+            wr.get("device_id") or "(unassigned)",
+            wr.get("cable_type") or "",
+            len(wr["points"]) - 1,
+            f"{length_in:.2f}",
+            format_length(length_in) if length_in else "--",
+        ])
+    _atomic_csv_write(path, rows)
 
 
 def write_bundle_csv(directory: str, *, devices, symbol_types, wire_routes,
