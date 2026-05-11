@@ -7374,8 +7374,27 @@ class CameraWireTool:
             self._refresh_recent_menu()
             self._flash_status("Recent files cleared.")
 
+        def reset_view_toggles():
+            """Reset the View menu checkbuttons to factory defaults —
+            useful if the user wants the same baseline experience every
+            session without manually un-toggling things."""
+            if not messagebox.askyesno(
+                "Reset view toggles?",
+                "Reset Show FOV / DORI / Grid / IDs / Legend to factory "
+                "defaults?"):
+                return
+            self._show_fov.set(False)
+            self._show_dori.set(True)
+            self._show_grid.set(False)
+            self._show_device_ids.set(False)
+            self._show_legend.set(True)
+            self._redraw()
+            self._flash_status("View toggles reset to defaults.")
+
         ttk.Button(row, text="Reset BOM defaults",
                    command=reset_defaults).pack(side=tk.LEFT, padx=4)
+        ttk.Button(row, text="Reset View toggles",
+                   command=reset_view_toggles).pack(side=tk.LEFT, padx=4)
         ttk.Button(row, text="Clear Recent Files",
                    command=clear_recents).pack(side=tk.LEFT, padx=4)
 
