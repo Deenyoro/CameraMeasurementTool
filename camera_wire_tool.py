@@ -1,27 +1,21 @@
 """
-Camera Wire Estimation Tool — v0.2.0
-=====================================
+Camera Wire Estimation Tool
+===========================
 Loads a .drawio building schematic with security device icons, lets you:
-- Calibrate scale (feet/inches)
-- Drag device icons to new positions
-- Draw wire routes and estimate total wire length
-- Edit symbol types (rename shortcodes, change colors/shapes/labels)
-  — changes propagate to EVERY instance on the map and auto-regenerate the legend
-- Add new symbol types and place instances
-- Save everything back to the .drawio file
+- Calibrate real-world scale (imperial or metric)
+- Drag device icons, lasso-select, ctrl-click multi-select
+- Draw multi-point wire routes with snap-to-orthogonal (Shift)
+- Edit symbol types — changes propagate to every instance + the legend
+- Place new symbols, set per-symbol cable types, map annotations
+- Per-camera FOV / DORI overlays (IEC 62676-4)
+- Multi-floor projects with anchor-point alignment
+- BOM with cost/waste/tax, CSV + multi-page PDF export
+- Save back to .drawio plus a v2 .wiremap.json project file
 
-v0.2.0 polish pass adds:
-- Sun Valley dark theme
-- Mode enum + segmented mode bar (replaces 4 booleans)
-- Icon toolbar with grouped sections + tooltips everywhere
-- 3-tab side panel with per-list search
-- Universal undo/redo command stack (Ctrl+Z / Ctrl+Y)
-- Real error handling with logged dialogs
-- Full keyboard shortcuts (M / W / C / Space-pan / [ ] / + - etc.)
-- Constants module — all magic numbers named
-- Breadcrumb status bar at the bottom
-- Dirty-state tracking with asterisk in title
-- Recent files menu
+Built on Tkinter with sv-ttk dark theme. Atomic file writes, autosave
+every 60s with crash recovery, full undo coverage with keystroke
+coalescing, F1 keyboard cheat sheet, F11 fullscreen, DPI-aware on
+Windows.
 """
 
 from __future__ import annotations
