@@ -9397,20 +9397,12 @@ class CameraWireTool:
             return
         if not self._warn_if_no_scale("CSV"):
             return
-        # Atomic — write to .tmp then rename so a crash mid-write
-        # doesn't leave a partial CSV under the user's chosen name.
-        tmp_path = path + ".tmp"
+        # bom.write_csv is self-atomic (round 152) — no need to wrap.
         try:
-            bom_mod.write_csv(self._build_bom_report(), tmp_path,
+            bom_mod.write_csv(self._build_bom_report(), path,
                               currency=self._bom_currency_var.get() or "$")
-            os.replace(tmp_path, path)
             messagebox.showinfo("Exported", f"BOM written:\n{path}")
         except OSError as e:
-            try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
             messagebox.showerror("Export failed", str(e))
 
     def _export_csv_bundle(self) -> None:
