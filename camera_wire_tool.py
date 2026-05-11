@@ -9373,6 +9373,20 @@ class CameraWireTool:
         ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=6)
 
     # ============================================================ Export
+    def _warn_if_no_scale(self, doc_type: str) -> bool:
+        """If scale isn't set, ask the user whether to proceed with the
+        export anyway. Returns True to continue, False to bail."""
+        if self.scale_factor is not None:
+            return True
+        if not self.wire_routes:
+            return True   # no wires → nothing to mis-report
+        return messagebox.askyesno(
+            "Scale not set",
+            f"You haven't calibrated the floor plan scale yet, so all "
+            f"wire lengths in the {doc_type} will read as 0.\n\n"
+            f"Export anyway? (Cancel to calibrate first via Tools → "
+            f"Set Scale or the C key.)")
+
     def _export_bom_csv(self) -> None:
         path = filedialog.asksaveasfilename(
             title="Export BOM as CSV",
@@ -9380,6 +9394,8 @@ class CameraWireTool:
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_bom.csv",
             filetypes=[("CSV", "*.csv")])
         if not path:
+            return
+        if not self._warn_if_no_scale("CSV"):
             return
         # Atomic — write to .tmp then rename so a crash mid-write
         # doesn't leave a partial CSV under the user's chosen name.
@@ -9543,6 +9559,8 @@ class CameraWireTool:
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_report.pdf",
             filetypes=[("PDF", "*.pdf")])
         if not path:
+            return
+        if not self._warn_if_no_scale("PDF report"):
             return
         # Atomic write — reportlab can crash mid-stream; without staging
         # the user could be left with a half-written PDF that opens
