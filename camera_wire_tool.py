@@ -2995,7 +2995,15 @@ class CameraWireTool:
     def _update_title(self) -> None:
         name = os.path.basename(self.drawio_path)
         star = "*" if self._dirty else ""
-        self.root.title(f"Camera Wire Tool — {name}{star}")
+        # In multi-floor mode, include the active floor's id + name so
+        # the user can tell which floor they're on at a glance from the
+        # OS title bar / taskbar.
+        floor_suffix = ""
+        if self._project is not None and len(self._project.floors) > 1:
+            active = self._project.get_floor(self._project.active_floor)
+            if active is not None:
+                floor_suffix = f"  ·  {active.id}: {active.name}"
+        self.root.title(f"Camera Wire Tool — {name}{star}{floor_suffix}")
 
     def _on_close(self) -> None:
         if self._dirty and not self._confirm_discard():
