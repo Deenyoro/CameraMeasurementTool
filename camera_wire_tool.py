@@ -9420,6 +9420,8 @@ class CameraWireTool:
         directory = filedialog.askdirectory(title="Export CSV bundle into folder")
         if not directory:
             return
+        if not self._warn_if_no_scale("CSV bundle"):
+            return
         try:
             paths = export_mod.write_bundle_csv(
                 directory,
