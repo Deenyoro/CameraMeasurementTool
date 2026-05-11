@@ -9317,17 +9317,36 @@ class CameraWireTool:
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.title("Manage floors"); dlg.geometry("520x320")
+        dlg.title("Manage floors"); dlg.geometry("560x360")
+        ttk.Label(dlg, text="Double-click a row to switch to that floor.",
+                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  ).pack(anchor=tk.W, padx=10, pady=(8, 2))
         cols = ("id", "name", "elevation", "drawio")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
         for c, w, h in (("id", 60, "ID"), ("name", 140, "Name"),
                          ("elevation", 90, "Elev. (ft)"), ("drawio", 220, "Drawio")):
             tree.heading(c, text=h); tree.column(c, width=w)
+        active_id = self._project.active_floor
         for f in self._project.floors:
+            marker = "● " if f.id == active_id else "  "
             tree.insert("", tk.END, iid=f.id,
-                        values=(f.id, f.name, f"{f.elevation_ft:.1f}",
+                        values=(f"{marker}{f.id}", f.name,
+                                f"{f.elevation_ft:.1f}",
                                 f.drawio_file))
-        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        def on_double_click(_event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            target_id = sel[0]
+            if target_id == active_id:
+                return  # already on this floor
+            dlg.destroy()
+            self._switch_floor(target_id)
+        tree.bind("<Double-Button-1>", on_double_click)
+        tree.bind("<Return>", on_double_click)
+
         ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=6)
 
     # ============================================================ Export
