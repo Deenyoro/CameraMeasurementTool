@@ -30,9 +30,12 @@ First Floor) but works on any draw.io plan.
 - **PDF + CSV export** — multi-page PDF report (cover, BOM, per-device),
   3-CSV bundle (BOM + devices + wires) for procurement & installer hand-off.
 
-Plus everything from v0.2: dark Sun Valley theme, segmented mode bar, 3-tab
-side panel with search, universal undo/redo, breadcrumb status bar, recent
-files, dirty-state tracking, tooltips everywhere, full keyboard shortcuts.
+Plus everything from v0.2: dark Sun Valley theme, segmented mode bar, 4-tab
+side panel (Devices / Wires / Symbols / BOM) with search, universal
+undo/redo with keystroke coalescing, breadcrumb status bar, recent files,
+dirty-state tracking aware of undo-to-saved, atomic file writes, auto-save
+with crash recovery, tooltips everywhere, arrow-key nudge, Ctrl+D
+duplicate, Ctrl+U jump-to-unwired-camera, F11 fullscreen.
 
 ## Install
 
