@@ -1873,6 +1873,29 @@ class CameraWireTool:
         # Edit
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Edit", menu=edit_menu)
+        # postcommand fires just before the menu opens — update enabled
+        # state for actions that depend on selection / history.
+        def _refresh_edit_menu_state():
+            try:
+                edit_menu.entryconfig(
+                    "Undo",
+                    state=tk.NORMAL if self.history else tk.DISABLED)
+                edit_menu.entryconfig(
+                    "Redo",
+                    state=tk.NORMAL if self.future else tk.DISABLED)
+                n_sel = len(self.selected_devices)
+                sel_state = tk.NORMAL if n_sel else tk.DISABLED
+                edit_menu.entryconfig("Duplicate Selected", state=sel_state)
+                edit_menu.entryconfig("Delete Selected", state=(
+                    tk.NORMAL if (n_sel or
+                                   self.wire_listbox.curselection())
+                    else tk.DISABLED))
+                edit_menu.entryconfig(
+                    "Clear All Wires…",
+                    state=tk.NORMAL if self.wire_routes else tk.DISABLED)
+            except tk.TclError:
+                pass
+        edit_menu.config(postcommand=_refresh_edit_menu_state)
         edit_menu.add_command(label="Undo", command=self._undo, accelerator="Ctrl+Z")
         edit_menu.add_command(label="Redo", command=self._redo, accelerator="Ctrl+Y")
         edit_menu.add_separator()
