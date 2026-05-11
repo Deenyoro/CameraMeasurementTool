@@ -6876,10 +6876,18 @@ class CameraWireTool:
 
     def _apply_autosave(self, data: dict) -> None:
         """Overlay recovered state onto the freshly-loaded project."""
-        if data.get("scale_factor") is not None:
-            self.scale_factor = float(data["scale_factor"])
-        if data.get("unit"):
-            self.unit_var.set(data["unit"])
+        sf = data.get("scale_factor")
+        if sf is not None:
+            try:
+                self.scale_factor = float(sf)
+            except (TypeError, ValueError):
+                pass   # keep loaded value
+        u = data.get("unit")
+        if isinstance(u, str) and u:
+            try:
+                self.unit_var.set(u)
+            except tk.TclError:
+                pass
         # next_device_id may be hand-edited junk — coerce safely.
         try:
             n = int(data.get("next_device_id") or 0)
