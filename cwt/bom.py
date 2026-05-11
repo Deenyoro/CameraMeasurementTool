@@ -7,6 +7,7 @@ types and a scale factor, compute totals per cable type. No UI here.
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 
 
@@ -251,23 +252,35 @@ def device_inventory(
 
 # ---------------- CSV export
 def write_csv(report: BomReport, path: str, currency: str = "$") -> None:
-    """Write the BOM report to a CSV. Stable column order suitable for Excel."""
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow([
-            "Cable", "Label", "Runs", "Total (ft)", "Total (inches)",
-            f"Cost/ft ({currency})", f"Subtotal ({currency})",
-        ])
-        for line in report.lines:
+    """Write the BOM report to a CSV. Stable column order suitable for Excel.
+    Atomic via tmp+rename so a crash mid-serialization can't leave a
+    half-written file at the destination."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
             w.writerow([
-                line.cable_id, line.label, line.runs,
-                f"{line.total_ft:.2f}", f"{line.total_in:.2f}",
-                f"{line.cost_per_ft:.4f}", f"{line.subtotal:.2f}",
+                "Cable", "Label", "Runs", "Total (ft)", "Total (inches)",
+                f"Cost/ft ({currency})", f"Subtotal ({currency})",
             ])
-        w.writerow([])
-        w.writerow(["", "Subtotal", "", "", "", "", f"{report.subtotal:.2f}"])
-        w.writerow(["", f"Waste (x{report.waste_factor:.2f})", "", "", "", "",
-                    f"{report.waste_added:.2f}"])
-        w.writerow(["", f"Tax ({report.tax_rate*100:.2f}%)", "", "", "", "",
-                    f"{report.tax_amount:.2f}"])
-        w.writerow(["", "GRAND TOTAL", "", "", "", "", f"{report.grand_total:.2f}"])
+            for line in report.lines:
+                w.writerow([
+                    line.cable_id, line.label, line.runs,
+                    f"{line.total_ft:.2f}", f"{line.total_in:.2f}",
+                    f"{line.cost_per_ft:.4f}", f"{line.subtotal:.2f}",
+                ])
+            w.writerow([])
+            w.writerow(["", "Subtotal", "", "", "", "", f"{report.subtotal:.2f}"])
+            w.writerow(["", f"Waste (x{report.waste_factor:.2f})", "", "", "", "",
+                        f"{report.waste_added:.2f}"])
+            w.writerow(["", f"Tax ({report.tax_rate*100:.2f}%)", "", "", "", "",
+                        f"{report.tax_amount:.2f}"])
+            w.writerow(["", "GRAND TOTAL", "", "", "", "", f"{report.grand_total:.2f}"])
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
