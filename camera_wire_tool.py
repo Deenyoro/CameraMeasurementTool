@@ -1918,6 +1918,10 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show Alignment Grid",
                                   variable=self._show_grid,
                                   command=self._redraw)
+        view_menu.add_separator()
+        view_menu.add_command(label="Toggle Fullscreen",
+                              command=self._toggle_fullscreen,
+                              accelerator="F11")
 
         # Mode
         mode_menu = tk.Menu(menubar, tearoff=0)
