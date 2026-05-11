@@ -3012,6 +3012,16 @@ class CameraWireTool:
     def _on_close(self) -> None:
         if self._dirty and not self._confirm_discard():
             return
+        # Flush any pending debounced settings write — without this a
+        # last-second toggle / preference edit within the 250ms window
+        # would be silently dropped on app exit.
+        if getattr(self, "_settings_save_id", None) is not None:
+            try:
+                self.root.after_cancel(self._settings_save_id)
+            except tk.TclError:
+                pass
+            self._settings_save_id = None
+            self._do_persist_user_settings()
         self.root.quit()
 
     def _confirm_discard(self) -> bool:
