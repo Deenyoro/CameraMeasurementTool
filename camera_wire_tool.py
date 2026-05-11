@@ -2582,6 +2582,7 @@ class CameraWireTool:
             return
         if self._dirty and not self._confirm_discard():
             return
+        self._flush_pending_settings()
         self.root.destroy()
         new_root = tk.Tk()
         apply_theme(new_root)
@@ -3009,12 +3010,10 @@ class CameraWireTool:
                 floor_suffix = f"  ·  {active.id}: {active.name}"
         self.root.title(f"Camera Wire Tool — {name}{star}{floor_suffix}")
 
-    def _on_close(self) -> None:
-        if self._dirty and not self._confirm_discard():
-            return
-        # Flush any pending debounced settings write — without this a
-        # last-second toggle / preference edit within the 250ms window
-        # would be silently dropped on app exit.
+    def _flush_pending_settings(self) -> None:
+        """Cancel the debounce timer and run the settings write now —
+        called from every path that's about to destroy/quit the root,
+        so a tweak within the 250ms window doesn't get dropped."""
         if getattr(self, "_settings_save_id", None) is not None:
             try:
                 self.root.after_cancel(self._settings_save_id)
@@ -3022,6 +3021,11 @@ class CameraWireTool:
                 pass
             self._settings_save_id = None
             self._do_persist_user_settings()
+
+    def _on_close(self) -> None:
+        if self._dirty and not self._confirm_discard():
+            return
+        self._flush_pending_settings()
         self.root.quit()
 
     def _confirm_discard(self) -> bool:
@@ -6418,6 +6422,7 @@ class CameraWireTool:
             filetypes=[("Draw.io files", "*.drawio")])
         if not path:
             return
+        self._flush_pending_settings()
         self.root.destroy()
         new_root = tk.Tk()
         apply_theme(new_root)
@@ -9025,6 +9030,7 @@ class CameraWireTool:
             mf_mod.save_project(self._project, self.project_path)
         except OSError:
             pass
+        self._flush_pending_settings()
         self.root.destroy()
         new_root = tk.Tk()
         apply_theme(new_root)
