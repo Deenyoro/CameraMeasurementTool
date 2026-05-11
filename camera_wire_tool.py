@@ -7532,7 +7532,10 @@ class CameraWireTool:
                 ("Shift (hold)", "Lock segment to 0/45/90° from last point"),
                 ("(automatic)",  "Cursor snaps to nearby device centers, "
                                  "wire endpoints, and other waypoints"),
-                ("Right-click",  "Finish current wire"),
+                ("Right-click",  "Finish current wire (≥2 points) or cancel"),
+                ("Ctrl+Z",       "While mid-draw: remove the last clicked "
+                                 "point (instead of unrelated history undo)"),
+                ("Escape",       "Cancel the in-progress wire"),
             ]),
             ("Search & jump", [
                 ("Ctrl+F",       "Focus search on active tab"),
