@@ -119,6 +119,64 @@ def test_load_project_v2_round_trip(tmp_path):
     assert len(loaded.floors[0].wire_routes) == 1
 
 
+def test_annotations_round_trip_per_floor(tmp_path):
+    """Annotations are stored per-floor (annotations_by_floor) — verify
+    they survive save+load on both floors."""
+    proj = mf.ProjectState(
+        floors=[
+            mf.FloorState(id="F1", name="First", elevation_ft=0,
+                          drawio_file="F1.drawio",
+                          annotations=[
+                              {"text": "Lobby", "x": 100, "y": 200,
+                               "color": "#FFD060", "font_size": 18},
+                              {"text": "IDF", "x": 300, "y": 400,
+                               "color": "#FF8C42", "font_size": 14},
+                          ]),
+            mf.FloorState(id="F2", name="Second", elevation_ft=14,
+                          drawio_file="F2.drawio",
+                          annotations=[
+                              {"text": "Server Room", "x": 500, "y": 600,
+                               "color": "#3ddc84", "font_size": 22},
+                          ]),
+        ],
+        active_floor="F1",
+    )
+    p = tmp_path / "proj.wiremap.json"
+    mf.save_project(proj, str(p))
+    loaded = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    f1 = loaded.get_floor("F1")
+    f2 = loaded.get_floor("F2")
+    assert f1 is not None and f2 is not None
+    assert len(f1.annotations) == 2
+    assert len(f2.annotations) == 1
+    assert f1.annotations[0]["text"] == "Lobby"
+    assert f2.annotations[0]["text"] == "Server Room"
+    # Per-annotation fields preserved
+    assert f2.annotations[0]["font_size"] == 22
+    assert f1.annotations[1]["color"] == "#FF8C42"
+
+
+def test_v1_to_v2_migration_preserves_cable_types_and_annotations(tmp_path):
+    """v1 files with custom cable_types or top-level annotations must
+    have those carried into the migrated v2 project (audit-fix round 75)."""
+    import json
+    p = tmp_path / "old.wiremap.json"
+    p.write_text(json.dumps({
+        # No 'version' key → triggers v1 migration path
+        "wire_routes": [],
+        "scale_factor": 0.6,
+        "cable_types": {
+            "Custom": {"label": "Custom", "color": "#ABCDEF",
+                        "cost_per_ft": 9.99},
+        },
+        "annotations": [{"text": "v1 era", "x": 50, "y": 50}],
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    assert "Custom" in proj.cable_types
+    assert proj.cable_types["Custom"]["cost_per_ft"] == 9.99
+    assert proj.floors[0].annotations == [{"text": "v1 era", "x": 50, "y": 50}]
+
+
 def test_load_project_missing_returns_empty(tmp_path):
     proj = mf.load_project(str(tmp_path / "nope.json"),
                             str(tmp_path / "F1.drawio"))
