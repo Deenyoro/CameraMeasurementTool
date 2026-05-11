@@ -2532,11 +2532,29 @@ class CameraWireTool:
             self._recent_menu.add_command(label="(none)", state=tk.DISABLED)
             return
         for p in recent:
-            short = os.path.basename(p) if os.path.exists(p) else f"(missing) {os.path.basename(p)}"
+            exists = os.path.exists(p)
+            short = (os.path.basename(p) if exists
+                     else f"(missing) {os.path.basename(p)}")
             self._recent_menu.add_command(
                 label=short,
                 command=lambda path=p: self._open_recent(path),
+                state=tk.NORMAL if exists else tk.DISABLED,
             )
+        # Quick way to forget stale entries en masse without hand-editing
+        # the recent-files JSON.
+        if any(not os.path.exists(p) for p in recent):
+            self._recent_menu.add_separator()
+            self._recent_menu.add_command(
+                label="Remove missing entries",
+                command=self._purge_missing_recent_files)
+
+    def _purge_missing_recent_files(self) -> None:
+        """Drop every recent-files entry that no longer exists on disk."""
+        kept = [p for p in load_recent_files() if os.path.exists(p)]
+        save_recent_files(kept)
+        self._refresh_recent_menu()
+        self._flash_status(
+            "Cleared missing entries from Open Recent.", ttl_ms=2500)
 
     def _open_recent(self, path: str) -> None:
         if not os.path.exists(path):
