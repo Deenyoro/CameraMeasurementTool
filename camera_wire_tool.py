@@ -8404,6 +8404,14 @@ class CameraWireTool:
         m.add_command(
             label=f"Select all {len(group_indices)} wire(s) in this group",
             command=lambda r=group_rows: self._select_wire_rows(r))
+        # Bulk cable-type set, same as the multi-row right-click in
+        # round 63. Operates on the listbox rows (not route indices).
+        cable_sub = self._build_cable_type_submenu(
+            m, lambda cid: self._set_selected_wires_cable_type(group_rows, cid))
+        if cable_sub is not None:
+            m.add_cascade(
+                label=f"🎚  Set cable type for all {len(group_indices)}",
+                menu=cable_sub)
         m.add_command(
             label=f"Delete all {len(group_indices)} wire(s) in this group",
             command=lambda r=group_rows: self._delete_selected_wires_multi_force(r))
