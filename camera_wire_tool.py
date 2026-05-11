@@ -1978,6 +1978,32 @@ class CameraWireTool:
         # Tools
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
+        def _refresh_tools_menu_state():
+            try:
+                cams = [d for d in self.devices
+                        if self.symbol_types.get(d["type"], {}).get("is_camera")]
+                n_cams = len(cams)
+                sel = self._primary_selected
+                sel_is_cam = (sel is not None and
+                              self.symbol_types.get(sel["type"], {})
+                              .get("is_camera"))
+                tools_menu.entryconfig(
+                    "Edit FOV for Selected Camera…",
+                    state=tk.NORMAL if sel_is_cam else tk.DISABLED)
+                tools_menu.entryconfig(
+                    "Apply Default FOV to All Cameras",
+                    state=tk.NORMAL if n_cams else tk.DISABLED)
+                tools_menu.entryconfig(
+                    "Clear FOV from All Cameras",
+                    state=(tk.NORMAL
+                           if any(d.get("fov") for d in cams)
+                           else tk.DISABLED))
+                tools_menu.entryconfig(
+                    "Jump to next unwired camera",
+                    state=tk.NORMAL if n_cams else tk.DISABLED)
+            except tk.TclError:
+                pass
+        tools_menu.config(postcommand=_refresh_tools_menu_state)
         tools_menu.add_command(label="Set Scale (calibrate)…",
                                command=self._start_calibration,
                                accelerator="C")
