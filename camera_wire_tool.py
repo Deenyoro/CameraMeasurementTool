@@ -2047,7 +2047,13 @@ class CameraWireTool:
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="Keyboard Shortcuts", command=self._show_shortcuts)
+        help_menu.add_command(label="Keyboard Shortcuts",
+                              command=self._show_shortcuts,
+                              accelerator="F1")
+        help_menu.add_separator()
+        help_menu.add_command(label="Open log file…",
+                              command=self._open_log_file)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
         # Toolbar
@@ -7569,6 +7575,29 @@ class CameraWireTool:
         footer.pack(fill=tk.X, padx=14, pady=10)
         ttk.Button(footer, text="Got it (Esc)",
                    command=dlg.destroy).pack(side=tk.RIGHT)
+
+    def _open_log_file(self) -> None:
+        """Open the rotating error log file in the OS default viewer.
+        Helpful when the user wants to share a crash trace with support."""
+        if not LOG_PATH.exists():
+            messagebox.showinfo(
+                "Log file",
+                f"No log file yet ({LOG_PATH}).\n\n"
+                "It only gets written when the app hits an error.")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(LOG_PATH))   # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(LOG_PATH)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(LOG_PATH)])
+        except (OSError, FileNotFoundError) as e:
+            messagebox.showerror(
+                "Couldn't open log",
+                f"{e}\n\nThe log file is at:\n{LOG_PATH}")
 
     def _show_about(self) -> None:
         dlg = tk.Toplevel(self.root)
