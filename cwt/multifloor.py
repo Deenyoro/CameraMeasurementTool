@@ -186,13 +186,22 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
         wire_routes=list(data.get("wire_routes", [])),
         annotations=list(data.get("annotations", [])),
     )
+    try:
+        ndid = int(data.get("next_device_id", 100) or 100)
+    except (TypeError, ValueError):
+        ndid = 100
+    try:
+        sf = data.get("scale_factor")
+        sf = float(sf) if sf is not None else None
+    except (TypeError, ValueError):
+        sf = None
     return ProjectState(
         version=2, active_floor="F1",
         floors=[floor],
         cable_types=dict(data.get("cable_types", {})),
-        scale_factor=data.get("scale_factor"),
+        scale_factor=sf,
         unit=data.get("unit", "ft-in"),
-        next_device_id=int(data.get("next_device_id", 100) or 100),
+        next_device_id=ndid,
     )
 
 
@@ -212,6 +221,17 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             wire_routes=list(wires_by_floor.get(fid, [])),
             annotations=list(annotations_by_floor.get(fid, [])),
         ))
+    # next_device_id may be a hand-edited string in legacy files —
+    # coerce safely instead of letting int() raise.
+    try:
+        ndid = int(data.get("next_device_id", 100) or 100)
+    except (TypeError, ValueError):
+        ndid = 100
+    try:
+        sf = data.get("scale_factor")
+        sf = float(sf) if sf is not None else None
+    except (TypeError, ValueError):
+        sf = None
     return ProjectState(
         version=2,
         project_name=data.get("project_name", ""),
@@ -219,9 +239,9 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         floors=floors,
         cable_types=dict(data.get("cable_types", {})),
         risers=list(data.get("risers", [])),
-        scale_factor=data.get("scale_factor"),
+        scale_factor=sf,
         unit=data.get("unit", "ft-in"),
-        next_device_id=int(data.get("next_device_id", 100) or 100),
+        next_device_id=ndid,
     )
 
 
