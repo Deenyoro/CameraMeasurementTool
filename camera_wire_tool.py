@@ -1886,6 +1886,13 @@ class CameraWireTool:
         edit_menu.add_command(label="Delete Selected", command=self._on_delete_key,
                               accelerator="Del")
         edit_menu.add_command(label="Clear All Wires…", command=self._clear_wires)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Quick Jump…",
+                              command=self._open_quick_jump,
+                              accelerator="Ctrl+G")
+        edit_menu.add_command(label="Find / Filter on Active Tab",
+                              command=self._focus_search,
+                              accelerator="Ctrl+F")
 
         # View
         view_menu = tk.Menu(menubar, tearoff=0)
