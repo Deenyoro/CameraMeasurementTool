@@ -6880,15 +6880,26 @@ class CameraWireTool:
             self.scale_factor = float(data["scale_factor"])
         if data.get("unit"):
             self.unit_var.set(data["unit"])
-        if data.get("next_device_id"):
-            self._next_device_id = max(self._next_device_id,
-                                        int(data["next_device_id"]))
-        if data.get("symbol_types"):
-            self.symbol_types = data["symbol_types"]
-        if data.get("cable_types"):
-            self.cable_types = data["cable_types"]
-        if data.get("devices"):
-            self.devices = data["devices"]
+        # next_device_id may be hand-edited junk — coerce safely.
+        try:
+            n = int(data.get("next_device_id") or 0)
+            if n > 0:
+                self._next_device_id = max(self._next_device_id, n)
+        except (TypeError, ValueError):
+            pass
+        # Each catalog must be a dict; refuse to clobber working state
+        # with a non-dict from corrupted autosave.
+        st = data.get("symbol_types")
+        if isinstance(st, dict) and st:
+            self.symbol_types = st
+        ct = data.get("cable_types")
+        if isinstance(ct, dict) and ct:
+            self.cable_types = ct
+        dv = data.get("devices")
+        if isinstance(dv, list):
+            # Keep only entries that look like devices
+            self.devices = [d for d in dv
+                            if isinstance(d, dict) and "id" in d and "type" in d]
         # Annotations — restore as-is (they have no derived state)
         if "annotations" in data and isinstance(data["annotations"], list):
             self.annotations = [dict(a) for a in data["annotations"]
