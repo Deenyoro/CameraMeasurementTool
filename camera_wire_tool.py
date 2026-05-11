@@ -2329,14 +2329,28 @@ class CameraWireTool:
 
         sym_btns = ttk.Frame(tab_sym)
         sym_btns.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(sym_btns, text="Place on Map",
-                   command=self._place_symbol_from_listbox).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sym_btns, text="Edit",
-                   command=self._edit_symbol_type).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sym_btns, text="Add…",
-                   command=self._add_symbol_type).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sym_btns, text="Delete",
-                   command=self._delete_symbol_type).pack(side=tk.LEFT, padx=2)
+        pl_btn = ttk.Button(sym_btns, text="Place on Map",
+                             command=self._place_symbol_from_listbox)
+        pl_btn.pack(side=tk.LEFT, padx=2)
+        Tooltip(pl_btn,
+                "Drop an instance of the selected symbol on the map. "
+                "Hold Shift while clicking to place several in a row.")
+        ed_btn = ttk.Button(sym_btns, text="Edit",
+                             command=self._edit_symbol_type)
+        ed_btn.pack(side=tk.LEFT, padx=2)
+        Tooltip(ed_btn,
+                "Edit the selected symbol type's label / color / shape / "
+                "cable. Changes propagate to every instance on the map.")
+        ad_btn = ttk.Button(sym_btns, text="Add…",
+                             command=self._add_symbol_type)
+        ad_btn.pack(side=tk.LEFT, padx=2)
+        Tooltip(ad_btn, "Create a brand-new symbol type.")
+        de_btn = ttk.Button(sym_btns, text="Delete",
+                             command=self._delete_symbol_type)
+        de_btn.pack(side=tk.LEFT, padx=2)
+        Tooltip(de_btn,
+                "Delete the symbol type AND every instance of it on the "
+                "map. Associated wires are removed too. Undo with Ctrl+Z.")
         rp_btn = ttk.Button(sym_btns, text="+ Run Point",
                              command=self._add_run_point_type)
         rp_btn.pack(side=tk.LEFT, padx=2)
