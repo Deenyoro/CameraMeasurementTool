@@ -4482,8 +4482,7 @@ class CameraWireTool:
         if sixteenths == 0:
             frac_str = ""
         else:
-            from math import gcd
-            g = gcd(sixteenths, 16)
+            g = math.gcd(sixteenths, 16)
             frac_str = f" {sixteenths // g}/{16 // g}"
         return f"{feet}'-{whole_in}{frac_str}\"" if feet > 0 else f'{whole_in}{frac_str}"'
 
