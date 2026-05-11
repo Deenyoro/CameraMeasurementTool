@@ -1544,6 +1544,22 @@ class CameraWireTool:
 
     _NUDGE_COALESCE_S = 0.6
 
+    def _on_show_only_selected_fov_toggle(self) -> None:
+        """View menu callback for the 'only selected camera's FOV' toggle.
+        Redraws and flashes a hint if the toggle was enabled but no
+        camera is selected — otherwise the user would just see all
+        cones disappear with no clue why."""
+        self._redraw()
+        if self._show_only_selected_fov.get():
+            sel = self._primary_selected
+            is_cam = (sel is not None
+                      and self.symbol_types.get(sel["type"], {}).get("is_camera"))
+            if not is_cam:
+                self._flash_status(
+                    "Select a camera to see its FOV — this toggle "
+                    "hides every other camera's cone.",
+                    ttl_ms=3500)
+
     def _jump_to_next_unwired_camera(self) -> None:
         """Find the next camera (cycling from the current selection)
         that has no wire associations and zoom to it. Site-survey
@@ -1894,7 +1910,7 @@ class CameraWireTool:
         view_menu.add_checkbutton(
             label="Show ONLY selected camera's FOV",
             variable=self._show_only_selected_fov,
-            command=self._redraw)
+            command=self._on_show_only_selected_fov_toggle)
         view_menu.add_separator()
         view_menu.add_checkbutton(label="Show Legend on Map",
                                   variable=self._show_legend,
