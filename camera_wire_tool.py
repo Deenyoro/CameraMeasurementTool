@@ -8448,12 +8448,19 @@ class CameraWireTool:
         # ---------------- buttons
         button_row = ttk.Frame(dlg)
         button_row.pack(fill=tk.X, padx=12, pady=(4, 12))
-        ttk.Button(button_row, text="+ Add new cable",
-                   command=lambda: (load_into_form(None), id_entry.focus_set())
-                   ).pack(side=tk.LEFT)
+        new_btn = ttk.Button(button_row, text="+ Add new cable",
+                              command=lambda: (load_into_form(None),
+                                               id_entry.focus_set()))
+        new_btn.pack(side=tk.LEFT)
+        Tooltip(new_btn,
+                "Reset the form to add a brand-new cable type. "
+                "Existing types stay in the list above.")
         save_btn = ttk.Button(button_row, text="Save changes",
                                command=commit_form)
         save_btn.pack(side=tk.LEFT, padx=8)
+        Tooltip(save_btn,
+                "Commit the form values to the cable catalog. "
+                "(Switching rows also auto-commits if dirty.)")
 
         def on_delete():
             cid = editing_id[0]
