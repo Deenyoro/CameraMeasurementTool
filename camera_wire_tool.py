@@ -6668,9 +6668,12 @@ class CameraWireTool:
 
     def _jump_to_device(self, device: dict) -> None:
         self.selected_device = device
+        self._notebook.select(0)   # Devices tab
+        # Sync the listbox highlight so the jump target lands in view
+        # in both surfaces (canvas + side panel).
+        self._sync_dev_listbox_to_canvas()
         self._center_on_selected()
         self._redraw()
-        self._notebook.select(0)   # Devices tab
         self.status_label.config(
             text=f"Jumped to {device['id']} ({device['type']}).")
 
