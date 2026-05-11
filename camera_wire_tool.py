@@ -5257,12 +5257,28 @@ class CameraWireTool:
             self._redraw()
 
     def _on_motion(self, event) -> None:
-        # Cursor coordinate readout
+        # Cursor coordinate readout. When the user is actively drawing a
+        # wire (Wire mode + ≥1 point clicked) or doing the first cal
+        # click, "distance from origin" is meaningless — show distance
+        # from the relevant reference point instead.
         ix, iy = self._canvas_to_img(event.x, event.y)
+        ref_label = "from origin"
+        ref_pt: tuple[float, float] | None = None
+        if (self.mode == Mode.WIRE and self.current_wire_points):
+            ref_pt = self.current_wire_points[-1]
+            ref_label = "from last point"
+        elif (self.mode == Mode.CALIBRATE and self.cal_points):
+            ref_pt = self.cal_points[-1]
+            ref_label = "from 1st cal point"
         if self.scale_factor:
-            real_in = math.hypot(ix, iy) * self.scale_factor
+            if ref_pt is not None:
+                dx, dy = ix - ref_pt[0], iy - ref_pt[1]
+                real_in = math.hypot(dx, dy) * self.scale_factor
+            else:
+                real_in = math.hypot(ix, iy) * self.scale_factor
             self.cursor_label.config(
-                text=f"{int(ix):>5d}, {int(iy):>5d} px  •  {self._format_length(real_in)} from origin",
+                text=f"{int(ix):>5d}, {int(iy):>5d} px  •  "
+                     f"{self._format_length(real_in)} {ref_label}",
             )
         else:
             self.cursor_label.config(text=f"{int(ix):>5d}, {int(iy):>5d} px")
