@@ -1900,6 +1900,9 @@ class CameraWireTool:
         view_menu.add_command(label="Fit View",
                               command=lambda: (self._fit_image(), self._redraw()),
                               accelerator="Home")
+        view_menu.add_command(label="Zoom to Selection",
+                              command=self._kbd_zoom_to_selection,
+                              accelerator="Z")
         view_menu.add_command(label="Zoom In", command=lambda: self._zoom_button(1),
                               accelerator="+")
         view_menu.add_command(label="Zoom Out", command=lambda: self._zoom_button(-1),
