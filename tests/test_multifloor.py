@@ -124,3 +124,43 @@ def test_load_project_missing_returns_empty(tmp_path):
                             str(tmp_path / "F1.drawio"))
     assert len(proj.floors) == 1
     assert proj.floors[0].drawio_file == "F1.drawio"
+
+
+def test_load_project_skips_malformed_floor_entries(tmp_path):
+    """A floor entry missing 'id' or 'drawio_file' shouldn't crash the
+    loader — just skip the bad entry and keep the good ones."""
+    import json
+    p = tmp_path / "broken.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "active_floor": "F1",
+        "floors": [
+            {"id": "F1", "name": "Good", "elevation_ft": 0,
+             "drawio_file": "F1.drawio"},
+            {"id": "F2"},                       # missing drawio_file
+            {"drawio_file": "F3.drawio"},       # missing id
+            "garbage",                          # not even a dict
+            {"id": "F4", "drawio_file": "F4.drawio",
+             "elevation_ft": "not a number"},   # bad elevation
+        ],
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    assert {f.id for f in proj.floors} == {"F1", "F4"}
+    f4 = next(f for f in proj.floors if f.id == "F4")
+    assert f4.elevation_ft == 0.0
+
+
+def test_load_project_handles_non_numeric_next_device_id(tmp_path):
+    import json
+    p = tmp_path / "weird.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "active_floor": "F1",
+        "floors": [{"id": "F1", "name": "G", "elevation_ft": 0,
+                    "drawio_file": "F1.drawio"}],
+        "next_device_id": "abc",   # not an int
+        "scale_factor": "garbage", # not a float
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    assert proj.next_device_id == 100
+    assert proj.scale_factor is None

@@ -210,12 +210,24 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
     wires_by_floor = data.get("wire_routes_by_floor", {})
     annotations_by_floor = data.get("annotations_by_floor", {})
     for f in data.get("floors", []):
-        fid = f["id"]
+        # Defensive — id + drawio_file are required, but a corrupted
+        # project file may have neither. Skip the floor entry rather
+        # than crashing the entire load.
+        if not isinstance(f, dict):
+            continue
+        fid = f.get("id")
+        drawio_file = f.get("drawio_file")
+        if not fid or not drawio_file:
+            continue
+        try:
+            elev = float(f.get("elevation_ft", 0))
+        except (TypeError, ValueError):
+            elev = 0.0
         floors.append(FloorState(
             id=fid,
             name=f.get("name", fid),
-            elevation_ft=float(f.get("elevation_ft", 0)),
-            drawio_file=f["drawio_file"],
+            elevation_ft=elev,
+            drawio_file=drawio_file,
             alignment=dict(f.get("alignment", IDENTITY_ALIGNMENT)),
             anchor_points=[list(p) for p in f.get("anchor_points", [])],
             wire_routes=list(wires_by_floor.get(fid, [])),
