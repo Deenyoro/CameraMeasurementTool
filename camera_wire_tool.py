@@ -6935,9 +6935,20 @@ class CameraWireTool:
             self._cleanup_autosave()
             return
         when = data.get("saved_at", "<unknown time>")
+        # Surface a quick summary of what's in the autosave so users
+        # can decide informedly. Defensive against malformed counts.
+        try:
+            n_dev = len(data.get("devices") or [])
+            n_wire = len(data.get("wire_routes") or [])
+            n_ann = len(data.get("annotations") or [])
+        except TypeError:
+            n_dev = n_wire = n_ann = 0
+        summary = (f"{n_dev} device(s), {n_wire} wire run(s)"
+                   + (f", {n_ann} annotation(s)" if n_ann else ""))
         if not messagebox.askyesno(
             "Recover unsaved changes?",
-            f"An auto-save from {when} is newer than the last manual save.\n\n"
+            f"An auto-save from {when} is newer than the last manual save.\n"
+            f"Snapshot contains:  {summary}.\n\n"
             f"Recover those changes?\n"
             f"(YES → restore unsaved work and mark project dirty)\n"
             f"(NO → discard the auto-save and load the saved version)"):
