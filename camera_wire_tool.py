@@ -4203,10 +4203,19 @@ class CameraWireTool:
         msg = ""
         bg = "#FFD060"; fg = "#202020"
         if self.mode == Mode.PLACE_DEVICE and self._place_type:
-            info = self.symbol_types.get(self._place_type, {})
-            label = info.get("label", self._place_type)
-            msg = (f"📍  PLACEMENT MODE — click anywhere on the map to drop a "
-                   f"'{self._place_type}' ({label}).   Esc to cancel.")
+            if self._place_type == "__annotation__":
+                # Special-case the annotation sentinel — the user picked
+                # text/color/size in the dialog; don't expose the internal
+                # '__annotation__' code in the banner.
+                ann_text = (self._placing_annotation or {}).get("text", "")
+                preview = f" '{ann_text}'" if ann_text else ""
+                msg = (f"📍  PLACEMENT MODE — click on the map to drop "
+                       f"annotation{preview}.   Esc to cancel.")
+            else:
+                info = self.symbol_types.get(self._place_type, {})
+                label = info.get("label", self._place_type)
+                msg = (f"📍  PLACEMENT MODE — click anywhere on the map to drop a "
+                       f"'{self._place_type}' ({label}).   Esc to cancel.")
         elif self.mode == Mode.CALIBRATE:
             n = len(self.cal_points)
             msg = (f"📏  CALIBRATE — click point {n+1} of 2 on a known dimension. "
