@@ -6377,8 +6377,21 @@ class CameraWireTool:
             cable_sub = self._build_cable_type_submenu(
                 m, self._set_selected_wire_cable_type)
             if cable_sub is not None:
-                m.add_cascade(label="🎚  Set cable type",
-                               menu=cable_sub)
+                # Show the effective cable on the cascade label — matches
+                # the canvas right-click on a wire, so the user always sees
+                # what the override would change from.
+                route_idx = self._wire_index_for_listbox(idx)
+                if route_idx is not None:
+                    route = self.wire_routes[route_idx]
+                    explicit = route.get("cable_type")
+                    effective = bom_mod.cable_for_route(
+                        route, {d["id"]: d for d in self.devices},
+                        self.symbol_types, self.cable_types)
+                    cur_cable = effective + ("" if explicit else " (auto)")
+                    cable_label = f"🎚  Cable type: {cur_cable}"
+                else:
+                    cable_label = "🎚  Set cable type"
+                m.add_cascade(label=cable_label, menu=cable_sub)
             m.add_separator()
             m.add_command(label="🗑  Delete wire",
                           command=self._delete_selected_wire,
