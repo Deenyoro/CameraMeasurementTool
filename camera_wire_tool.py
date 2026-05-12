@@ -6490,19 +6490,18 @@ class CameraWireTool:
         def populate(query: str = "") -> None:
             lb.delete(0, tk.END)
             q = query.lower().strip()
-            shown = []
+            visible_rows: list[tuple[str, str | None]] = []
             for disp, did in candidates:
                 if not q or q in disp.lower() or (did and q in did.lower()):
                     lb.insert(tk.END, disp)
-                    shown.append((disp, did))
-            # Pre-select the current row
-            for i, (_, did) in enumerate(shown):
+                    visible_rows.append((disp, did))
+            # Pre-select the current row if it's still in view
+            for i, (_, did) in enumerate(visible_rows):
                 if did == cur_did:
                     lb.selection_set(i); lb.see(i); break
-            return shown
 
-        shown = populate()
-        search_var.trace_add("write", lambda *_: shown.__init__(populate(search_var.get())))
+        populate()
+        search_var.trace_add("write", lambda *_: populate(search_var.get()))
 
         def apply():
             sel = lb.curselection()
