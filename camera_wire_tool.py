@@ -3233,7 +3233,16 @@ class CameraWireTool:
         }
         for code in self._sym_keys:
             info = self.symbol_types[code]
-            if query and query not in code.lower() and query not in info.get("label", "").lower():
+            # Search across code, label, AND the (effective) cable so
+            # typing 'Cat6' surfaces every symbol whose wires roll up to
+            # Cat6 — matches what users see in the row format.
+            cable_for_search = (info.get("cable_type")
+                                or bom_mod.default_cable_for(info))
+            if query and not (
+                query in code.lower()
+                or query in info.get("label", "").lower()
+                or query in cable_for_search.lower()
+            ):
                 continue
             if info.get("is_run_point"):
                 groups["Run points"].append((code, info))
