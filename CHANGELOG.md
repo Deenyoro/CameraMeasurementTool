@@ -18,13 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   or right-click a device → "Draw wire from here…").
 - Map annotations: drop styled text labels on the floor plan with full
   undo coverage and per-floor persistence.
-- Atomic file writes (drawio + project + autosave + settings + recents).
+- Atomic file writes everywhere: .drawio, project file (v2 .wiremap.json),
+  autosave, settings, recent files, log rotation, PDF export, all CSV
+  exports, and PNG map snapshots — torn writes are no longer possible.
 - Wires follow their associated device when the device is moved (smart-
-  follow with tolerance).
+  follow with tolerance for manually-placed endpoints).
 - Cable type per-wire override via right-click menu.
 - Universal undo coverage: every catalog/state mutation goes through a
   Command, including FOV (single + bulk + clear + rotate-coalescing),
   cable-type catalog edits, annotations, and wire-cable overrides.
+- Arrow-key device nudge (Shift = 10× step) with coalescing so held
+  keys don't flood the undo stack.
+- Ctrl+D duplicate, Ctrl+U jump-to-next-unwired-camera, F11 fullscreen.
+- DPI-aware on Windows (SetProcessDpiAwareness) so the canvas renders
+  crisply at >100% display scaling.
+- Test suite grew from 37 → 114 pytests covering BOM rollup, FOV/DORI
+  math, alignment math, project-file round-trips, every Command class's
+  do/undo cycle, malformed-input tolerance, and the pre-export scale
+  guard.
 
 ### Roadmap
 
