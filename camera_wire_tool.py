@@ -1447,10 +1447,14 @@ class CameraWireTool:
         b("<equal>", _canvas_only(lambda: self._zoom_button(1)))
         b("<minus>", _canvas_only(lambda: self._zoom_button(-1)))
         # Arrow keys — nudge selected device(s) by 1 drawio-unit (10 with Shift).
-        # Standard CAD pattern; honors text-widget focus.
+        # Standard CAD pattern; honors text-widget focus AND only fires in
+        # Move mode so it doesn't yank the in-progress wire/cal anchor
+        # of a freshly-wire-selected device out from under the user.
         def _arrow(dx, dy):
             def _w(_e):
                 if self._is_text_focus(_e):
+                    return
+                if self.mode != Mode.MOVE:
                     return
                 step = 10 if (_e.state & 0x0001) else 1   # Shift = 10x
                 self._nudge_selected_devices(dx * step, dy * step)
