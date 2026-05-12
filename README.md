@@ -45,6 +45,16 @@ pip install -r requirements.txt
 
 Python 3.10+ recommended.
 
+PDF report export is optional — install [`reportlab`](https://pypi.org/project/reportlab/)
+to enable the `File → Export → Project PDF Report…` menu item (greyed
+out when reportlab isn't found):
+
+```
+pip install reportlab
+```
+
+CSV exports + on-screen rendering work without it.
+
 ## Run
 
 ```
