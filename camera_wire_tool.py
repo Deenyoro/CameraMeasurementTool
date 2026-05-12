@@ -7280,9 +7280,18 @@ class CameraWireTool:
             if not text:
                 messagebox.showerror("Error", "Annotation text can't be empty.")
                 return
+            # IntVar.get() raises TclError if the user typed non-numeric
+            # garbage into the size spinbox — surface a friendly error
+            # rather than crash.
+            try:
+                size = int(size_var.get())
+            except (tk.TclError, ValueError):
+                messagebox.showerror("Error",
+                                     "Size must be a whole number (8–72).")
+                return
             self._placing_annotation = {
                 "text": text, "color": color_var.get(),
-                "font_size": int(size_var.get()),
+                "font_size": max(8, min(72, size)),
             }
             self._set_mode(Mode.PLACE_DEVICE)   # reuse the cursor / banner
             self._place_type = "__annotation__"   # sentinel so _do_place_device knows
@@ -7411,11 +7420,17 @@ class CameraWireTool:
             if not t:
                 messagebox.showerror("Error", "Annotation text can't be empty.")
                 return
+            try:
+                size = int(size_var.get())
+            except (tk.TclError, ValueError):
+                messagebox.showerror("Error",
+                                     "Size must be a whole number (8–72).")
+                return
             old = {"text": ann.get("text"),
                    "color": ann.get("color"),
                    "font_size": ann.get("font_size")}
             new = {"text": t, "color": color_var.get(),
-                   "font_size": int(size_var.get())}
+                   "font_size": max(8, min(72, size))}
             if old == new:
                 dlg.destroy(); return
             self._execute(EditAnnotationCmd(self, ann, old, new))
@@ -7623,8 +7638,10 @@ class CameraWireTool:
                 ("C",      "Calibrate — set the real-world scale"),
             ]),
             ("Editing", [
-                ("Ctrl+Z",       "Undo last action"),
-                ("Ctrl+Y",       "Redo"),
+                ("Ctrl+Z",         "Undo last action"),
+                ("Ctrl+Y",         "Redo"),
+                ("Ctrl+Shift+Z",   "Redo (alternate — for muscle memory from "
+                                   "Photoshop / Figma / VS Code)"),
                 ("Ctrl+A",       "Select all visible devices"),
                 ("Drag",         "Lasso-select (drag empty canvas in Move mode)"),
                 ("Shift+drag",   "Lasso-add to existing selection"),
@@ -8120,9 +8137,17 @@ class CameraWireTool:
             if not t:
                 messagebox.showerror("Error", "Annotation text can't be empty.")
                 return
+            # IntVar.get() raises TclError on non-numeric typed-in garbage —
+            # match the validation in _start_place_annotation.
+            try:
+                size = int(size_var.get())
+            except (tk.TclError, ValueError):
+                messagebox.showerror("Error",
+                                     "Size must be a whole number (8–72).")
+                return
             dx, dy = self._img_to_drawio(ix, iy)
             ann = {"text": t, "color": color_var.get(),
-                   "font_size": int(size_var.get()), "x": dx, "y": dy}
+                   "font_size": max(8, min(72, size)), "x": dx, "y": dy}
             self._execute(AddAnnotationCmd(self, ann))
             self._post_command_refresh()
             self._flash_status(
