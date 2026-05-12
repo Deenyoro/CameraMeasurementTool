@@ -5502,7 +5502,14 @@ class CameraWireTool:
                 self.canvas.delete("hover_info")
                 self._hover_device = None
                 did = wire_under.get("device_id") or "—"
-                cable = wire_under.get("cable_type") or "?"
+                # Show effective cable (same resolution rule the BOM uses)
+                # so the hover info matches what's in the side panel + BOM.
+                explicit = wire_under.get("cable_type")
+                effective = bom_mod.cable_for_route(
+                    wire_under,
+                    {d["id"]: d for d in self.devices},
+                    self.symbol_types, self.cable_types)
+                cable = effective + ("" if explicit else " (auto)")
                 length = (self._format_length(wire_under.get("length_in") or 0)
                           if wire_under.get("length_in") is not None
                           else f"{wire_under['length_px']:.0f}px")
