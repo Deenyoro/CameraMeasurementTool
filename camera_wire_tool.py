@@ -9233,7 +9233,12 @@ class CameraWireTool:
         ttk.Label(dlg, text=f"Floor ID: {new_id}").pack(anchor=tk.W, padx=10, pady=4)
         ttk.Label(dlg, text="Name:").pack(anchor=tk.W, padx=10)
         name_var = tk.StringVar(value=os.path.splitext(os.path.basename(path))[0])
-        ttk.Entry(dlg, textvariable=name_var, width=40).pack(padx=10, pady=2)
+        name_entry = ttk.Entry(dlg, textvariable=name_var, width=40)
+        name_entry.pack(padx=10, pady=2)
+        # Auto-focus + select-all so the user can immediately retype if
+        # they don't like the auto-suggested name from the filename.
+        name_entry.select_range(0, tk.END)
+        name_entry.focus_set()
         ttk.Label(dlg, text="Elevation (ft):").pack(anchor=tk.W, padx=10)
         elev_var = tk.DoubleVar(value=14.0 * (n - 1))
         ttk.Entry(dlg, textvariable=elev_var, width=10).pack(anchor=tk.W, padx=10, pady=2)
