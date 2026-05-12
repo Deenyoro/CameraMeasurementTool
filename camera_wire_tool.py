@@ -6136,8 +6136,10 @@ class CameraWireTool:
         )
         for did in ordered_keys:
             entries = groups[did]
+            n_entries = len(entries)
+            wire_word = "wire" if n_entries == 1 else "wires"
             if did is None:
-                header = f"── unassigned  ({len(entries)} wire(s)) ──"
+                header = f"── unassigned  ({n_entries} {wire_word}) ──"
             else:
                 dev = next((d for d in self.devices if d["id"] == did), None)
                 dev_type = dev["type"] if dev else "—"
@@ -6147,7 +6149,7 @@ class CameraWireTool:
                 tot_str = (self._format_length(tot_in) if tot_in
                            else f"{int(sum(r['length_px'] for _, r in entries))} px")
                 header = (f"── {did}  {dev_type:5s}  {sym_label[:24]}"
-                          f"  ({len(entries)} wire(s), {tot_str}) ──")
+                          f"  ({n_entries} {wire_word}, {tot_str}) ──")
             self.wire_listbox.insert(tk.END, header)
             self._wire_listbox_rows.append(None)
             self.wire_listbox.itemconfig(self.wire_listbox.size() - 1,
