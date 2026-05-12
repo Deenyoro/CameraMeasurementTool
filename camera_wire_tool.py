@@ -6689,7 +6689,12 @@ class CameraWireTool:
                 pass
         def _restore():
             self._status_clear_id = None
-            self._update_status()  # back to mode/selection breadcrumb
+            # Window may have been destroyed during the TTL window —
+            # status_label.config() inside _update_status would TclError.
+            try:
+                self._update_status()
+            except tk.TclError:
+                pass
         self._status_clear_id = self.root.after(ttl_ms, _restore)
 
     def _update_status(self) -> None:
