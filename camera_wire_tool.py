@@ -6098,14 +6098,24 @@ class CameraWireTool:
 
         # Group filtered wires by device id (None = unassigned)
         groups: dict[str | None, list[tuple[int, dict]]] = {}
+        # Pre-build the id→device map once so the per-route cable resolve
+        # isn't O(N) inside the loop.
+        devices_by_id_for_search = {d["id"]: d for d in self.devices}
         for i, route in enumerate(self.wire_routes):
             did = route.get("device_id")
-            dev = next((d for d in self.devices if d["id"] == did), None) if did else None
+            dev = devices_by_id_for_search.get(did) if did else None
             dev_type = dev["type"] if dev else ""
             sym_info = self.symbol_types.get(dev_type, {}) if dev_type else {}
             sym_label = sym_info.get("label", dev_type or "")
-            cable = route.get("cable_type", "")
-            search_blob = f"{did or ''} {dev_type} {sym_label} {cable}".lower()
+            # Match against the EFFECTIVE cable (what the row displays), not
+            # only the explicit cable_type override — searching "Cat6" should
+            # find auto-resolved Cat6 wires too.
+            effective_cable = bom_mod.cable_for_route(
+                route, devices_by_id_for_search,
+                self.symbol_types, self.cable_types,
+            )
+            search_blob = (f"{did or ''} {dev_type} {sym_label} "
+                            f"{effective_cable}").lower()
             if query and query not in search_blob:
                 continue
             groups.setdefault(did, []).append((i, route))
@@ -7978,10 +7988,13 @@ class CameraWireTool:
             if place_menu is not None:
                 menu.add_cascade(label="➕  Place device here…",
                                   menu=place_menu)
-                menu.add_command(
-                    label="📝  Place annotation here…",
-                    command=lambda: self._place_annotation_at(ix, iy))
-                menu.add_separator()
+            # Annotations have no dependency on symbol_types, so surface the
+            # "Place annotation here" entry even when the device submenu is
+            # absent (catalog was emptied or hasn't loaded yet).
+            menu.add_command(
+                label="📝  Place annotation here…",
+                command=lambda: self._place_annotation_at(ix, iy))
+            menu.add_separator()
             menu.add_command(label="Fit view",
                              command=lambda: (self._fit_image(), self._redraw()))
             menu.add_separator()
