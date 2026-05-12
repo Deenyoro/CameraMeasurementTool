@@ -9224,7 +9224,11 @@ class CameraWireTool:
         row = 0
 
         ttk.Label(form, text="Lens (mm):").grid(row=row, column=0, sticky=tk.W, pady=2)
-        lens_var = tk.DoubleVar(value=float(fov.get("lens_mm", 4.0)))
+        try:
+            lens_init = float(fov.get("lens_mm", 4.0) or 4.0)
+        except (TypeError, ValueError):
+            lens_init = 4.0
+        lens_var = tk.DoubleVar(value=lens_init)
         lens_combo = ttk.Combobox(form, textvariable=lens_var, width=10,
                                    values=[str(v) for v in lenses_mod.LENS_PRESETS_MM])
         lens_combo.grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
@@ -9236,23 +9240,37 @@ class CameraWireTool:
                      state="readonly").grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
 
         ttk.Label(form, text="Resolution:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        # Tolerate corrupted/non-iterable resolution — fall back to default.
+        try:
+            target_res = list(fov.get("resolution") or [])
+        except TypeError:
+            target_res = []
         res_var = tk.StringVar(value=next(
             (k for k, v in lenses_mod.RESOLUTIONS.items()
-             if list(v) == list(fov.get("resolution") or [])), "4K (UHD)"))
+             if list(v) == target_res), "4K (UHD)"))
         ttk.Combobox(form, textvariable=res_var, width=12,
                      values=list(lenses_mod.RESOLUTIONS.keys()),
                      state="readonly").grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
 
+        # _safe_float-style coerce for the numeric entries — a corrupted
+        # 'mount_height_ft': '9ft' would ValueError from raw float() and
+        # prevent the dialog from opening at all.
+        def _coerce_float(value, fallback):
+            try:
+                return float(value) if value not in (None, "") else fallback
+            except (TypeError, ValueError):
+                return fallback
+
         ttk.Label(form, text="Mount height (ft):").grid(row=row, column=0, sticky=tk.W, pady=2)
-        mh_var = tk.DoubleVar(value=float(fov.get("mount_height_ft", 9.0)))
+        mh_var = tk.DoubleVar(value=_coerce_float(fov.get("mount_height_ft"), 9.0))
         ttk.Entry(form, textvariable=mh_var, width=10).grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
 
         ttk.Label(form, text="Tilt (° down):").grid(row=row, column=0, sticky=tk.W, pady=2)
-        tilt_var = tk.DoubleVar(value=float(fov.get("tilt_deg", 15.0)))
+        tilt_var = tk.DoubleVar(value=_coerce_float(fov.get("tilt_deg"), 15.0))
         ttk.Entry(form, textvariable=tilt_var, width=10).grid(row=row, column=1, sticky=tk.W, padx=4); row += 1
 
         ttk.Label(form, text="Azimuth (°, 0=up):").grid(row=row, column=0, sticky=tk.W, pady=2)
-        az_var = tk.DoubleVar(value=float(fov.get("azimuth_deg", 0.0)))
+        az_var = tk.DoubleVar(value=_coerce_float(fov.get("azimuth_deg"), 0.0))
         # The Scale stores raw floats — without quantizing, the bound Entry
         # ends up showing '247.39573528...' as the user drags. Round to 1
         # decimal on every write so the Entry stays readable. Re-entrancy
