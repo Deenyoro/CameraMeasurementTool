@@ -1330,12 +1330,17 @@ class CameraWireTool:
 
         # Active floor's wire routes → self.wire_routes (recalc lengths now)
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
-        # Restore map annotations for the active floor
-        self.annotations = [dict(a) for a in (active.annotations or [])]
+        # Restore map annotations for the active floor — skip any entry
+        # that isn't dict-shaped (corrupted project file).
+        self.annotations = [dict(a) for a in (active.annotations or [])
+                            if isinstance(a, dict)]
         for wr in active.wire_routes:
             # Defensive coerce: a hand-edited project file could carry
             # string coords, malformed pairs, or None points — skip the
             # whole route rather than crashing the loader downstream.
+            # Also skip non-dict wire entries (e.g. a stray string).
+            if not isinstance(wr, dict):
+                continue
             pts = []
             for p in wr.get("points", []):
                 try:
@@ -7282,7 +7287,10 @@ class CameraWireTool:
         self.wire_routes = []
         for wr in data.get("wire_routes", []):
             # Same defensive coerce as _load_project — autosave can be
-            # corrupted by a power cut mid-write.
+            # corrupted by a power cut mid-write. Also skip non-dict
+            # entries entirely (stray string in the list).
+            if not isinstance(wr, dict):
+                continue
             pts = []
             for p in wr.get("points", []):
                 try:
