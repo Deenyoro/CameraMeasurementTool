@@ -7130,11 +7130,14 @@ class CameraWireTool:
         self.status_label.config(text="✓ Recovered unsaved changes from autosave.")
 
     def _cleanup_autosave(self) -> None:
-        if os.path.exists(self._autosave_path):
-            try:
-                os.remove(self._autosave_path)
-            except OSError:
-                pass
+        """Remove the autosave snapshot AND any orphan .tmp staging file
+        a previous write may have left behind (best-effort)."""
+        for p in (self._autosave_path, self._autosave_path + ".tmp"):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
     # ============================================================ Map annotations
     def _start_place_annotation(self) -> None:
