@@ -195,12 +195,14 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
         sf = float(sf) if sf is not None else None
     except (TypeError, ValueError):
         sf = None
+    raw_unit = data.get("unit", "ft-in")
+    unit = raw_unit if isinstance(raw_unit, str) and raw_unit else "ft-in"
     return ProjectState(
         version=2, active_floor="F1",
         floors=[floor],
         cable_types=dict(data.get("cable_types", {})),
         scale_factor=sf,
-        unit=data.get("unit", "ft-in"),
+        unit=unit,
         next_device_id=ndid,
     )
 
@@ -244,15 +246,25 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         sf = float(sf) if sf is not None else None
     except (TypeError, ValueError):
         sf = None
+    # Defensive coerce for fields a hand-edit could turn into the wrong
+    # type. project_name + unit downstream consumers (StringVar, title
+    # bar) assume strings — coerce or fall back.
+    raw_name = data.get("project_name", "")
+    project_name = raw_name if isinstance(raw_name, str) else ""
+    raw_unit = data.get("unit", "ft-in")
+    unit = raw_unit if isinstance(raw_unit, str) and raw_unit else "ft-in"
+    raw_active = data.get("active_floor", floors[0].id if floors else "F1")
+    active_floor = (raw_active if isinstance(raw_active, str) and raw_active
+                    else (floors[0].id if floors else "F1"))
     return ProjectState(
         version=2,
-        project_name=data.get("project_name", ""),
-        active_floor=data.get("active_floor", floors[0].id if floors else "F1"),
+        project_name=project_name,
+        active_floor=active_floor,
         floors=floors,
         cable_types=dict(data.get("cable_types", {})),
         risers=list(data.get("risers", [])),
         scale_factor=sf,
-        unit=data.get("unit", "ft-in"),
+        unit=unit,
         next_device_id=ndid,
     )
 

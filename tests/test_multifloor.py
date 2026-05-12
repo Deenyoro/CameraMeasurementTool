@@ -224,6 +224,27 @@ def test_load_project_handles_non_numeric_next_device_id(tmp_path):
     assert proj.scale_factor is None
 
 
+def test_load_project_coerces_wrong_typed_fields(tmp_path):
+    """A hand-edited project file could carry the wrong type for fields
+    that downstream consumers (StringVar, title bar) assume are strings.
+    The loader should fall back to sensible defaults instead of letting
+    the bad value reach the UI."""
+    import json
+    p = tmp_path / "weird.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "project_name": 1234,           # wrong type — int instead of str
+        "unit": ["not", "a", "string"],  # wrong type — list
+        "active_floor": None,            # wrong type — None
+        "floors": [{"id": "F1", "name": "G", "elevation_ft": 0,
+                    "drawio_file": "F1.drawio"}],
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    assert proj.project_name == ""        # coerced from 1234 → ""
+    assert proj.unit == "ft-in"           # coerced from list → default
+    assert proj.active_floor == "F1"      # fell back to first floor's id
+
+
 def test_save_project_is_atomic_no_partial_file_on_failure(tmp_path, monkeypatch):
     """If os.replace raises after the tmp write, the destination must
     not exist and the .tmp staging file must be cleaned up. Locks in
