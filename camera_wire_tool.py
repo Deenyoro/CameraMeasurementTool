@@ -6511,11 +6511,15 @@ class CameraWireTool:
         # Default to Move so an unhandled mode never raises KeyError (which
         # used to surface as a nonsense "obstacle grid" error from the
         # routing exception handler).
+        # Special-case the annotation sentinel so it doesn't leak into UI.
+        place_label = ("annotation"
+                       if self._place_type == "__annotation__"
+                       else (self._place_type or '?'))
         mode_str = {
             Mode.MOVE: "Move",
             Mode.WIRE: "Wire",
             Mode.CALIBRATE: "Calibrate",
-            Mode.PLACE_DEVICE: f"Place {self._place_type or '?'}",
+            Mode.PLACE_DEVICE: f"Place {place_label}",
         }.get(self.mode, "Move")
 
         parts = [f"Mode: {mode_str}"]
