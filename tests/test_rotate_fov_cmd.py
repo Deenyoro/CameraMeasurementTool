@@ -73,3 +73,19 @@ def test_no_coalesce_after_window():
     b = cwt.RotateFovCmd(types.SimpleNamespace(), dev,
                           old_az=15.0, new_az=30.0, timestamp=105.0)
     assert not a.can_coalesce_with(b)
+
+
+def test_rotate_replaces_non_dict_fov():
+    """A hand-edited device with 'fov': 'corrupted' used to TypeError
+    inside .do() (string item-assignment). Should be treated like a
+    missing fov: replace with a fresh default + undo pops it."""
+    dev = {"id": "s10", "type": "MD", "fov": "this should be a dict"}
+    cmd = cwt.RotateFovCmd(types.SimpleNamespace(), dev,
+                            old_az=0.0, new_az=15.0, timestamp=100.0)
+    cmd.do()
+    assert isinstance(dev["fov"], dict)
+    assert dev["fov"]["azimuth_deg"] == 15.0
+    # Undo treats it as if fov was missing — the corrupted original is
+    # gone, but that's better than reinstating bad data.
+    cmd.undo()
+    assert "fov" not in dev
