@@ -65,15 +65,45 @@ def write_devices_csv(devices: list[dict], symbol_types: dict[str, dict],
     _atomic_csv_write(path, rows)
 
 
-def write_wires_csv(wire_routes: list[dict], format_length, path: str) -> None:
-    """One row per wire: device, segments, length."""
+def write_wires_csv(wire_routes: list[dict], format_length, path: str,
+                     *,
+                     devices: list[dict] | None = None,
+                     symbol_types: dict[str, dict] | None = None,
+                     cable_types: dict[str, dict] | None = None) -> None:
+    """One row per wire: device, cable, segments, length.
+
+    Cable column shows the EFFECTIVE cable (the one the BOM rolls up
+    against) when devices/symbol_types/cable_types are supplied — same
+    resolution rule as `bom.cable_for_route`. An '(auto)' suffix marks
+    routes that fell back to a device/symbol default instead of an
+    explicit override. When the dependencies are omitted (older callers),
+    falls back to the explicit override only — preserves the prior
+    contract.
+    """
     rows = [["#", "Device", "Cable", "Segments", "Length (in)", "Length"]]
+    # Build the index once instead of O(N) per route.
+    devices_by_id = ({d["id"]: d for d in devices}
+                     if devices is not None else None)
+    can_resolve = (devices_by_id is not None
+                   and symbol_types is not None
+                   and cable_types is not None)
     for i, wr in enumerate(wire_routes):
         length_in = wr.get("length_in") or 0
+        if can_resolve:
+            # Lazy import to avoid a top-level cycle (cwt.bom imports
+            # are fine, but the symmetric expectation is bom needs nothing
+            # from export — keep the export module light).
+            from cwt.bom import cable_for_route
+            explicit = wr.get("cable_type")
+            effective = cable_for_route(
+                wr, devices_by_id, symbol_types, cable_types)
+            cable_cell = effective + ("" if explicit else " (auto)")
+        else:
+            cable_cell = wr.get("cable_type") or ""
         rows.append([
             i + 1,
             wr.get("device_id") or "(unassigned)",
-            wr.get("cable_type") or "",
+            cable_cell,
             len(wr["points"]) - 1,
             f"{length_in:.2f}",
             format_length(length_in) if length_in else "--",
@@ -82,7 +112,8 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str) -> None:
 
 
 def write_bundle_csv(directory: str, *, devices, symbol_types, wire_routes,
-                     bom_report, format_length, currency: str = "$") -> list[str]:
+                     bom_report, format_length, currency: str = "$",
+                     cable_types: dict[str, dict] | None = None) -> list[str]:
     """Write all three CSVs into `directory`. Returns the list of paths."""
     os.makedirs(directory, exist_ok=True)
     paths = [
@@ -92,7 +123,9 @@ def write_bundle_csv(directory: str, *, devices, symbol_types, wire_routes,
     ]
     write_bom_csv(bom_report, paths[0], currency=currency)
     write_devices_csv(devices, symbol_types, wire_routes, format_length, paths[1])
-    write_wires_csv(wire_routes, format_length, paths[2])
+    write_wires_csv(wire_routes, format_length, paths[2],
+                     devices=devices, symbol_types=symbol_types,
+                     cable_types=cable_types)
     return paths
 
 

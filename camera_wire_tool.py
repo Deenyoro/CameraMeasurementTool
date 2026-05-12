@@ -9715,6 +9715,7 @@ class CameraWireTool:
                 bom_report=self._build_bom_report(),
                 format_length=self._format_length,
                 currency=self._bom_currency_var.get() or "$",
+                cable_types=self.cable_types,
             )
             messagebox.showinfo("Exported", "Wrote:\n" + "\n".join(paths))
         except OSError as e:
