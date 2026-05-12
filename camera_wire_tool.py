@@ -918,8 +918,15 @@ class RotateFovCmd(Command):
         self._fov_was_missing = "fov" not in device
 
     def do(self):
-        if "fov" not in self.device:
+        # Replace a corrupted (non-dict) fov entry too — '"fov" not in
+        # device' would miss that case and the next line would crash
+        # with 'str indices must be int' on the item assignment.
+        if not isinstance(self.device.get("fov"), dict):
             self.device["fov"] = default_fov_for_type(self.device["type"])
+            # Treat a non-dict fov the same as missing for undo's sake:
+            # restoring None / pop'ing 'fov' is closer to the user's intent
+            # than reinstating the corrupted value.
+            self._fov_was_missing = True
         self.device["fov"]["azimuth_deg"] = self.new_az
 
     def undo(self):
