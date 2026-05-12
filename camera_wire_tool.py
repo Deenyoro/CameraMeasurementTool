@@ -1070,14 +1070,20 @@ def load_recent_files() -> list[str]:
 
 def save_recent_files(paths: list[str]) -> None:
     """Atomic via tmp+rename — without it a crashed shutdown could
-    leave the recent-files JSON truncated and unparseable next launch."""
+    leave the recent-files JSON truncated and unparseable next launch.
+    Also unlinks the staging .tmp on failure so the home folder doesn't
+    accumulate orphans across crashes."""
+    tmp = RECENT_FILES_PATH.with_suffix(RECENT_FILES_PATH.suffix + ".tmp")
     try:
-        tmp = RECENT_FILES_PATH.with_suffix(RECENT_FILES_PATH.suffix + ".tmp")
         tmp.write_text(json.dumps(paths[: C.MAX_RECENT_FILES]),
                         encoding="utf-8")
         os.replace(tmp, RECENT_FILES_PATH)
     except OSError:
-        pass
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def push_recent_file(path: str) -> list[str]:
@@ -1102,13 +1108,18 @@ def load_settings() -> dict:
 def save_settings(settings: dict) -> None:
     """Atomic via tmp+rename — these settings are written every time
     the user toggles FOV / grid / etc., so a torn write here would be
-    really easy to provoke."""
+    really easy to provoke. Unlinks the staging .tmp on failure so
+    the home folder doesn't accumulate orphans across crashes."""
+    tmp = SETTINGS_PATH.with_suffix(SETTINGS_PATH.suffix + ".tmp")
     try:
-        tmp = SETTINGS_PATH.with_suffix(SETTINGS_PATH.suffix + ".tmp")
         tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
         os.replace(tmp, SETTINGS_PATH)
     except OSError:
-        pass
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 # ============================================================ Main app
@@ -7149,6 +7160,10 @@ class CameraWireTool:
             "annotations": list(self.annotations),
             "legend_box": dict(self.legend_box) if self.legend_box else None,
         }
+        # Atomic write with tmp cleanup on failure — same contract as
+        # cwt.bom.write_csv / cwt.multifloor.save_project. Without the
+        # finally, a failed rename leaves '*.autosave.json.tmp' orphans
+        # in the project directory across crashes.
         tmp = self._autosave_path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -7156,6 +7171,11 @@ class CameraWireTool:
             os.replace(tmp, self._autosave_path)
         except OSError as e:
             log_error(f"Auto-save write failed: {self._autosave_path}", e)
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
 
     def _maybe_recover_autosave(self) -> None:
         """Called once on startup. If a fresh autosave outranks the saved
