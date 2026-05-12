@@ -3978,7 +3978,8 @@ class CameraWireTool:
         if self.scale_factor and self.wire_routes:
             return
         cw = self.canvas.winfo_width() or 800
-        if cw < 460:   # too narrow to fit
+        ch = self.canvas.winfo_height() or 600
+        if cw < 460 or ch < 200:   # too small to fit comfortably
             return
         # Banner sits below the mode banner (which is 0..32) at top center
         x0 = max(40, (cw - 540) // 2)
