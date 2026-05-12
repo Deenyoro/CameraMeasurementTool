@@ -9485,14 +9485,16 @@ class CameraWireTool:
             f"Set Scale or the C key.)")
 
     def _export_bom_csv(self) -> None:
+        # Warn BEFORE the file dialog so users don't have to pick a path
+        # only to cancel out on the scale warning.
+        if not self._warn_if_no_scale("CSV"):
+            return
         path = filedialog.asksaveasfilename(
             title="Export BOM as CSV",
             defaultextension=".csv",
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_bom.csv",
             filetypes=[("CSV", "*.csv")])
         if not path:
-            return
-        if not self._warn_if_no_scale("CSV"):
             return
         # bom.write_csv is self-atomic (round 152) — no need to wrap.
         try:
@@ -9506,10 +9508,12 @@ class CameraWireTool:
         if not _HAS_EXPORT:
             messagebox.showwarning("Unavailable", "Export module not available.")
             return
+        # Warn BEFORE the file dialog so users don't have to pick a folder
+        # only to cancel out on the scale warning.
+        if not self._warn_if_no_scale("CSV bundle"):
+            return
         directory = filedialog.askdirectory(title="Export CSV bundle into folder")
         if not directory:
-            return
-        if not self._warn_if_no_scale("CSV bundle"):
             return
         try:
             paths = export_mod.write_bundle_csv(
@@ -9652,14 +9656,16 @@ class CameraWireTool:
                 "PDF unavailable",
                 "PDF export requires reportlab. `pip install reportlab` then restart.")
             return
+        # Warn BEFORE the file dialog so users don't have to pick a path
+        # only to cancel out on the scale warning.
+        if not self._warn_if_no_scale("PDF report"):
+            return
         path = filedialog.asksaveasfilename(
             title="Export PDF report",
             defaultextension=".pdf",
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_report.pdf",
             filetypes=[("PDF", "*.pdf")])
         if not path:
-            return
-        if not self._warn_if_no_scale("PDF report"):
             return
         # Atomic write — reportlab can crash mid-stream; without staging
         # the user could be left with a half-written PDF that opens
