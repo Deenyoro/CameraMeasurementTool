@@ -9468,9 +9468,17 @@ class CameraWireTool:
                 root_x = rect_root[0]; root_y = rect_root[1]
                 cb = full.crop((cx - root_x, cy - root_y,
                                  cx - root_x + cw, cy - root_y + ch))
-                cb.save(path)
+                # Atomic: stage to .tmp then os.replace
+                tmp_path = path + ".tmp"
+                cb.save(tmp_path)
+                os.replace(tmp_path, path)
             except Exception as e:
                 log_error("Map snapshot failed", e)
+                try:
+                    if os.path.exists(path + ".tmp"):
+                        os.unlink(path + ".tmp")
+                except OSError:
+                    pass
                 messagebox.showerror("Export failed", str(e))
                 return
         finally:
