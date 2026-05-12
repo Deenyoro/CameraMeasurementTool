@@ -3680,11 +3680,15 @@ class CameraWireTool:
         def apply():
             new_code = code_var.get().strip()
             if not new_code:
-                messagebox.showerror("Error", "Shortcode cannot be empty"); return
+                messagebox.showerror("Shortcode required",
+                                      "Shortcode cannot be empty."); return
             if len(new_code) > 5:
-                messagebox.showerror("Error", "Shortcode max 5 characters"); return
+                messagebox.showerror("Shortcode too long",
+                                      "Shortcode is max 5 characters."); return
             if new_code != old_code and new_code in self.symbol_types:
-                messagebox.showerror("Error", f'Shortcode "{new_code}" already exists'); return
+                messagebox.showerror("Shortcode already used",
+                                      f'A symbol type named "{new_code}" '
+                                      f"already exists. Pick a different code."); return
 
             new_info = {
                 "label": label_var.get().strip() or new_code,
@@ -4843,7 +4847,12 @@ class CameraWireTool:
         p1, p2 = self.cal_points
         px_dist = math.dist(p1, p2)
         if px_dist < 1:
-            messagebox.showerror("Error", "Points too close together")
+            messagebox.showerror(
+                "Calibration points too close",
+                "The two calibration points are essentially the same "
+                "pixel. Pick two points that are far enough apart on "
+                "the floor plan that you can measure between them in "
+                "real-world units.")
             self.cal_points = []
             self._set_mode(Mode.MOVE)
             return
@@ -4900,14 +4909,18 @@ class CameraWireTool:
                 a = float(a_var.get())
                 b = float(b_var.get())
             except ValueError:
-                messagebox.showerror("Error", "Enter valid numbers")
+                messagebox.showerror(
+                    "Invalid number",
+                    "Both distance fields need to be numeric.")
                 return
             if metric:
                 total_in = a * self._IN_PER_M + b * self._IN_PER_CM
             else:
                 total_in = a * 12 + b
             if total_in <= 0:
-                messagebox.showerror("Error", "Distance must be positive")
+                messagebox.showerror(
+                    "Invalid distance",
+                    "Distance must be positive (greater than zero).")
                 return
             new_scale = total_in / px_dist
             # Skip the round-trip if the user happened to recalibrate to
