@@ -410,9 +410,16 @@ class Tooltip:
     def _show(self):
         if self.tip is not None or not self.text:
             return
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
-        self.tip = tk.Toplevel(self.widget)
+        # Widget may have been destroyed between _schedule and the after()
+        # firing (race window — common during dialog close while a button
+        # was hovered). winfo_rootx() raises TclError on a dead widget;
+        # silently bail rather than spamming the log.
+        try:
+            x = self.widget.winfo_rootx() + 20
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            self.tip = tk.Toplevel(self.widget)
+        except tk.TclError:
+            return
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
         lbl = tk.Label(
