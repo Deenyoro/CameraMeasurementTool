@@ -130,12 +130,20 @@ def rollup(
             unassigned_in += length_in
 
     # Risers contribute their (vertical + horizontal) length in feet,
-    # converted to inches.
+    # converted to inches. Defensive against malformed/hand-edited values:
+    # a non-numeric vertical_ft used to raise ValueError from float() and
+    # blow up the entire BOM rollup.
     for r in (risers or []):
+        if not isinstance(r, dict):
+            continue
         cid = r.get("cable_type") or "Cat6"
         if cid not in cable_types:
             continue
-        ft = float(r.get("vertical_ft", 0)) + float(r.get("horizontal_ft", 0))
+        try:
+            ft = float(r.get("vertical_ft", 0) or 0) + \
+                  float(r.get("horizontal_ft", 0) or 0)
+        except (TypeError, ValueError):
+            continue
         if ft <= 0:
             continue
         totals.setdefault(cid, {"runs": 0, "total_in": 0.0})

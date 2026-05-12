@@ -110,6 +110,25 @@ def test_rollup_includes_risers():
     assert abs(line.subtotal - 4.0) < 1e-6
 
 
+def test_rollup_handles_malformed_riser_entries():
+    """Hand-edited risers may carry non-numeric vertical_ft, a string in
+    place of the dict, or missing fields. Rollup should skip those rather
+    than crash with ValueError."""
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = []
+    risers = [
+        {"vertical_ft": "fourteen", "horizontal_ft": 6, "cable_type": "Cat6"},
+        "not a dict",
+        {"vertical_ft": None, "horizontal_ft": 0, "cable_type": "Cat6"},
+        {"vertical_ft": 14.0, "horizontal_ft": 6.0, "cable_type": "Cat6"},
+    ]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                      waste_factor=1.0, tax_rate=0.0, risers=risers)
+    # Only the well-formed riser should contribute (20 ft)
+    assert len(rep.lines) == 1
+    assert abs(rep.lines[0].total_ft - 20.0) < 1e-6
+
+
 def test_device_inventory_basic():
     devs = [
         {"id": "s1", "type": "MD"},
