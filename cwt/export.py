@@ -41,24 +41,43 @@ def _atomic_csv_write(path: str, rows: list[list]) -> None:
 
 def write_devices_csv(devices: list[dict], symbol_types: dict[str, dict],
                       wire_routes: list[dict], format_length, path: str) -> None:
-    """One row per device: id, type, label, position, wire totals."""
+    """One row per device: id, type, label, position, wire totals.
+
+    Defensive against hand-edited project files: skips non-dict entries
+    and coerces non-numeric length_in / x / y to safe defaults rather
+    than crashing the export."""
     wire_by_device: dict[str, dict] = {}
     for wr in wire_routes:
+        if not isinstance(wr, dict):
+            continue
         did = wr.get("device_id")
         if not did:
             continue
         wire_by_device.setdefault(did, {"runs": 0, "total_in": 0.0})
         wire_by_device[did]["runs"] += 1
-        wire_by_device[did]["total_in"] += (wr.get("length_in") or 0)
+        try:
+            wire_by_device[did]["total_in"] += float(wr.get("length_in") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    def _coerce_pos(v):
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "—"
 
     rows = [["Device ID", "Type", "Label", "x", "y", "Wire Runs",
              "Total Wire (in)", "Total Wire"]]
     for d in devices:
-        info = symbol_types.get(d["type"], {})
+        if not isinstance(d, dict) or "id" not in d:
+            continue
+        sym = symbol_types.get(d.get("type"), {})
+        if not isinstance(sym, dict):
+            sym = {}
         wi = wire_by_device.get(d["id"], {"runs": 0, "total_in": 0.0})
         rows.append([
-            d["id"], d["type"], info.get("label", ""),
-            f"{d['x']:.1f}", f"{d['y']:.1f}",
+            d["id"], d.get("type", ""), sym.get("label", ""),
+            _coerce_pos(d.get("x")), _coerce_pos(d.get("y")),
             wi["runs"], f"{wi['total_in']:.2f}",
             format_length(wi["total_in"]) if wi["total_in"] else "--",
         ])
@@ -88,7 +107,12 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
                    and symbol_types is not None
                    and cable_types is not None)
     for i, wr in enumerate(wire_routes):
-        length_in = wr.get("length_in") or 0
+        if not isinstance(wr, dict):
+            continue
+        try:
+            length_in = float(wr.get("length_in") or 0)
+        except (TypeError, ValueError):
+            length_in = 0.0
         if can_resolve:
             # Lazy import to avoid a top-level cycle (cwt.bom imports
             # are fine, but the symmetric expectation is bom needs nothing
@@ -100,11 +124,15 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
             cable_cell = effective + ("" if explicit else " (auto)")
         else:
             cable_cell = wr.get("cable_type") or ""
+        # Segment count = points-1, but tolerate missing/short/non-list
+        # points (corrupted entry) — emit 0 rather than crashing the row.
+        points = wr.get("points")
+        n_segs = max(0, len(points) - 1) if isinstance(points, list) else 0
         rows.append([
             i + 1,
             wr.get("device_id") or "(unassigned)",
             cable_cell,
-            len(wr["points"]) - 1,
+            n_segs,
             f"{length_in:.2f}",
             format_length(length_in) if length_in else "--",
         ])

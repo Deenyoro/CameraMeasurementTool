@@ -45,3 +45,22 @@ def test_redo_after_undo_clears_again():
     cmd.undo()
     cmd.do()
     assert "fov" not in devs[0]
+
+
+def test_clear_drops_non_dict_fov_without_snapshot():
+    """If a device's 'fov' is a corrupted non-dict (hand-edited project
+    file), ClearFovCmd.do should pop the key without trying to snapshot
+    it — dict(str) would crash on iteration. Undo doesn't try to
+    restore the corrupt value either."""
+    devs = [
+        {"id": "s1", "type": "MD", "fov": "corrupted-string"},
+        {"id": "s2", "type": "MD", "fov": {"lens_mm": 6.0}},  # well-formed
+    ]
+    cmd = cwt.ClearFovCmd(types.SimpleNamespace(), list(devs))
+    cmd.do()
+    assert "fov" not in devs[0]
+    assert "fov" not in devs[1]
+    cmd.undo()
+    # Well-formed entry comes back; corrupted one stays gone.
+    assert "fov" not in devs[0]
+    assert devs[1]["fov"] == {"lens_mm": 6.0}
