@@ -180,11 +180,15 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
     catalog-level state (cable_types, annotations) that older files
     may have stored alongside the wire routes — silently dropping them
     on first save would lose the user's customizations."""
+    # Coerce container fields the same way _load_v2 does, so a malformed
+    # v1 file doesn't crash the migration.
+    raw_wires = data.get("wire_routes", [])
+    raw_anns  = data.get("annotations", [])
     floor = FloorState(
         id="F1", name="First Floor", elevation_ft=0.0,
         drawio_file=os.path.basename(drawio_path),
-        wire_routes=list(data.get("wire_routes", [])),
-        annotations=list(data.get("annotations", [])),
+        wire_routes=list(raw_wires) if isinstance(raw_wires, list) else [],
+        annotations=list(raw_anns) if isinstance(raw_anns, list) else [],
     )
     try:
         ndid = int(data.get("next_device_id", 100) or 100)
@@ -197,10 +201,12 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
         sf = None
     raw_unit = data.get("unit", "ft-in")
     unit = raw_unit if isinstance(raw_unit, str) and raw_unit else "ft-in"
+    raw_ct = data.get("cable_types", {})
+    cable_types = dict(raw_ct) if isinstance(raw_ct, dict) else {}
     return ProjectState(
         version=2, active_floor="F1",
         floors=[floor],
-        cable_types=dict(data.get("cable_types", {})),
+        cable_types=cable_types,
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -209,9 +215,15 @@ def _migrate_from_v1(data: dict, drawio_path: str) -> ProjectState:
 
 def _load_v2(data: dict, project_path: str) -> ProjectState:
     floors: list[FloorState] = []
-    wires_by_floor = data.get("wire_routes_by_floor", {})
-    annotations_by_floor = data.get("annotations_by_floor", {})
-    for f in data.get("floors", []):
+    # Container fields should be dicts/lists; treat anything else as empty.
+    raw_wbf = data.get("wire_routes_by_floor", {})
+    wires_by_floor = raw_wbf if isinstance(raw_wbf, dict) else {}
+    raw_abf = data.get("annotations_by_floor", {})
+    annotations_by_floor = raw_abf if isinstance(raw_abf, dict) else {}
+    raw_floors = data.get("floors", [])
+    if not isinstance(raw_floors, list):
+        raw_floors = []
+    for f in raw_floors:
         # Defensive — id + drawio_file are required, but a corrupted
         # project file may have neither. Skip the floor entry rather
         # than crashing the entire load.
@@ -219,21 +231,39 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             continue
         fid = f.get("id")
         drawio_file = f.get("drawio_file")
-        if not fid or not drawio_file:
+        if not fid or not drawio_file or not isinstance(fid, str):
             continue
         try:
             elev = float(f.get("elevation_ft", 0))
         except (TypeError, ValueError):
             elev = 0.0
+        # alignment may have been hand-edited to a non-dict; fall back.
+        raw_align = f.get("alignment", IDENTITY_ALIGNMENT)
+        alignment = (dict(raw_align) if isinstance(raw_align, dict)
+                     else dict(IDENTITY_ALIGNMENT))
+        # anchor_points: list of [x, y] pairs; skip malformed entries
+        # instead of crashing the load on one bad row.
+        raw_anchors = f.get("anchor_points", [])
+        anchors: list[list[float]] = []
+        if isinstance(raw_anchors, list):
+            for p in raw_anchors:
+                try:
+                    anchors.append([float(p[0]), float(p[1])])
+                except (TypeError, ValueError, IndexError):
+                    continue
+        # wire/annotation per-floor lists default to [] when not present
+        # OR not list-shaped.
+        raw_wires = wires_by_floor.get(fid, [])
+        raw_anns  = annotations_by_floor.get(fid, [])
         floors.append(FloorState(
             id=fid,
-            name=f.get("name", fid),
+            name=f.get("name", fid) if isinstance(f.get("name", fid), str) else fid,
             elevation_ft=elev,
             drawio_file=drawio_file,
-            alignment=dict(f.get("alignment", IDENTITY_ALIGNMENT)),
-            anchor_points=[list(p) for p in f.get("anchor_points", [])],
-            wire_routes=list(wires_by_floor.get(fid, [])),
-            annotations=list(annotations_by_floor.get(fid, [])),
+            alignment=alignment,
+            anchor_points=anchors,
+            wire_routes=list(raw_wires) if isinstance(raw_wires, list) else [],
+            annotations=list(raw_anns) if isinstance(raw_anns, list) else [],
         ))
     # next_device_id may be a hand-edited string in legacy files —
     # coerce safely instead of letting int() raise.
@@ -256,13 +286,18 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
     raw_active = data.get("active_floor", floors[0].id if floors else "F1")
     active_floor = (raw_active if isinstance(raw_active, str) and raw_active
                     else (floors[0].id if floors else "F1"))
+    # cable_types must be dict-shaped; risers must be list-shaped.
+    raw_ct = data.get("cable_types", {})
+    cable_types = dict(raw_ct) if isinstance(raw_ct, dict) else {}
+    raw_risers = data.get("risers", [])
+    risers = list(raw_risers) if isinstance(raw_risers, list) else []
     return ProjectState(
         version=2,
         project_name=project_name,
         active_floor=active_floor,
         floors=floors,
-        cable_types=dict(data.get("cable_types", {})),
-        risers=list(data.get("risers", [])),
+        cable_types=cable_types,
+        risers=risers,
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,

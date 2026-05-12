@@ -224,6 +224,38 @@ def test_load_project_handles_non_numeric_next_device_id(tmp_path):
     assert proj.scale_factor is None
 
 
+def test_load_project_coerces_wrong_typed_containers(tmp_path):
+    """Container fields (floors, cable_types, risers, wire_routes_by_floor,
+    annotations_by_floor, anchor_points) could be the wrong shape after a
+    hand-edit. Loader should fall back to empty containers, not crash."""
+    import json
+    p = tmp_path / "bad_containers.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "active_floor": "F1",
+        "floors": [
+            {"id": "F1", "name": "G", "elevation_ft": 0,
+             "drawio_file": "F1.drawio",
+             "alignment": "not a dict",                # wrong type
+             "anchor_points": [[1, 2], "not a pair", [3]],  # mix of bad
+             }
+        ],
+        "wire_routes_by_floor": "should be a dict",   # wrong type
+        "annotations_by_floor": ["also wrong"],
+        "cable_types": "not a dict either",
+        "risers": "definitely not a list",
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    assert len(proj.floors) == 1
+    f1 = proj.floors[0]
+    assert f1.alignment == mf.IDENTITY_ALIGNMENT
+    assert f1.anchor_points == [[1.0, 2.0]]  # only the well-formed pair
+    assert f1.wire_routes == []
+    assert f1.annotations == []
+    assert proj.cable_types == {}
+    assert proj.risers == []
+
+
 def test_load_project_coerces_wrong_typed_fields(tmp_path):
     """A hand-edited project file could carry the wrong type for fields
     that downstream consumers (StringVar, title bar) assume are strings.
