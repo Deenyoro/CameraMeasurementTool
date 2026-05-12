@@ -6118,6 +6118,7 @@ class CameraWireTool:
                                           foreground="#7fc4ff",
                                           selectbackground="#222244",
                                           selectforeground="#7fc4ff")
+            devices_by_id = {d["id"]: d for d in self.devices}
             for ri, route in entries:
                 self._filtered_wire_indices.append(ri)
                 if route["length_in"] is not None:
@@ -6125,9 +6126,15 @@ class CameraWireTool:
                 else:
                     length_str = f'{route["length_px"]:.0f}px'
                 n_segs = len(route["points"]) - 1
-                cable = route.get("cable_type", "")
-                row = (f'   {n_segs}seg  {length_str}'
-                       + (f"  ({cable})" if cable else ""))
+                # Show the EFFECTIVE cable (explicit override OR resolved
+                # device default) so the user always knows what BOM line
+                # this wire contributes to.
+                explicit = route.get("cable_type")
+                effective = bom_mod.cable_for_route(
+                    route, devices_by_id, self.symbol_types,
+                    self.cable_types)
+                cable_str = effective + ("" if explicit else " (auto)")
+                row = f'   {n_segs}seg  {length_str}  ({cable_str})'
                 self.wire_listbox.insert(tk.END, row)
                 self._wire_listbox_rows.append(ri)
 
