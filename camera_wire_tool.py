@@ -4658,6 +4658,11 @@ class CameraWireTool:
         if sixteenths == 16:
             whole_in += 1
             sixteenths = 0
+        # The whole_in bump above can roll all 12 inches into the next
+        # foot (e.g. 23.999" → 11" + 16/16 → 12" → "2'-0\"" not "1'-12\"").
+        if whole_in == 12:
+            feet += 1
+            whole_in = 0
         if sixteenths == 0:
             frac_str = ""
         else:
