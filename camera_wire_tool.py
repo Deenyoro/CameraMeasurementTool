@@ -8202,21 +8202,28 @@ class CameraWireTool:
                     cam_count += line.count
                     cam_runs  += line.runs
                     cam_in    += line.total_in
-            # Subtotal rows
-            self._bom_devices_tree.insert(
-                "", tk.END,
-                values=("CAMS", "— cameras subtotal —",
-                        cam_count, "", cam_runs,
-                        self._format_length(cam_in) if cam_in else "—"),
-                tags=("subtotal",),
-            )
-            self._bom_devices_tree.insert(
-                "", tk.END,
-                values=("ALL", "— ALL devices —",
-                        total_count, "", total_runs,
-                        self._format_length(total_in) if total_in else "—"),
-                tags=("total",),
-            )
+            if not inv:
+                # Empty state — skip CAMS/ALL zero rows that look like noise.
+                self._bom_devices_tree.insert(
+                    "", tk.END,
+                    values=("—", "(no devices placed yet)",
+                            "", "", "", ""))
+            else:
+                # Subtotal rows
+                self._bom_devices_tree.insert(
+                    "", tk.END,
+                    values=("CAMS", "— cameras subtotal —",
+                            cam_count, "", cam_runs,
+                            self._format_length(cam_in) if cam_in else "—"),
+                    tags=("subtotal",),
+                )
+                self._bom_devices_tree.insert(
+                    "", tk.END,
+                    values=("ALL", "— ALL devices —",
+                            total_count, "", total_runs,
+                            self._format_length(total_in) if total_in else "—"),
+                    tags=("total",),
+                )
             self._bom_devices_tree.tag_configure("cam",      foreground="#FFD060")
             self._bom_devices_tree.tag_configure("other",    foreground="#A0C0FF")
             self._bom_devices_tree.tag_configure("subtotal",
