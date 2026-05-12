@@ -3328,10 +3328,16 @@ class CameraWireTool:
         for d in self.devices:
             info = self.symbol_types.get(d["type"], {})
             label = info.get("label", d["type"])
+            # Include the effective cable in the search blob so 'Cat6'
+            # surfaces every device whose wires roll up to Cat6 — matches
+            # the Wires + Symbols + Quick-jump filter behavior.
+            cable_for_search = (info.get("cable_type")
+                                or bom_mod.default_cable_for(info))
             if query and not (
                 query in d["id"].lower()
                 or query in d["type"].lower()
                 or query in label.lower()
+                or query in cable_for_search.lower()
             ):
                 continue
             by_type.setdefault(d["type"], []).append(d)
@@ -3344,11 +3350,14 @@ class CameraWireTool:
                                   else 1, c)):
             sym = self.symbol_types.get(t_code, {})
             sym_label = sym.get("label", t_code)
-            cat = ("cameras"  if sym.get("is_camera")
-                   else "run points" if sym.get("is_run_point")
-                   else "devices")
             count = len(by_type[t_code])
-            header = f"── {t_code}  {sym_label[:24]:24s}  ({count} {cat}) ──"
+            # Pluralize the category word — 'run point' / 'run points' etc.
+            cat_singular = ("camera" if sym.get("is_camera")
+                            else "run point" if sym.get("is_run_point")
+                            else "device")
+            cat_word = self._plural(count, cat_singular).split(" ", 1)[1]
+            header = (f"── {t_code}  {sym_label[:24]:24s}  "
+                      f"({count} {cat_word}) ──")
             self.dev_listbox.insert(tk.END, header)
             self._dev_listbox_rows.append(None)
             self.dev_listbox.itemconfig(self.dev_listbox.size() - 1,
