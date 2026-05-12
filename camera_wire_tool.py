@@ -2544,6 +2544,9 @@ class CameraWireTool:
         self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb_bom.pack(side=tk.RIGHT, fill=tk.Y)
         self._bom_tree.bind("<Button-3>", self._on_bom_cable_rclick)
+        # Double-click cable row → jump straight to the most useful action
+        # (highlight all wires using that cable). No second click needed.
+        self._bom_tree.bind("<Double-Button-1>", self._on_bom_cable_dclick)
 
         # Devices-by-symbol Treeview — count + cable + wire totals per type
         ttk.Label(tab_bom, text="By device type",
@@ -2583,6 +2586,10 @@ class CameraWireTool:
         # the cable tree above which DOES have a right-click menu.
         self._bom_devices_tree.bind("<Button-3>",
                                      self._on_bom_devices_rclick)
+        # Double-click → select-all-of-type on the map. Discoverable
+        # default action without forcing the user through the right-click.
+        self._bom_devices_tree.bind("<Double-Button-1>",
+                                     self._on_bom_devices_dclick)
         sb_dev.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Totals — laid out as 4 pills + 1 prominent grand-total
@@ -8317,6 +8324,26 @@ class CameraWireTool:
                 break
         self._edit_symbol_type()
 
+    def _on_bom_devices_dclick(self, event) -> None:
+        """Double-click a 'By device type' row → select-all-of-type on map.
+
+        Same behavior as right-click → 'Select all on map', but reachable
+        with a single gesture. Skips subtotal / placeholder rows.
+        """
+        row = self._bom_devices_tree.identify_row(event.y)
+        if not row:
+            return
+        values = self._bom_devices_tree.item(row, "values")
+        if not values:
+            return
+        code = values[0]
+        if code in ("CAMS", "ALL", "—") or code not in self.symbol_types:
+            return
+        devs = [d for d in self.devices if d["type"] == code]
+        if not devs:
+            return
+        self._select_devices_group(devs)
+
     def _on_bom_cable_rclick(self, event) -> None:
         """Right-click a row in the 'By cable type' Treeview → menu with
         'Highlight wires of this cable' and 'Edit this cable type'."""
@@ -8346,6 +8373,23 @@ class CameraWireTool:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    def _on_bom_cable_dclick(self, event) -> None:
+        """Double-click a 'By cable type' row → highlight wires using it.
+
+        Same as right-click → 'Highlight wires'; saves a step. Skips the
+        empty-state placeholder row.
+        """
+        row = self._bom_tree.identify_row(event.y)
+        if not row:
+            return
+        values = self._bom_tree.item(row, "values")
+        if not values:
+            return
+        cable_id = values[0]
+        if cable_id == "—" or cable_id not in self.cable_types:
+            return
+        self._highlight_wires_by_cable(cable_id)
 
     def _highlight_wires_by_cable(self, cable_id: str) -> None:
         """Select every wire whose effective cable is `cable_id` so they
