@@ -6606,6 +6606,10 @@ class CameraWireTool:
                     "Save As failed",
                     f"Could not initialize destination:\n{e}")
                 return
+        # Clean up the OLD autosave before redirecting paths — without
+        # this, Save As would leave an orphan recovery file at the
+        # original location forever.
+        self._cleanup_autosave()
         self.drawio_path = path
         self.project_path = os.path.splitext(path)[0] + ".wiremap.json"
         # Reset autosave path so it tracks the new project file
