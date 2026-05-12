@@ -1127,7 +1127,12 @@ class CameraWireTool:
             sys.exit(1)
 
         if self.bg_image is None:
-            messagebox.showerror("Error", "No background image found in .drawio file")
+            messagebox.showerror(
+                "Missing background image",
+                "This .drawio file doesn't carry an embedded background "
+                "image — we need one to overlay devices and wires on. "
+                "Open the file in draw.io and add the floor plan as an "
+                "image, then save and reopen here.")
             sys.exit(1)
 
         self.img_w, self.img_h = self.bg_image.size
@@ -7340,7 +7345,9 @@ class CameraWireTool:
         def commit():
             text = text_var.get().strip()
             if not text:
-                messagebox.showerror("Error", "Annotation text can't be empty.")
+                messagebox.showerror(
+                    "Annotation text required",
+                    "Type something into the text field before placing.")
                 return
             # IntVar.get() raises TclError if the user typed non-numeric
             # garbage into the size spinbox — surface a friendly error
@@ -7348,8 +7355,9 @@ class CameraWireTool:
             try:
                 size = int(size_var.get())
             except (tk.TclError, ValueError):
-                messagebox.showerror("Error",
-                                     "Size must be a whole number (8–72).")
+                messagebox.showerror(
+                    "Invalid size",
+                    "Size must be a whole number between 8 and 72.")
                 return
             self._placing_annotation = {
                 "text": text, "color": color_var.get(),
@@ -7480,13 +7488,17 @@ class CameraWireTool:
         def commit():
             t = text_var.get().strip()
             if not t:
-                messagebox.showerror("Error", "Annotation text can't be empty.")
+                messagebox.showerror(
+                    "Annotation text required",
+                    "Annotation text can't be empty. Type something or "
+                    "use Cancel to leave it unchanged.")
                 return
             try:
                 size = int(size_var.get())
             except (tk.TclError, ValueError):
-                messagebox.showerror("Error",
-                                     "Size must be a whole number (8–72).")
+                messagebox.showerror(
+                    "Invalid size",
+                    "Size must be a whole number between 8 and 72.")
                 return
             old = {"text": ann.get("text"),
                    "color": ann.get("color"),
@@ -8197,15 +8209,18 @@ class CameraWireTool:
         def commit():
             t = text_var.get().strip()
             if not t:
-                messagebox.showerror("Error", "Annotation text can't be empty.")
+                messagebox.showerror(
+                    "Annotation text required",
+                    "Type something into the text field before placing.")
                 return
             # IntVar.get() raises TclError on non-numeric typed-in garbage —
             # match the validation in _start_place_annotation.
             try:
                 size = int(size_var.get())
             except (tk.TclError, ValueError):
-                messagebox.showerror("Error",
-                                     "Size must be a whole number (8–72).")
+                messagebox.showerror(
+                    "Invalid size",
+                    "Size must be a whole number between 8 and 72.")
                 return
             dx, dy = self._img_to_drawio(ix, iy)
             ann = {"text": t, "color": color_var.get(),
@@ -9615,7 +9630,12 @@ class CameraWireTool:
         def pick_anchors():
             ref = self._project.get_floor(ref_var.get())
             if ref is None:
-                messagebox.showerror("Error", "Pick a valid reference floor"); return
+                messagebox.showerror(
+                    "No reference floor",
+                    "Pick a reference floor from the dropdown first. "
+                    "Anchor alignment maps THIS floor's coordinates onto "
+                    "the reference floor's frame.")
+                return
             messagebox.showinfo(
                 "Alignment via anchors",
                 f"On {active.id}, click two reference points on the map. Then on "
