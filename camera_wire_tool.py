@@ -6893,11 +6893,16 @@ class CameraWireTool:
             label = f" {tag:5s}  {code:5s}  symbol: {info.get('label', code)} (x{n})"
             candidates.append((label, f"{code} {info.get('label','')} symbol",
                                lambda c=code: self._jump_to_symbol(c)))
+        devices_by_id_qj = {d["id"]: d for d in self.devices}
         for i, r in enumerate(self.wire_routes):
             did = r.get("device_id") or "—"
             length = self._format_length(r.get("length_in") or 0) if r.get("length_in") else f"{r['length_px']:.0f}px"
-            label = f" WIRE  wire #{i+1}  to {did:6s}  {length}"
-            candidates.append((label, f"wire {did} {length}",
+            # Resolve the effective cable so a user typing 'Cat6' finds
+            # both explicit-cable wires and auto-resolved ones.
+            eff_cable = bom_mod.cable_for_route(
+                r, devices_by_id_qj, self.symbol_types, self.cable_types)
+            label = f" WIRE  wire #{i+1}  to {did:6s}  {length}  [{eff_cable}]"
+            candidates.append((label, f"wire {did} {length} {eff_cable}",
                                lambda i=i: self._jump_to_wire(i)))
 
         def populate(query: str = "") -> None:
