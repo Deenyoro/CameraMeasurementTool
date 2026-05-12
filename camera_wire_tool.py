@@ -122,6 +122,10 @@ class Constants:
     # 'Saved Xs ago' indicator tick rate. Cheap; only the label text changes.
     SAVE_INDICATOR_TICK_MS: int = 15_000
 
+    # Hit radius (canvas pixels) for the FOV cone rotation handle.
+    # Used in two click handlers — kept here so they agree.
+    FOV_HANDLE_HIT_RADIUS: float = 12.0
+
 
 C = Constants()
 
@@ -4983,7 +4987,8 @@ class CameraWireTool:
             # -1. FOV rotation handle — highest priority. If the click is
             # on a visible FOV handle, start rotating that camera's cone.
             for did, (hx, hy, ax, ay) in self._fov_handles.items():
-                if math.hypot(event.x - hx, event.y - hy) <= 12:
+                if (math.hypot(event.x - hx, event.y - hy)
+                        <= C.FOV_HANDLE_HIT_RADIUS):
                     dev_obj = next((dd for dd in self.devices
                                     if dd["id"] == did), None)
                     if dev_obj is not None:
@@ -7778,7 +7783,8 @@ class CameraWireTool:
         # Right-click directly on a FOV handle → open the FOV editor for
         # that camera. (Hit-test by canvas coords against cached handles.)
         for did, (hx, hy, _ax, _ay) in self._fov_handles.items():
-            if math.hypot(event.x - hx, event.y - hy) <= 12:
+            if (math.hypot(event.x - hx, event.y - hy)
+                    <= C.FOV_HANDLE_HIT_RADIUS):
                 target = next((dd for dd in self.devices
                                if dd["id"] == did), None)
                 if target is not None:
