@@ -9456,7 +9456,10 @@ class CameraWireTool:
             if messagebox.askyesno("Switch?", f"Switch to {new_id} now?"):
                 self._switch_floor(new_id)
 
-        ttk.Button(dlg, text="Add", command=add).pack(pady=8)
+        btns = ttk.Frame(dlg); btns.pack(pady=8)
+        ttk.Button(btns, text="Add", command=add).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.LEFT, padx=4)
         dlg.bind("<Return>", lambda _e: add())
 
     def _switch_floor(self, floor_id: str) -> None:
