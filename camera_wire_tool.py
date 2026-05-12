@@ -6620,9 +6620,12 @@ class CameraWireTool:
                         if self.symbol_types.get(d["type"], {}).get("is_camera"))
             n_other = n_dev - n_cam
             n_wire = len(self.wire_routes)
+            # Pluralize cleanly — "1 device", "2 devices", not "1 device(s)".
+            dev_word = "device" if n_dev == 1 else "devices"
+            wire_word = "wire run" if n_wire == 1 else "wire runs"
             parts.append(
-                f"{n_dev} device(s) ({n_cam} cameras, {n_other} other)  •  "
-                f"{n_wire} wire run(s)"
+                f"{n_dev} {dev_word} ({n_cam} cameras, {n_other} other)  •  "
+                f"{n_wire} {wire_word}"
             )
 
         self.status_label.config(text="  •  ".join(parts))
@@ -8850,10 +8853,13 @@ class CameraWireTool:
             m.grab_release()
 
     def _select_devices_group(self, devs: list[dict]) -> None:
+        if not devs:
+            return  # nothing to do — guards against empty-group right-clicks
         self.selected_devices = list(devs)
         self._primary_selected = devs[-1]
+        word = "device" if len(devs) == 1 else "devices"
         self._flash_status(
-            f"Selected all {len(devs)} device(s) in this group.")
+            f"Selected all {len(devs)} {word} in this group.")
         self._redraw()
 
     def _zoom_to_devices(self, devs: list[dict]) -> None:
