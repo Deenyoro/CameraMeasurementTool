@@ -8404,13 +8404,14 @@ class CameraWireTool:
         # ---------------- top: cable list with color swatches via tags
         list_frame = ttk.Frame(dlg)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        cur_symbol_hdr = self._bom_currency_var.get() or "$"
         cols = ("id", "label", "cost", "swatch")
         tree = ttk.Treeview(list_frame, columns=cols, show="headings",
                              height=8, selectmode="browse")
         for c, w, anchor, h in (
             ("id",     70,  tk.W, "ID"),
             ("label",  240, tk.W, "Description"),
-            ("cost",   90,  tk.E, "Cost / ft"),
+            ("cost",   90,  tk.E, f"Cost / ft ({cur_symbol_hdr})"),
             ("swatch", 100, tk.W, "Color"),
         ):
             tree.heading(c, text=h)
@@ -8485,13 +8486,14 @@ class CameraWireTool:
 
         # ---------------- repopulation of list
         def repop(select_id: str | None = None) -> None:
+            cur_now = self._bom_currency_var.get() or "$"
             for it in tree.get_children():
                 tree.delete(it)
             for cid, ct in sorted(self.cable_types.items()):
                 color = ct.get("color", "#888888")
                 tree.insert("", tk.END, iid=cid,
                             values=(cid, ct.get("label", cid),
-                                    f"${ct.get('cost_per_ft', 0):.4f}",
+                                    f"{cur_now}{ct.get('cost_per_ft', 0):.4f}",
                                     color),
                             tags=(f"c_{cid}",))
                 # Color swatch via tag-coloring on the swatch column
