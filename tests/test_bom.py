@@ -175,3 +175,42 @@ def test_rollup_handles_corrupted_cable_type_entry():
     cat6 = next((l for l in rep.lines if l.cable_id == "Cat6"), None)
     assert cat6 is not None
     assert cat6.cost_per_ft == 0.0
+
+
+def test_write_csv_is_atomic_no_partial_file_on_failure(tmp_path, monkeypatch):
+    """Force os.replace to raise after the tmp write, and confirm the
+    destination doesn't exist + the staging tmp gets cleaned up.
+    Validates the tmp+rename + cleanup-on-failure contract."""
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 1200.0}]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                      waste_factor=1.10, tax_rate=0.08)
+    target = tmp_path / "bom.csv"
+    # Patch os.replace as imported by cwt.bom so the rename fails
+    def boom(_src, _dst):
+        raise OSError("simulated rename failure")
+    monkeypatch.setattr(bom.os, "replace", boom)
+    raised = False
+    try:
+        bom.write_csv(rep, str(target))
+    except OSError:
+        raised = True
+    assert raised, "expected the simulated rename failure to surface"
+    # Neither the destination nor the staging tmp should survive
+    assert not target.exists(), "destination must not exist after failure"
+    assert not (tmp_path / "bom.csv.tmp").exists(), "tmp must be cleaned up"
+
+
+def test_write_csv_round_trip(tmp_path):
+    """Sanity check — atomic write actually produces a valid CSV at the
+    destination path (regression for the tmp+rename refactor)."""
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 1200.0}]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                      waste_factor=1.10, tax_rate=0.08)
+    target = tmp_path / "bom.csv"
+    bom.write_csv(rep, str(target), currency="€")
+    assert target.exists()
+    contents = target.read_text(encoding="utf-8")
+    assert "GRAND TOTAL" in contents
+    assert "€" in contents
