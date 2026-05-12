@@ -3721,6 +3721,10 @@ class CameraWireTool:
             ann = {**self._placing_annotation, "x": dx, "y": dy}
             self._execute(AddAnnotationCmd(self, ann))
             self._placing_annotation = None
+            # Clear the sentinel so it can't leak into a later
+            # _update_status / banner if the user re-enters PLACE_DEVICE
+            # without picking a new symbol first.
+            self._place_type = None
             self._set_mode(Mode.MOVE)
             self._post_command_refresh()
             self._flash_status(
