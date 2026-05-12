@@ -107,6 +107,14 @@ class Constants:
     # Initial render delay
     INITIAL_RENDER_DELAY_MS: int = 150
 
+    # Periodic autosave interval — short enough to be useful for crash
+    # recovery, long enough that the disk I/O is invisible to the user.
+    AUTOSAVE_INTERVAL_MS: int = 60_000
+
+    # Settings-persistence debounce — coalesces rapid-fire setvar changes
+    # (e.g. typing into the BOM tax field) into a single disk write.
+    SETTINGS_DEBOUNCE_MS: int = 250
+
 
 C = Constants()
 
@@ -6198,7 +6206,7 @@ class CameraWireTool:
                 pass
         try:
             self._settings_save_id = self.root.after(
-                250, self._do_persist_user_settings)
+                C.SETTINGS_DEBOUNCE_MS, self._do_persist_user_settings)
         except tk.TclError:
             # Root window already destroyed (e.g. during shutdown trace)
             self._do_persist_user_settings()
@@ -6965,7 +6973,8 @@ class CameraWireTool:
                 self.root.after_cancel(self._autosave_id)
             except tk.TclError:
                 pass
-        self._autosave_id = self.root.after(60_000, self._auto_save_tick)
+        self._autosave_id = self.root.after(
+            C.AUTOSAVE_INTERVAL_MS, self._auto_save_tick)
 
     def _auto_save_tick(self) -> None:
         self._autosave_id = None
