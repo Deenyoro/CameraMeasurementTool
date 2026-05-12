@@ -199,12 +199,25 @@ def write_pdf_report(
         story.append(Paragraph(f"Calibration: 1 px = {scale_factor:.4f} inches", body))
     story.append(Spacer(1, 12))
 
-    # Headline numbers
-    grand_in = sum((wr.get("length_in") or 0) for wr in wire_routes)
+    # Headline numbers — defensive against hand-edited project files
+    # (matching the malformed-input tolerance in the CSV exporters and
+    # bom.rollup).
+    def _safe_len_in(wr):
+        if not isinstance(wr, dict):
+            return 0.0
+        try:
+            return float(wr.get("length_in") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    def _is_camera_dev(d):
+        if not isinstance(d, dict) or "type" not in d:
+            return False
+        sym = symbol_types.get(d["type"], {})
+        return isinstance(sym, dict) and sym.get("is_camera")
+    grand_in = sum(_safe_len_in(wr) for wr in wire_routes)
     head_data = [
         ["Total devices", str(len(devices))],
-        ["Cameras", str(sum(1 for d in devices
-                            if symbol_types.get(d["type"], {}).get("is_camera")))],
+        ["Cameras", str(sum(1 for d in devices if _is_camera_dev(d)))],
         ["Wire runs", str(len(wire_routes))],
         ["Total wire", format_length(grand_in)],
         ["Material cost (subtotal)", f"{currency}{bom_report.subtotal:,.2f}"],
@@ -272,12 +285,20 @@ def write_pdf_report(
         riser_data = [["From floor", "From device", "To floor", "To device",
                        "Vertical (ft)", "Cable"]]
         for r in risers:
+            if not isinstance(r, dict):
+                continue
             frm = r.get("from", {})
             to = r.get("to", {})
+            if not isinstance(frm, dict): frm = {}
+            if not isinstance(to, dict):  to = {}
+            try:
+                vert = f"{float(r.get('vertical_ft', 0) or 0):.1f}"
+            except (TypeError, ValueError):
+                vert = "—"
             riser_data.append([
                 frm.get("floor", ""), frm.get("device_id", ""),
                 to.get("floor", ""), to.get("device_id", ""),
-                f"{r.get('vertical_ft', 0):.1f}",
+                vert,
                 r.get("cable_type", ""),
             ])
         riser_table = Table(riser_data)
@@ -298,16 +319,25 @@ def write_pdf_report(
     dev_data = [["ID", "Type", "Label", "Wire runs", "Total length"]]
     wire_by_device: dict[str, dict] = {}
     for wr in wire_routes:
+        if not isinstance(wr, dict):
+            continue
         did = wr.get("device_id")
         if not did: continue
         wire_by_device.setdefault(did, {"runs": 0, "total_in": 0.0})
         wire_by_device[did]["runs"] += 1
-        wire_by_device[did]["total_in"] += (wr.get("length_in") or 0)
+        try:
+            wire_by_device[did]["total_in"] += float(wr.get("length_in") or 0)
+        except (TypeError, ValueError):
+            pass
     for d in devices:
-        info = symbol_types.get(d["type"], {})
+        if not isinstance(d, dict) or "id" not in d:
+            continue
+        info = symbol_types.get(d.get("type"), {})
+        if not isinstance(info, dict):
+            info = {}
         wi = wire_by_device.get(d["id"], {"runs": 0, "total_in": 0.0})
         dev_data.append([
-            d["id"], d["type"], info.get("label", ""),
+            d["id"], d.get("type", ""), info.get("label", ""),
             str(wi["runs"]),
             format_length(wi["total_in"]) if wi["total_in"] else "—",
         ])
