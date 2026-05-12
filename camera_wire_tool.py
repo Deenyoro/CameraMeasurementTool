@@ -5578,10 +5578,14 @@ class CameraWireTool:
                             pass
                     text = "\n".join(msg_lines)
                     # Position the popup just below+right of the cursor
-                    # (clamped to canvas so it doesn't fall off the edge)
+                    # (clamped to canvas so it doesn't fall off the edge).
+                    # Size the popup to the longest line — matches the wire
+                    # hover popup behavior and avoids the trailing whitespace
+                    # the old fixed 364px width left on short device labels.
                     cw = self.canvas.winfo_width() or 800
                     ch = self.canvas.winfo_height() or 600
-                    box_w, box_h = 14 * 26, 22 * len(msg_lines)
+                    box_w = max(180, 8 * max(len(s) for s in msg_lines))
+                    box_h = 22 * len(msg_lines)
                     px = event.x + 18
                     py = event.y + 18
                     if px + box_w > cw: px = event.x - 18 - box_w
