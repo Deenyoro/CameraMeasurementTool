@@ -1555,7 +1555,8 @@ class CameraWireTool:
             for d in self.selected_devices
         ]
         self._flash_status(
-            f"Copied {len(self._device_clipboard)} device(s) to clipboard.",
+            f"Copied {self._plural(len(self._device_clipboard), 'device')} "
+            f"to clipboard.",
             ttl_ms=2500,
         )
 
@@ -1718,7 +1719,8 @@ class CameraWireTool:
         self.selected_device = new_devices[0]
         self._post_command_refresh()
         self._flash_status(
-            f"Duplicated {len(new_devices)} device(s). Ctrl+Z to undo.",
+            f"Duplicated {self._plural(len(new_devices), 'device')}. "
+            "Ctrl+Z to undo.",
             ttl_ms=2500)
 
     def _paste_devices(self, event_=None) -> None:
@@ -1779,7 +1781,7 @@ class CameraWireTool:
         self._primary_selected = new_devices[-1]
         self._post_command_refresh()
         self._flash_status(
-            f"Pasted {len(new_devices)} device(s). "
+            f"Pasted {self._plural(len(new_devices), 'device')}. "
             "Drag to move; Ctrl+Z to undo.",
             ttl_ms=3500,
         )
@@ -1803,7 +1805,8 @@ class CameraWireTool:
         self.selected_devices = list(target)
         self._primary_selected = target[-1]
         self._flash_status(
-            f"Selected all {len(target)} device(s). Press Del to bulk-delete.",
+            f"Selected all {self._plural(len(target), 'device')}. "
+            "Press Del to bulk-delete.",
         )
         self._redraw()
 
@@ -4631,6 +4634,15 @@ class CameraWireTool:
             return f"Scale:  1 px = {cm_per_px:.3f} cm"
         return f"Scale:  1 px = {sf:.4f}\""
 
+    @staticmethod
+    def _plural(n: int, singular: str, plural: str | None = None) -> str:
+        """Return 'N <noun>' with the right plural ending — kills the
+        '1 device(s)' awkwardness that crept into a dozen flash messages.
+
+        Defaults plural to singular + 's' (works for device/wire/run/symbol/
+        camera/point/etc.). Pass explicit `plural` for irregulars."""
+        return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
     def _format_length(self, inches) -> str:
         if inches is None:
             return "--"
@@ -5313,7 +5325,7 @@ class CameraWireTool:
                                            else self._primary_selected)
                 if hits:
                     self._flash_status(
-                        f"Lasso selected {len(hits)} device(s).",
+                        f"Lasso selected {self._plural(len(hits), 'device')}.",
                         ttl_ms=2500)
                 else:
                     self._flash_status("Lasso: nothing inside the box.",
@@ -5962,8 +5974,8 @@ class CameraWireTool:
         total_str = (f", total {self._format_length(total)}" if total else "")
         if not messagebox.askyesno(
             "Delete",
-            f"Delete {len(routes_to_remove)} wire run(s){total_str}?\n\n"
-            f"Undo with Ctrl+Z."):
+            f"Delete {self._plural(len(routes_to_remove), 'wire run')}"
+            f"{total_str}?\n\nUndo with Ctrl+Z."):
             return
         # Issue DeleteWireCmd in reverse-index order so insert positions
         # stay valid for undo.
@@ -5971,7 +5983,8 @@ class CameraWireTool:
             self._execute(DeleteWireCmd(self, ridx, route))
         self._post_command_refresh()
         self._flash_status(
-            f"Deleted {len(routes_to_remove)} wire(s). Ctrl+Z to undo.",
+            f"Deleted {self._plural(len(routes_to_remove), 'wire')}. "
+            "Ctrl+Z to undo.",
             ttl_ms=3000)
 
     def _cycle_device(self, direction: int) -> None:
@@ -6050,7 +6063,7 @@ class CameraWireTool:
                                       pad=120)
             n = len(self.selected_devices)
             self.status_label.config(
-                text=f"Zoomed to {n} selected device(s).")
+                text=f"Zoomed to {self._plural(n, 'selected device')}.")
             return
         self.status_label.config(
             text="Nothing selected — click a device or wire first, then press Z.")
@@ -6347,8 +6360,8 @@ class CameraWireTool:
         self._post_command_refresh()
         label = cable_id or "auto (device default)"
         self._flash_status(
-            f"Set cable type → {label} on {len(entries)} wire(s). "
-            f"Ctrl+Z to undo.",
+            f"Set cable type → {label} on "
+            f"{self._plural(len(entries), 'wire')}. Ctrl+Z to undo.",
             ttl_ms=3000)
 
     def _on_wire_listbox_rclick(self, event) -> None:
@@ -6575,13 +6588,13 @@ class CameraWireTool:
         total_str = (f", total {self._format_length(total)}" if total else "")
         if not messagebox.askyesno(
                 "Clear all wires?",
-                f"Remove all {n} wire run(s){total_str}?\n\n"
+                f"Remove all {self._plural(n, 'wire run')}{total_str}?\n\n"
                 f"This is undoable (Ctrl+Z)."):
             return
         self._execute(ClearWiresCmd(self, self.wire_routes))
         self._post_command_refresh()
         self._flash_status(
-            f"Cleared {n} wire run(s). Ctrl+Z to undo.",
+            f"Cleared {self._plural(n, 'wire run')}. Ctrl+Z to undo.",
             ttl_ms=3500)
 
     # ============================================================ Status
@@ -8488,7 +8501,8 @@ class CameraWireTool:
                 continue
         self._redraw()
         self._flash_status(
-            f"Highlighted {len(matching)} wire(s) using {cable_id}.",
+            f"Highlighted {self._plural(len(matching), 'wire')} "
+            f"using {cable_id}.",
             ttl_ms=3500,
         )
 
