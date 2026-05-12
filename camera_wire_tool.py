@@ -3880,12 +3880,19 @@ class CameraWireTool:
         of the viewport."""
         ix, iy = self._drawio_to_img(dx, dy)
         cx, cy = self._img_to_canvas(ix, iy)
+        def _safe_delete(tag):
+            # If the user closed the window before all three rings expired,
+            # the canvas is gone — TclError instead of letting it spill.
+            try:
+                self.canvas.delete(tag)
+            except tk.TclError:
+                pass
         for i, (r, color) in enumerate([(40, "#FFFF00"), (28, "#FFD060"),
                                          (16, "#FF8000")]):
             tag = f"_flash_{new_id}_{i}"
             self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
                                     outline=color, width=3, tags=tag)
-            self.root.after(400 + i * 200, lambda t=tag: self.canvas.delete(t))
+            self.root.after(400 + i * 200, lambda t=tag: _safe_delete(t))
 
     # ============================================================ Coords
     def _drawio_to_img(self, dx, dy):
