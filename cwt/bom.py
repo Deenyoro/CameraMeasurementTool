@@ -243,7 +243,13 @@ def device_inventory(
         if cameras_only and not symbol_types.get(dt, {}).get("is_camera"):
             continue
         runs[dt] = runs.get(dt, 0) + 1
-        totals[dt] = totals.get(dt, 0.0) + (wr.get("length_in") or 0)
+        # Same defensive coerce as the rollup loop — a hand-edited
+        # length_in='twelve' would TypeError on '+='.
+        try:
+            inc = float(wr.get("length_in") or 0)
+        except (TypeError, ValueError):
+            inc = 0.0
+        totals[dt] = totals.get(dt, 0.0) + inc
 
     out: list[DeviceInventoryLine] = []
     seen = set()
