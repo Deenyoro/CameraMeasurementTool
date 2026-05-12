@@ -9143,6 +9143,20 @@ class CameraWireTool:
 
         ttk.Label(form, text="Azimuth (°, 0=up):").grid(row=row, column=0, sticky=tk.W, pady=2)
         az_var = tk.DoubleVar(value=float(fov.get("azimuth_deg", 0.0)))
+        # The Scale stores raw floats — without quantizing, the bound Entry
+        # ends up showing '247.39573528...' as the user drags. Round to 1
+        # decimal on every write so the Entry stays readable. Re-entrancy
+        # is safe: setting an already-rounded value is a no-op for the
+        # trace callback.
+        def _round_az(*_):
+            try:
+                v = az_var.get()
+            except tk.TclError:
+                return
+            rounded = round(v, 1)
+            if abs(v - rounded) > 1e-9:
+                az_var.set(rounded)
+        az_var.trace_add("write", _round_az)
         ttk.Scale(form, from_=0, to=360, variable=az_var, orient=tk.HORIZONTAL,
                   length=200).grid(row=row, column=1, sticky=tk.W, padx=4)
         ttk.Entry(form, textvariable=az_var, width=8).grid(row=row, column=2, padx=4); row += 1
