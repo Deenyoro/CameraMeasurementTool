@@ -334,6 +334,39 @@ def test_save_project_is_atomic_no_partial_file_on_failure(tmp_path, monkeypatch
         "tmp staging file must be cleaned up"
 
 
+def test_save_project_skips_malformed_wires_and_annotations(tmp_path):
+    """save_project should not propagate corrupt in-memory state to disk —
+    if a stray string sneaks into FloorState.wire_routes or .annotations
+    (post-recovery, hand-mutated, etc.), the writer should filter it out
+    rather than crash on list(wr['points']) or write garbage."""
+    floor = mf.FloorState(
+        id="F1", name="First", elevation_ft=0.0, drawio_file="F1.drawio",
+        wire_routes=[
+            "stray string",                                 # skipped
+            {"points": "not a list", "device_id": "s1"},    # skipped
+            {"points": [(0, 0)],                            # skipped — <2 pts
+             "device_id": "s1"},
+            {"points": [(0, 0), (1, 1)], "device_id": "s2",
+             "cable_type": "Cat6"},                          # kept
+        ],
+        annotations=[
+            "not a dict",                                    # skipped
+            {"text": "Server Room", "x": 100, "y": 200},     # kept
+        ],
+    )
+    proj = mf.ProjectState(floors=[floor])
+    target = tmp_path / "p.wiremap.json"
+    mf.save_project(proj, str(target))
+    data = json.loads(target.read_text(encoding="utf-8"))
+    wires = data["wire_routes_by_floor"]["F1"]
+    assert len(wires) == 1
+    assert wires[0]["device_id"] == "s2"
+    assert wires[0]["cable_type"] == "Cat6"
+    anns = data["annotations_by_floor"]["F1"]
+    assert len(anns) == 1
+    assert anns[0]["text"] == "Server Room"
+
+
 def test_save_project_round_trip(tmp_path):
     """Atomic write actually produces a loadable v2 file at the
     destination (regression for the tmp+rename refactor)."""

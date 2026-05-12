@@ -314,6 +314,29 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
     )
 
 
+def _serialize_wire(wr: dict) -> dict | None:
+    """Build the on-disk wire entry from an in-memory route. Returns
+    None when the route is too malformed to round-trip safely (skipped
+    by caller) so we don't write garbage into the project file."""
+    if not isinstance(wr, dict):
+        return None
+    raw_pts = wr.get("points")
+    if not isinstance(raw_pts, list):
+        return None
+    points: list[list[float]] = []
+    for p in raw_pts:
+        try:
+            points.append([float(p[0]), float(p[1])])
+        except (TypeError, ValueError, IndexError):
+            continue
+    if len(points) < 2:
+        return None
+    out = {"points": points, "device_id": wr.get("device_id")}
+    if wr.get("cable_type"):
+        out["cable_type"] = wr["cable_type"]
+    return out
+
+
 def save_project(project: ProjectState, project_path: str) -> None:
     """Write a v2 project file."""
     data = {
@@ -333,16 +356,13 @@ def save_project(project: ProjectState, project_path: str) -> None:
         ],
         "cable_types": project.cable_types,
         "wire_routes_by_floor": {
-            f.id: [
-                {"points": [list(p) for p in wr["points"]],
-                 "device_id": wr.get("device_id"),
-                 **({"cable_type": wr["cable_type"]} if wr.get("cable_type") else {})}
-                for wr in f.wire_routes
-            ]
+            f.id: [out for out in (_serialize_wire(wr) for wr in f.wire_routes)
+                   if out is not None]
             for f in project.floors
         },
         "annotations_by_floor": {
-            f.id: list(f.annotations) for f in project.floors
+            f.id: [a for a in f.annotations if isinstance(a, dict)]
+            for f in project.floors
         },
         "risers": project.risers,
         "scale_factor": project.scale_factor,
