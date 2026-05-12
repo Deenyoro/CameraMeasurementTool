@@ -1914,6 +1914,17 @@ class CameraWireTool:
         # View
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
+        def _refresh_view_menu_state():
+            try:
+                has_sel = bool(self.selected_devices) or bool(
+                    self.wire_listbox.curselection()
+                    if hasattr(self, "wire_listbox") else False)
+                view_menu.entryconfig(
+                    "Zoom to Selection",
+                    state=tk.NORMAL if has_sel else tk.DISABLED)
+            except tk.TclError:
+                pass
+        view_menu.config(postcommand=_refresh_view_menu_state)
         view_menu.add_command(label="Fit View",
                               command=lambda: (self._fit_image(), self._redraw()),
                               accelerator="Home")
