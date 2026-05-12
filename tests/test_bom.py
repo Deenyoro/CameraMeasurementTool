@@ -197,6 +197,38 @@ def test_csv_roundtrip(tmp_path):
     assert any("GRAND TOTAL" in r for r in (row for row in rows))
 
 
+def test_rollup_skips_non_dict_wire_route():
+    """A stray string in wire_routes should be skipped, not crash on
+    route.get(...). Companion to the earlier non-dict-cable-type and
+    non-dict-symbol guards."""
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [
+        "this should have been a dict",          # bad
+        {"device_id": "s1", "length_in": 120.0},  # good
+    ]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                      waste_factor=1.0, tax_rate=0.0)
+    cat6 = next(l for l in rep.lines if l.cable_id == "Cat6")
+    # Only the well-formed route contributes (10ft @ $0.20 = $2)
+    assert cat6.runs == 1
+    assert abs(cat6.total_ft - 10.0) < 1e-6
+
+
+def test_rollup_skips_non_dict_device():
+    """A non-dict entry in `devices` shouldn't crash devices_by_id
+    construction. Skip it; well-formed devices still resolve."""
+    devs = [
+        "definitely not a dict",
+        {"id": "s1", "type": "MD"},
+        {"no_id_here": True},                 # missing 'id' key
+    ]
+    routes = [{"device_id": "s1", "length_in": 60.0}]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                      waste_factor=1.0, tax_rate=0.0)
+    assert len(rep.lines) == 1
+    assert rep.lines[0].runs == 1
+
+
 def test_default_cable_for_non_dict_symbol():
     """A corrupted symbol_types entry (string instead of dict) should
     return the generic Cat5e fallback, not AttributeError on .get()."""

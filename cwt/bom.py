@@ -124,12 +124,20 @@ def rollup(
     set. If a route has no length_in (scale not set), it contributes
     zero — the caller should warn the user.
     """
-    devices_by_id = {d["id"]: d for d in devices}
+    # Defensive: a corrupted devices list could carry a non-dict or a
+    # dict missing 'id'. Skip such entries instead of KeyError-ing here.
+    devices_by_id = {d["id"]: d for d in devices
+                     if isinstance(d, dict) and "id" in d}
     totals: dict[str, dict] = {}
     unassigned_runs = 0
     unassigned_in = 0.0
 
     for route in wire_routes:
+        # Skip non-dict wire entries (stray string in the list from a
+        # hand-edited project file). The route.get(...) below would
+        # AttributeError otherwise.
+        if not isinstance(route, dict):
+            continue
         # Defensive coerce — a hand-edited project file could carry
         # length_in='12in' or other non-numeric junk. Treat as zero
         # instead of crashing the rollup with a TypeError on +=.
@@ -236,22 +244,36 @@ def device_inventory(
     Useful for the BOM "by device type" panel — installer can see
     "40 MD cameras, all on Cat6, 950 ft total".
     """
-    devices_by_id = {d["id"]: d for d in devices}
+    # Same defensive id-map construction as rollup.
+    devices_by_id = {d["id"]: d for d in devices
+                     if isinstance(d, dict) and "id" in d}
     counts: dict[str, int] = {}
     runs: dict[str, int] = {}
     totals: dict[str, float] = {}
 
+    def _is_camera(type_code):
+        """Safe is_camera check tolerating non-dict symbol_types entries."""
+        sym = symbol_types.get(type_code, {})
+        return isinstance(sym, dict) and sym.get("is_camera")
+
     for d in devices:
-        if cameras_only and not symbol_types.get(d["type"], {}).get("is_camera"):
+        if not isinstance(d, dict) or "type" not in d:
+            continue
+        if cameras_only and not _is_camera(d["type"]):
             continue
         counts[d["type"]] = counts.get(d["type"], 0) + 1
 
     for wr in wire_routes:
+        if not isinstance(wr, dict):
+            continue
         did = wr.get("device_id")
         if not did or did not in devices_by_id:
             continue
-        dt = devices_by_id[did]["type"]
-        if cameras_only and not symbol_types.get(dt, {}).get("is_camera"):
+        dev = devices_by_id[did]
+        if not isinstance(dev, dict) or "type" not in dev:
+            continue
+        dt = dev["type"]
+        if cameras_only and not _is_camera(dt):
             continue
         runs[dt] = runs.get(dt, 0) + 1
         # Same defensive coerce as the rollup loop — a hand-edited
@@ -266,6 +288,11 @@ def device_inventory(
     seen = set()
     for dt in sorted({*counts.keys(), *runs.keys()}):
         sym = symbol_types.get(dt, {})
+        # Defensive: a corrupted symbol_types entry could be non-dict.
+        # default_cable_for already handles that case; we still need to
+        # avoid sym.get() crashing on the label/cable_type reads below.
+        if not isinstance(sym, dict):
+            sym = {}
         cable_id = (sym.get("cable_type")
                     or default_cable_for(sym))
         if cable_id not in cable_types:
