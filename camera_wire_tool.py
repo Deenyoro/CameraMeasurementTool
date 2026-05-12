@@ -5716,6 +5716,11 @@ class CameraWireTool:
             pass
         self.cal_points = []
         self._floor_anchors_picking = None
+        # Clear annotation-placement state so Esc/cancel doesn't leave a
+        # pending '__annotation__' sentinel lingering.
+        if self._place_type == "__annotation__":
+            self._place_type = None
+        self._placing_annotation = None
 
     def _cancel_current(self) -> None:
         """User-initiated cancel (Esc / right-click). Reset state AND
