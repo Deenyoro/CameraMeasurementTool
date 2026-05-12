@@ -237,10 +237,20 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             elev = float(f.get("elevation_ft", 0))
         except (TypeError, ValueError):
             elev = 0.0
-        # alignment may have been hand-edited to a non-dict; fall back.
-        raw_align = f.get("alignment", IDENTITY_ALIGNMENT)
-        alignment = (dict(raw_align) if isinstance(raw_align, dict)
-                     else dict(IDENTITY_ALIGNMENT))
+        # alignment may have been hand-edited to a non-dict OR be a
+        # partial dict missing keys. Normalize: start from IDENTITY, then
+        # overlay any well-typed numeric fields the user provided.
+        # apply_alignment / inverse_alignment do raw dict[] indexing on
+        # all four keys, so missing one would KeyError downstream.
+        alignment = dict(IDENTITY_ALIGNMENT)
+        raw_align = f.get("alignment")
+        if isinstance(raw_align, dict):
+            for k in ("tx", "ty", "scale", "rotation_deg"):
+                if k in raw_align:
+                    try:
+                        alignment[k] = float(raw_align[k])
+                    except (TypeError, ValueError):
+                        pass
         # anchor_points: list of [x, y] pairs; skip malformed entries
         # instead of crashing the load on one bad row.
         raw_anchors = f.get("anchor_points", [])

@@ -224,6 +224,36 @@ def test_load_project_handles_non_numeric_next_device_id(tmp_path):
     assert proj.scale_factor is None
 
 
+def test_load_project_normalizes_partial_alignment(tmp_path):
+    """A hand-edited alignment can be a partial dict (missing tx or scale)
+    or carry non-numeric values for some keys. The loader should fill the
+    missing keys from IDENTITY so apply_alignment / inverse_alignment
+    never KeyError on dict[k] indexing downstream."""
+    import json
+    p = tmp_path / "partial.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "active_floor": "F1",
+        "floors": [
+            {"id": "F1", "name": "G", "elevation_ft": 0,
+             "drawio_file": "F1.drawio",
+             # partial alignment: scale missing, rotation_deg is a string
+             "alignment": {"tx": 5.0, "ty": -3.5, "rotation_deg": "broken"}},
+        ],
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
+    a = proj.floors[0].alignment
+    # All four keys present + the valid user values preserved
+    assert set(a.keys()) == {"tx", "ty", "scale", "rotation_deg"}
+    assert a["tx"] == 5.0
+    assert a["ty"] == -3.5
+    assert a["scale"] == 1.0           # IDENTITY default (missing key)
+    assert a["rotation_deg"] == 0.0    # IDENTITY default (non-numeric)
+    # apply_alignment should now work without raising on the loaded value
+    x, y = mf.apply_alignment((10.0, 20.0), a)
+    assert x == 15.0 and y == 16.5
+
+
 def test_load_project_coerces_wrong_typed_containers(tmp_path):
     """Container fields (floors, cable_types, risers, wire_routes_by_floor,
     annotations_by_floor, anchor_points) could be the wrong shape after a
