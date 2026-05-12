@@ -82,7 +82,16 @@ Full reference in `PLAYBOOK.md`.
 
 ```
 CameraMeasurementTool/
-├── camera_wire_tool.py             # main app
+├── camera_wire_tool.py             # main app (Tk UI + command stack)
+├── cwt/                            # pure-logic modules (no UI deps)
+│   ├── bom.py                      # cable catalog + BOM rollup + CSV writer
+│   ├── export.py                   # PDF + CSV bundle writers
+│   ├── fov.py                      # IEC 62676-4 DORI cone math
+│   ├── lenses.py                   # sensor + lens + install presets
+│   ├── multifloor.py               # v2 project file + anchor alignment
+│   ├── models.py                   # TypedDicts: Device / WireRoute / SymbolType
+│   └── routing.py                  # soft-A* (dormant — auto-route was removed)
+├── tests/                          # pytest suite (136 tests, run with `pytest`)
 ├── PLAYBOOK.md                     # complete architecture + format docs
 ├── README.md / CHANGELOG.md / LICENSE
 ├── pyproject.toml / requirements*.txt
@@ -95,9 +104,6 @@ CameraMeasurementTool/
 └── old/                            # superseded files kept for reference
     └── measure_tool.py             # simpler PNG-only measurement tool
 ```
-
-Future work (per `CHANGELOG.md` roadmap): a `cwt/` Python package for the
-modular refactor, plus `tests/` for the pytest suite.
 
 ## Development
 
