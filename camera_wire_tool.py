@@ -3960,13 +3960,22 @@ class CameraWireTool:
 
     def _do_deferred_redraw(self) -> None:
         self._redraw_pending = False
-        self._redraw()
+        # Window may have been destroyed during the debounce window —
+        # _redraw touches the canvas which would TclError. Silent skip
+        # is better than a spurious entry in the global Tk callback log.
+        try:
+            self._redraw()
+        except tk.TclError:
+            pass
 
     def _settle_redraw(self) -> None:
         """After ~180ms with no further interaction, do one crisp LANCZOS pass."""
         self._settle_id = None
         self._interactive = False
-        self._redraw()
+        try:
+            self._redraw()
+        except tk.TclError:
+            pass
 
     def _on_canvas_configure(self) -> None:
         """Configure handler.
