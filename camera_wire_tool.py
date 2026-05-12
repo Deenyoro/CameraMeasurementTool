@@ -4529,7 +4529,9 @@ class CameraWireTool:
                 sym = self.symbol_types.get(dev["type"], {})
                 cable_id = sym.get("cable_type") or bom_mod.default_cable_for(sym)
         if cable_id and cable_id in self.cable_types:
-            wire_color = self.cable_types[cable_id].get("color", wire_color)
+            ct = self.cable_types[cable_id]
+            if isinstance(ct, dict):
+                wire_color = ct.get("color", wire_color)
         elif did:
             dev = next((d for d in self.devices if d["id"] == did), None)
             if dev:
@@ -6373,7 +6375,11 @@ class CameraWireTool:
         sub.add_separator()
         for cid in sorted(self.cable_types.keys()):
             ct = self.cable_types[cid]
-            label = f"{cid}  ({ct.get('label', cid)[:24]})"
+            # Defensive: a hand-edited cable_types[cid] could be a
+            # string instead of a dict. Treat as empty rather than crash
+            # the menu build with AttributeError on .get().
+            ct_label = (ct.get("label", cid) if isinstance(ct, dict) else cid)
+            label = f"{cid}  ({ct_label[:24]})"
             sub.add_command(label=label,
                              command=lambda c=cid: apply_fn(c))
         return sub
@@ -8517,8 +8523,10 @@ class CameraWireTool:
         cable_id = values[0]
         if cable_id == "—" or cable_id not in self.cable_types:
             return
+        ct = self.cable_types[cable_id]
+        ct_label = ct.get("label", "") if isinstance(ct, dict) else ""
         m = tk.Menu(self.root, tearoff=0)
-        m.add_command(label=f"{cable_id} — {self.cable_types[cable_id].get('label','')}",
+        m.add_command(label=f"{cable_id} — {ct_label}",
                       state=tk.DISABLED)
         m.add_separator()
         m.add_command(
