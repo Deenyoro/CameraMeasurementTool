@@ -222,3 +222,51 @@ def test_load_project_handles_non_numeric_next_device_id(tmp_path):
     proj = mf.load_project(str(p), str(tmp_path / "F1.drawio"))
     assert proj.next_device_id == 100
     assert proj.scale_factor is None
+
+
+def test_save_project_is_atomic_no_partial_file_on_failure(tmp_path, monkeypatch):
+    """If os.replace raises after the tmp write, the destination must
+    not exist and the .tmp staging file must be cleaned up. Locks in
+    the tmp+rename + cleanup contract.
+    """
+    proj = mf.ProjectState(
+        floors=[mf.FloorState(id="F1", name="First", elevation_ft=0.0,
+                               drawio_file="F1.drawio")],
+    )
+    target = tmp_path / "p.wiremap.json"
+
+    def boom(_src, _dst):
+        raise OSError("simulated rename failure")
+    monkeypatch.setattr(mf.os, "replace", boom)
+
+    raised = False
+    try:
+        mf.save_project(proj, str(target))
+    except OSError:
+        raised = True
+
+    assert raised, "expected the simulated rename failure to surface"
+    assert not target.exists(), "destination must not exist after failure"
+    assert not (tmp_path / "p.wiremap.json.tmp").exists(), \
+        "tmp staging file must be cleaned up"
+
+
+def test_save_project_round_trip(tmp_path):
+    """Atomic write actually produces a loadable v2 file at the
+    destination (regression for the tmp+rename refactor)."""
+    proj = mf.ProjectState(
+        project_name="Test",
+        floors=[mf.FloorState(id="F1", name="Ground", elevation_ft=0.0,
+                               drawio_file="F1.drawio")],
+        scale_factor=0.6,
+        unit="ft-in",
+        next_device_id=42,
+    )
+    target = tmp_path / "rt.wiremap.json"
+    mf.save_project(proj, str(target))
+    assert target.exists()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["version"] == 2
+    assert data["project_name"] == "Test"
+    assert data["scale_factor"] == 0.6
+    assert data["next_device_id"] == 42

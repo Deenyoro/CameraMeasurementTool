@@ -292,7 +292,19 @@ def save_project(project: ProjectState, project_path: str) -> None:
         "unit": project.unit,
         "next_device_id": project.next_device_id,
     }
+    # Atomic write: stage to .tmp, then rename. On any failure during
+    # serialization, clean up the staging file so the directory doesn't
+    # accumulate '.wiremap.json.tmp' orphans across crashes. Matches the
+    # pattern used by cwt.bom.write_csv and cwt.export.
     tmp = project_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, project_path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, project_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
