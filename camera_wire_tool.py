@@ -3680,7 +3680,9 @@ class CameraWireTool:
                     "Place on map?",
                     f"Symbol '{new_code}' ({new_info['label']}) created.\n\n"
                     f"Click YES to place an instance on the map now, or NO "
-                    f"to add it later from the Symbols tab → Place Device."):
+                    f"to add it later (Symbols tab → select the row → "
+                    f"'Place on Map' button, or right-click the map → "
+                    f"'Place device here…')."):
                     self.place_type_var.set(new_code)
                     self._start_place_device()
 
