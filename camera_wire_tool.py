@@ -115,6 +115,13 @@ class Constants:
     # (e.g. typing into the BOM tax field) into a single disk write.
     SETTINGS_DEBOUNCE_MS: int = 250
 
+    # After interactive frames (pan / sash drag), wait this long with no
+    # further input before doing a crisp LANCZOS-resampled redraw.
+    SETTLE_REDRAW_MS: int = 180
+
+    # 'Saved Xs ago' indicator tick rate. Cheap; only the label text changes.
+    SAVE_INDICATOR_TICK_MS: int = 15_000
+
 
 C = Constants()
 
@@ -3863,7 +3870,8 @@ class CameraWireTool:
                 self.root.after_cancel(self._settle_id)
             except tk.TclError:
                 pass
-        self._settle_id = self.root.after(180, self._settle_redraw)
+        self._settle_id = self.root.after(
+            C.SETTLE_REDRAW_MS, self._settle_redraw)
         if not self._redraw_pending:
             self._redraw_pending = True
             self.root.after(C.DEBOUNCE_MS, self._do_deferred_redraw)
@@ -3894,7 +3902,8 @@ class CameraWireTool:
             except tk.TclError:
                 pass
         self._redraw()
-        self._settle_id = self.root.after(180, self._settle_redraw)
+        self._settle_id = self.root.after(
+            C.SETTLE_REDRAW_MS, self._settle_redraw)
 
     def _redraw(self) -> None:
         self.canvas.delete("all")
@@ -6960,7 +6969,8 @@ class CameraWireTool:
             self._save_tip.text = tip
         # Re-arm
         try:
-            self.root.after(15_000, self._tick_save_indicator)
+            self.root.after(C.SAVE_INDICATOR_TICK_MS,
+                              self._tick_save_indicator)
         except tk.TclError:
             pass
 
