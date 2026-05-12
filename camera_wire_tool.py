@@ -1617,7 +1617,7 @@ class CameraWireTool:
                 self._zoom_to_devices([cam])
                 self._flash_status(
                     f"Unwired: {cam['id']} ({cam['type']})  —  "
-                    f"{len(unwired)} unwired camera(s) remain.",
+                    f"{self._plural(len(unwired), 'unwired camera')} remain.",
                     ttl_ms=3500)
                 return
 
@@ -3086,7 +3086,7 @@ class CameraWireTool:
             "ReassignWireCmd":    lambda c: (
                 f"reassign wire {c.old_did or '—'} → {c.new_did or '—'}"),
             "SetWireCableTypeCmd": lambda c: (
-                f"set cable type on {len(c.entries)} wire(s)"),
+                f"set cable type on {self._plural(len(c.entries), 'wire')}"),
             "EditCableTypeCmd":   lambda c: (
                 f"delete cable type {c.cable_id}" if c.new_info is None else
                 f"add cable type {c.cable_id}" if c.old_info is None else
@@ -3098,7 +3098,8 @@ class CameraWireTool:
             "RotateFovCmd":       lambda c: (
                 f"rotate FOV {c.device.get('id','?')} → {c.new_az:.0f}°"),
             "ClearFovCmd":        lambda c: (
-                f"clear FOV from {len(c.devices_with_fov)} camera(s)"),
+                f"clear FOV from "
+                f"{self._plural(len(c.devices_with_fov), 'camera')}"),
             "AddAnnotationCmd":   lambda c: f"add annotation '{c.ann.get('text','')[:20]}'",
             "DeleteAnnotationCmd":lambda c: f"delete annotation '{c.ann.get('text','')[:20]}'",
             "EditAnnotationCmd":  lambda c: f"edit annotation",
@@ -3375,10 +3376,12 @@ class CameraWireTool:
                 1 for d in self._filtered_devices
                 if self.symbol_types.get(d["type"], {}).get("is_camera"))
             if query and n_filtered != n_total:
-                txt = (f"{n_filtered} of {n_total} device(s) match "
+                txt = (f"{n_filtered} of "
+                       f"{self._plural(n_total, 'device')} match "
                        f"({n_cam_filtered} cameras)")
             else:
-                txt = f"{n_total} device(s) ({n_cam_filtered} cameras)"
+                txt = (f"{self._plural(n_total, 'device')} "
+                       f"({n_cam_filtered} cameras)")
             self._dev_total_label.config(text=txt)
 
     # ============================================================ Symbol editor dialog
@@ -3716,13 +3719,15 @@ class CameraWireTool:
             1 for w in self.wire_routes if w.get("device_id") in removed_ids
         )
         if removed:
-            wire_clause = (f"\nAll {wires_to_drop} associated wire run(s) "
-                           f"will also be removed."
-                           if wires_to_drop else "")
+            wire_clause = (
+                f"\nAll {self._plural(wires_to_drop, 'associated wire run')} "
+                f"will also be removed."
+                if wires_to_drop else "")
             if not messagebox.askyesno(
                 "Delete Type",
                 f'Delete symbol type "{code}"?\n'
-                f'This will remove all {len(removed)} instance(s) from the map.'
+                f"This will remove all {self._plural(len(removed), 'instance')}"
+                f" from the map."
                 f'{wire_clause}\n\nUndo with Ctrl+Z.',
             ):
                 return
@@ -5112,7 +5117,8 @@ class CameraWireTool:
                     total_in = sum(w.get("length_in", 0) or 0 for w in dev_wires)
                     self.status_label.config(
                         text=f'Selected {dev["id"]} ({dev["type"]}) — '
-                             f'{len(dev_wires)} wire run(s), total: {self._format_length(total_in)}',
+                             f"{self._plural(len(dev_wires), 'wire run')}, "
+                             f"total: {self._format_length(total_in)}",
                     )
                 else:
                     self.status_label.config(
@@ -5576,7 +5582,7 @@ class CameraWireTool:
                                         for w in self.wire_routes
                                         if w.get("device_id") == dev_under["id"])
                         msg_lines.append(
-                            f"  {n_wires} wire run(s), "
+                            f"  {self._plural(n_wires, 'wire run')}, "
                             f"{self._format_length(total_in)}  ")
                     if info.get("is_run_point"):
                         msg_lines.append("  [run point]  ")
@@ -5898,7 +5904,7 @@ class CameraWireTool:
                 self._toggle_device_selection(dev)
                 n = len(self.selected_devices)
                 self.status_label.config(
-                    text=f"{n} device(s) selected. "
+                    text=f"{self._plural(n, 'device')} selected. "
                          "Ctrl+click another to add/remove. "
                          "Right-click or Del to delete all."
                 )
@@ -5935,9 +5941,10 @@ class CameraWireTool:
             wires_to_drop = sum(
                 1 for w in self.wire_routes if w.get("device_id") in sel_ids
             )
-            wire_clause = (f"\n\nThis will also remove {wires_to_drop} "
-                           f"associated wire run(s)."
-                           if wires_to_drop else "")
+            wire_clause = (
+                f"\n\nThis will also remove "
+                f"{self._plural(wires_to_drop, 'associated wire run')}."
+                if wires_to_drop else "")
             if not messagebox.askyesno(
                 "Delete", f"Delete {label}?{wire_clause}\n\nUndo with Ctrl+Z."
             ):
@@ -5951,7 +5958,8 @@ class CameraWireTool:
             self.selected_device = None  # clears multi too
             self._post_command_refresh()
             self._flash_status(
-                (f"Deleted {label} + {wires_to_drop} wire(s). Ctrl+Z to undo."
+                (f"Deleted {label} + {self._plural(wires_to_drop, 'wire')}. "
+                 "Ctrl+Z to undo."
                  if wires_to_drop else
                  f"Deleted {label}. Ctrl+Z to undo."),
                 ttl_ms=3000)
@@ -6641,7 +6649,8 @@ class CameraWireTool:
             wires = [w for w in self.wire_routes if w.get("device_id") == d["id"]]
             if wires:
                 tot = sum(w.get("length_in", 0) or 0 for w in wires)
-                sel_str += f", {len(wires)} run(s), {self._format_length(tot)}"
+                sel_str += (f", {self._plural(len(wires), 'run')}, "
+                            f"{self._format_length(tot)}")
             parts.append(sel_str)
         elif n_sel > 1:
             parts.append(f"Selected: {n_sel} devices")
@@ -7144,8 +7153,10 @@ class CameraWireTool:
             n_ann = len(data.get("annotations") or [])
         except TypeError:
             n_dev = n_wire = n_ann = 0
-        summary = (f"{n_dev} device(s), {n_wire} wire run(s)"
-                   + (f", {n_ann} annotation(s)" if n_ann else ""))
+        summary = (f"{self._plural(n_dev, 'device')}, "
+                   f"{self._plural(n_wire, 'wire run')}"
+                   + (f", {self._plural(n_ann, 'annotation')}"
+                      if n_ann else ""))
         if not messagebox.askyesno(
             "Recover unsaved changes?",
             f"An auto-save from {when} is newer than the last manual save.\n"
@@ -7979,7 +7990,7 @@ class CameraWireTool:
             if wires_for_dev:
                 menu.add_command(
                     label=f"🗑  Clear all wires for this device "
-                          f"({len(wires_for_dev)} run(s))",
+                          f"({self._plural(len(wires_for_dev), 'run')})",
                     command=lambda d=dev: self._clear_wires_for_device(d),
                 )
             # Quick way to grab every instance of this type — useful for
@@ -8018,11 +8029,11 @@ class CameraWireTool:
             n_wire = len(wire_sel)
             if n_dev > 0:
                 menu.add_command(
-                    label=f"🗑  Delete {n_dev} selected device(s)",
+                    label=f"🗑  Delete {self._plural(n_dev, 'selected device')}",
                     command=self._on_delete_key, accelerator="Del")
             if n_wire > 0:
                 menu.add_command(
-                    label=f"🗑  Delete {n_wire} selected wire(s)",
+                    label=f"🗑  Delete {self._plural(n_wire, 'selected wire')}",
                     command=lambda: (
                         self._delete_selected_wires_multi(list(wire_sel))
                         if n_wire > 1 else self._delete_selected_wire()),
@@ -8344,8 +8355,8 @@ class CameraWireTool:
                 f"Press C or click 'Set Scale' to calibrate.")
         if report.unassigned_runs:
             warns.append(
-                f"⚠ {report.unassigned_runs} unassigned wire(s) — "
-                f"{self._format_length(report.unassigned_inches)}")
+                f"⚠ {self._plural(report.unassigned_runs, 'unassigned wire')}"
+                f" — {self._format_length(report.unassigned_inches)}")
         if warns:
             self._bom_totals_label.config(
                 text="\n  " + "\n  ".join(warns),
@@ -8374,7 +8385,7 @@ class CameraWireTool:
         info = self.symbol_types.get(code, {})
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label=f"{code} — {info.get('label', code)} "
-                            f"({len(devs)} device(s))",
+                            f"({self._plural(len(devs), 'device')})",
                        state=tk.DISABLED)
         m.add_separator()
         m.add_command(
@@ -8803,11 +8814,12 @@ class CameraWireTool:
         m.add_command(label="📐  Draw wire from here…",
                        command=lambda d=device: self._draw_wire_from(d))
         if wires:
-            m.add_command(label=f"🔁  Re-route last wire ({len(wires)} run(s), "
+            m.add_command(label=f"🔁  Re-route last wire "
+                                 f"({self._plural(len(wires), 'run')}, "
                                  f"{self._format_length(wire_total_in)})",
                            command=lambda d=device: self._reroute_last_wire_from(d))
             m.add_command(label=f"🗑  Clear all wires for this device "
-                                 f"({len(wires)} run(s))",
+                                 f"({self._plural(len(wires), 'run')})",
                            command=lambda d=device: self._clear_wires_for_device(d))
         else:
             m.add_command(label="(no wires assigned yet)", state=tk.DISABLED)
@@ -8852,7 +8864,8 @@ class CameraWireTool:
         m.add_command(label=header_text, state=tk.DISABLED)
         m.add_separator()
         m.add_command(
-            label=f"Select all {len(group_indices)} wire(s) in this group",
+            label=f"Select all "
+                  f"{self._plural(len(group_indices), 'wire')} in this group",
             command=lambda r=group_rows: self._select_wire_rows(r))
         # Bulk cable-type set, same as the multi-row right-click in
         # round 63. Operates on the listbox rows (not route indices).
@@ -8863,7 +8876,8 @@ class CameraWireTool:
                 label=f"🎚  Set cable type for all {len(group_indices)}",
                 menu=cable_sub)
         m.add_command(
-            label=f"Delete all {len(group_indices)} wire(s) in this group",
+            label=f"Delete all "
+                  f"{self._plural(len(group_indices), 'wire')} in this group",
             command=lambda r=group_rows: self._delete_selected_wires_multi_force(r))
         try:
             m.tk_popup(event.x_root, event.y_root)
@@ -8939,15 +8953,16 @@ class CameraWireTool:
         total_in = sum(w.get("length_in", 0) or 0 for w in wires)
         if not messagebox.askyesno(
             "Clear wires?",
-            f"Remove all {len(wires)} wire run(s) for {device['id']} "
-            f"({device['type']}) — total {self._format_length(total_in)}?\n\n"
+            f"Remove all {self._plural(len(wires), 'wire run')} "
+            f"for {device['id']} ({device['type']}) — total "
+            f"{self._format_length(total_in)}?\n\n"
             "This is undoable (Ctrl+Z)."):
             return
         self._execute(ClearDeviceWiresCmd(self, device["id"]))
         self._post_command_refresh()
         self.status_label.config(
-            text=f"Cleared {len(wires)} wire run(s) on {device['id']}. "
-                 "Ctrl+Z to undo.")
+            text=f"Cleared {self._plural(len(wires), 'wire run')} "
+                 f"on {device['id']}. Ctrl+Z to undo.")
 
     # ============================================================ Direct wire entry
     def _draw_wire_from(self, device: dict) -> None:
@@ -9021,7 +9036,7 @@ class CameraWireTool:
         self._execute(EditFovCmd(self, entries))
         self._show_fov.set(True)   # auto-enable so the user sees them
         self._post_command_refresh()
-        msg = f"Applied default FOV to {len(entries)} camera(s)."
+        msg = f"Applied default FOV to {self._plural(len(entries), 'camera')}."
         if skipped:
             msg += f" Kept existing FOV on {skipped}."
         self._flash_status(msg + "  Ctrl+Z to undo.", ttl_ms=3500)
@@ -9035,7 +9050,8 @@ class CameraWireTool:
             return
         if not messagebox.askyesno(
             "Clear FOV configs?",
-            f"Remove FOV configuration from {n_have} camera(s)?\n\n"
+            f"Remove FOV configuration from "
+            f"{self._plural(n_have, 'camera')}?\n\n"
             "(They'll revert to the type defaults — cones still show "
             "when 'Show FOV Cones' is on.)\n\nUndo with Ctrl+Z."):
             return
@@ -9043,7 +9059,8 @@ class CameraWireTool:
         self._execute(ClearFovCmd(self, targets))
         self._post_command_refresh()
         self._flash_status(
-            f"Cleared FOV from {n_have} camera(s). Ctrl+Z to undo.")
+            f"Cleared FOV from {self._plural(n_have, 'camera')}. "
+            "Ctrl+Z to undo.")
 
     def _apply_default_fov_to_one(self, device: dict, *,
                                     record: bool = True) -> None:
