@@ -119,7 +119,14 @@ def rollup(
     unassigned_in = 0.0
 
     for route in wire_routes:
-        length_in = route.get("length_in") or 0.0
+        # Defensive coerce — a hand-edited project file could carry
+        # length_in='12in' or other non-numeric junk. Treat as zero
+        # instead of crashing the rollup with a TypeError on +=.
+        raw_len = route.get("length_in") or 0.0
+        try:
+            length_in = float(raw_len)
+        except (TypeError, ValueError):
+            length_in = 0.0
         cid = cable_for_route(route, devices_by_id, symbol_types, cable_types)
         if cid not in totals:
             totals[cid] = {"runs": 0, "total_in": 0.0}

@@ -110,6 +110,26 @@ def test_rollup_includes_risers():
     assert abs(line.subtotal - 4.0) < 1e-6
 
 
+def test_rollup_coerces_non_numeric_length_in():
+    """A hand-edited project file might carry length_in='12in' or None.
+    Rollup should treat malformed lengths as zero, not crash with
+    TypeError when adding to the running total."""
+    devs = [{"id": "s1", "type": "MD"}, {"id": "s2", "type": "MD"}]
+    routes = [
+        {"device_id": "s1", "length_in": "twelve"},   # non-numeric
+        {"device_id": "s1", "length_in": None},        # None
+        {"device_id": "s2", "length_in": 120.0},       # well-formed
+    ]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES)
+    cat6 = next(l for l in rep.lines if l.cable_id == "Cat6")
+    # Only the well-formed 120in (10ft) wire contributes — the others
+    # are silently treated as zero rather than blowing up.
+    assert abs(cat6.total_ft - 10.0) < 1e-6
+    # Run count includes all three (they're real wire entries, just with
+    # bad/missing lengths)
+    assert cat6.runs == 3
+
+
 def test_rollup_handles_malformed_riser_entries():
     """Hand-edited risers may carry non-numeric vertical_ft, a string in
     place of the dict, or missing fields. Rollup should skip those rather
