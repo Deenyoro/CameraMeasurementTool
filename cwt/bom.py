@@ -26,6 +26,12 @@ DEFAULT_CABLE_TYPES: dict[str, dict] = {
 # ---------------- Mapping from device-type categories to default cable
 def default_cable_for(symbol: dict) -> str:
     """Return a sensible default cable_type for a SymbolType dict."""
+    # Defensive: a corrupted symbol_types entry could be non-dict-shaped
+    # (e.g. a stray string from a hand-edited project file). Treat
+    # non-dict input as an empty symbol so we return the Cat5e fallback
+    # rather than AttributeError on .get().
+    if not isinstance(symbol, dict):
+        return "Cat5e"
     if symbol.get("is_camera"):
         return "Cat6"
     color = (symbol.get("color") or "").upper()
@@ -83,8 +89,13 @@ def cable_for_route(
         return explicit
     did = route.get("device_id")
     if did and did in devices_by_id:
-        dev_type = devices_by_id[did].get("type")
+        dev = devices_by_id[did]
+        dev_type = dev.get("type") if isinstance(dev, dict) else None
         sym = symbol_types.get(dev_type, {}) if dev_type else {}
+        # Defensive against corrupted symbol_types entries — see
+        # default_cable_for for the same guard.
+        if not isinstance(sym, dict):
+            sym = {}
         if sym.get("cable_type") and sym["cable_type"] in cable_types:
             return sym["cable_type"]
         inferred = default_cable_for(sym)

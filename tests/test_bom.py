@@ -197,6 +197,35 @@ def test_csv_roundtrip(tmp_path):
     assert any("GRAND TOTAL" in r for r in (row for row in rows))
 
 
+def test_default_cable_for_non_dict_symbol():
+    """A corrupted symbol_types entry (string instead of dict) should
+    return the generic Cat5e fallback, not AttributeError on .get()."""
+    assert bom.default_cable_for("not a dict") == "Cat5e"
+    assert bom.default_cable_for(None) == "Cat5e"
+
+
+def test_cable_for_route_handles_corrupted_symbol_entry():
+    """A non-dict entry in symbol_types should be treated as empty,
+    not crash with AttributeError on sym.get('cable_type'). The
+    inferred default for an empty/unknown symbol is Cat5e."""
+    sym = {"MD": "this should have been a dict"}   # corrupted
+    devs = [{"id": "s1", "type": "MD"}]
+    route = {"device_id": "s1"}
+    # Should not raise. default_cable_for empties out to Cat5e for
+    # unknown-shape symbols (no is_camera, no color) — that's our return.
+    cable = bom.cable_for_route(route, {"s1": devs[0]}, sym, CABLE_TYPES)
+    assert cable == "Cat5e"
+
+
+def test_cable_for_route_handles_corrupted_device_entry():
+    """A non-dict device entry (string in place of the dict) shouldn't
+    crash on .get('type'). Falls through to the empty-symbol Cat5e."""
+    route = {"device_id": "s1"}
+    cable = bom.cable_for_route(
+        route, {"s1": "not a dict"}, SYMBOL_TYPES, CABLE_TYPES)
+    assert cable == "Cat5e"
+
+
 def test_rollup_handles_corrupted_cable_type_entry():
     """A non-dict entry in cable_types (corrupted project file) used to
     crash rollup with AttributeError. Now treated as empty."""
