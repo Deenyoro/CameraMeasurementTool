@@ -892,7 +892,11 @@ class ClearFovCmd(Command):
         self._snapshots = []
         for d in self.devices_with_fov:
             if "fov" in d:
-                self._snapshots.append((d, dict(d["fov"])))
+                # Snapshot must be dict-shaped for undo's d["fov"] = snap;
+                # a corrupted non-dict gets dropped without preservation.
+                raw = d["fov"]
+                if isinstance(raw, dict):
+                    self._snapshots.append((d, dict(raw)))
                 d.pop("fov", None)
 
     def undo(self):
@@ -9192,7 +9196,8 @@ class CameraWireTool:
             return
         new_fov = default_fov_for_type(device["type"])
         if record:
-            old = dict(device["fov"]) if device.get("fov") else None
+            old_raw = device.get("fov")
+            old = dict(old_raw) if isinstance(old_raw, dict) else None
             self._execute(EditFovCmd(self, [(device, old, new_fov)]))
             self._show_fov.set(True)
             self._post_command_refresh()
@@ -9206,8 +9211,9 @@ class CameraWireTool:
             self._redraw()
 
     def _toggle_camera_fov(self, device: dict) -> None:
-        old = dict(device["fov"]) if device.get("fov") else None
-        base = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
+        raw = device.get("fov")
+        old = dict(raw) if isinstance(raw, dict) else None
+        base = raw if isinstance(raw, dict) else dict(lenses_mod.DEFAULT_FOV)
         new = dict(base)
         new["show"] = not base.get("show", True)
         self._execute(EditFovCmd(self, [(device, old, new)]))
@@ -9215,7 +9221,13 @@ class CameraWireTool:
         self._post_command_refresh()
 
     def _open_fov_dialog(self, device: dict) -> None:
-        existing = device.get("fov") or dict(lenses_mod.DEFAULT_FOV)
+        # Treat a corrupted non-dict 'fov' the same as no 'fov' — start
+        # from defaults rather than crashing dict(existing) on iteration
+        # of a string. The user's Apply will overwrite it with a fresh
+        # well-formed dict.
+        existing = device.get("fov")
+        if not isinstance(existing, dict):
+            existing = dict(lenses_mod.DEFAULT_FOV)
         fov = dict(existing)
 
         dlg = tk.Toplevel(self.root)
@@ -9383,7 +9395,8 @@ class CameraWireTool:
             new_fov = _settings_dict(include_az=True)
             if new_fov is None:
                 return   # validation already showed the error
-            old_fov = dict(device["fov"]) if device.get("fov") else None
+            old_raw = device.get("fov")
+            old_fov = dict(old_raw) if isinstance(old_raw, dict) else None
             # No-op when nothing actually changed — don't pollute the
             # undo history with a redundant entry.
             if old_fov == new_fov:
@@ -9417,8 +9430,12 @@ class CameraWireTool:
             entries: list[tuple[dict, dict | None, dict]] = []
             for d in same_type:
                 old_raw = d.get("fov")
-                old_snapshot = dict(old_raw) if old_raw else None
-                base = old_raw or default_fov_for_type(d["type"])
+                # Treat a corrupted non-dict fov the same as missing —
+                # don't blow up the bulk apply on one bad camera.
+                old_snapshot = (dict(old_raw)
+                                if isinstance(old_raw, dict) else None)
+                base = (old_raw if isinstance(old_raw, dict)
+                        else default_fov_for_type(d["type"]))
                 merged = {**base, **shared}
                 merged["azimuth_deg"] = base.get("azimuth_deg", 0.0)
                 if "show" in base:
