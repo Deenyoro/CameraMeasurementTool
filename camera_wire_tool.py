@@ -3510,7 +3510,11 @@ class CameraWireTool:
         # (handles the [CAM]/[RP] tag + code + label + cable + count format).
         code = self._selected_symbol_code()
         if not code:
-            messagebox.showinfo("Select", "Select a symbol type to edit")
+            # Was a modal info popup — too heavy for a 'pick a row first'
+            # nudge. Match the flash-hint pattern Place + Delete use.
+            self._flash_status(
+                "Pick a symbol type to edit from the list first.",
+                ttl_ms=3000)
             return
         if code not in self.symbol_types:
             return
@@ -3851,6 +3855,9 @@ class CameraWireTool:
     def _delete_symbol_type(self) -> None:
         code = self._selected_symbol_code()
         if not code:
+            self._flash_status(
+                "Pick a symbol type to delete from the list first.",
+                ttl_ms=3000)
             return
         if code not in self.symbol_types:
             return
