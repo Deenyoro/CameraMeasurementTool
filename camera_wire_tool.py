@@ -6392,17 +6392,30 @@ class CameraWireTool:
             devices_by_id = {d["id"]: d for d in self.devices}
             for ri, route in entries:
                 self._filtered_wire_indices.append(ri)
-                if route["length_in"] is not None:
-                    length_str = self._format_length(route["length_in"])
+                # Defensive — a malformed route shouldn't break the whole
+                # list refresh on one bad row.
+                length_in = (route.get("length_in")
+                             if isinstance(route, dict) else None)
+                if length_in is not None:
+                    length_str = self._format_length(length_in)
                 else:
-                    length_str = f'{route["length_px"]:.0f}px'
-                n_segs = len(route["points"]) - 1
+                    px_raw = (route.get("length_px", 0)
+                              if isinstance(route, dict) else 0)
+                    try:
+                        length_str = f"{float(px_raw):.0f}px"
+                    except (TypeError, ValueError):
+                        length_str = "--"
+                pts = route.get("points") if isinstance(route, dict) else None
+                n_segs = (len(pts) - 1
+                          if isinstance(pts, list) and pts else 0)
                 # Show the EFFECTIVE cable (explicit override OR resolved
                 # device default) so the user always knows what BOM line
                 # this wire contributes to.
-                explicit = route.get("cable_type")
+                explicit = (route.get("cable_type")
+                            if isinstance(route, dict) else None)
                 effective = bom_mod.cable_for_route(
-                    route, devices_by_id, self.symbol_types,
+                    route if isinstance(route, dict) else {},
+                    devices_by_id, self.symbol_types,
                     self.cable_types)
                 cable_str = effective + ("" if explicit else " (auto)")
                 row = f'   {n_segs}seg  {length_str}  ({cable_str})'
