@@ -4498,6 +4498,12 @@ class CameraWireTool:
         info = self.symbol_types.get(dev["type"])
         if info is None:
             return
+        # Corrupted (non-dict) catalog entry — normalize so the device
+        # still renders. Without this, info["shape"] / info["color"]
+        # would TypeError on string subscript per frame and freeze the
+        # canvas.
+        if not isinstance(info, dict):
+            info = self._safe_sym(dev["type"])
         ix, iy = self._drawio_to_img(dev["x"], dev["y"])
         iw, ih = dev["w"] * self.dx_scale, dev["h"] * self.dy_scale
         cx, cy = self._img_to_canvas(ix, iy)
