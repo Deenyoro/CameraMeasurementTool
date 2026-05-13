@@ -1954,7 +1954,8 @@ class CameraWireTool:
         file_menu.add_command(label="Save As…", command=self._file_save_as,
                               accelerator="Ctrl+Shift+S")
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
+        file_menu.add_command(label="Exit", command=self._on_close,
+                              accelerator="Ctrl+Q")
 
         # Tk's keysym for "s" with caps-lock-on becomes "S", so <Control-S>
         # was firing Save-As when the user pressed Ctrl+S with caps lock —
@@ -1966,6 +1967,10 @@ class CameraWireTool:
         self.root.bind("<Control-Shift-S>", lambda _e: self._file_save_as())
         self.root.bind("<Control-o>", lambda _e: self._file_open())
         self.root.bind("<Control-O>", lambda _e: self._file_open())
+        # Ctrl+Q — standard quit accelerator. Routes through _on_close
+        # so the dirty-state + mid-draw prompts still fire.
+        self.root.bind("<Control-q>", lambda _e: self._on_close())
+        self.root.bind("<Control-Q>", lambda _e: self._on_close())
 
         # Edit
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -8075,6 +8080,7 @@ class CameraWireTool:
                 ("Ctrl+O",         "Open .drawio…"),
                 ("Ctrl+S",         "Save"),
                 ("Ctrl+Shift+S",   "Save As…"),
+                ("Ctrl+Q",         "Exit (prompts to save if dirty)"),
             ]),
             ("Wire drawing", [
                 ("Shift (hold)", "Lock segment to 0/45/90° from last point"),
