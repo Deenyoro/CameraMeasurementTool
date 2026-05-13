@@ -2859,8 +2859,7 @@ class CameraWireTool:
             self._flash_status("Select a camera first, then press R to rotate FOV.")
             return
         dev = self._primary_selected
-        info = self.symbol_types.get(dev["type"], {})
-        if not info.get("is_camera"):
+        if not self._is_camera_type(dev["type"]):
             self._flash_status(f"{dev['id']} isn't a camera — nothing to rotate.")
             return
         shift = bool(event.state & 0x0001)
@@ -8040,8 +8039,7 @@ class CameraWireTool:
         # 2) Device
         dev = self._device_at(ix, iy)
         if dev is not None:
-            info = self.symbol_types.get(dev["type"], {})
-            if info.get("is_camera"):
+            if self._is_camera_type(dev["type"]):
                 self._open_fov_dialog(dev)
             else:
                 self._center_on_device(dev)
@@ -8156,7 +8154,7 @@ class CameraWireTool:
             if not any(d is dev for d in self.selected_devices):
                 self.selected_device = dev
             self._redraw()
-            info = self.symbol_types.get(dev["type"], {})
+            info = self._safe_sym(dev["type"])
             menu.add_command(label=f"Selected: {dev['id']} ({dev['type']})",
                              state=tk.DISABLED)
             if len(self.selected_devices) > 1:
@@ -8281,6 +8279,11 @@ class CameraWireTool:
         # Group by category for readability
         groups = {"Cameras": [], "Access": [], "Sensors": [], "Other": []}
         for code, info in sorted(self.symbol_types.items()):
+            # Defensive coerce — a corrupted symbol_types entry would
+            # AttributeError on .get(). _safe_sym would over-fill, so
+            # just isinstance-check here.
+            if not isinstance(info, dict):
+                info = {}
             if info.get("is_camera"):
                 groups["Cameras"].append((code, info))
             elif info.get("is_run_point"):
@@ -8959,8 +8962,7 @@ class CameraWireTool:
         if self.selected_device is None:
             messagebox.showinfo("Select", "Select a camera device first")
             return
-        info = self.symbol_types.get(self.selected_device["type"], {})
-        if not info.get("is_camera"):
+        if not self._is_camera_type(self.selected_device["type"]):
             messagebox.showinfo("Not a camera",
                                 f"{self.selected_device['id']} is not flagged as a camera.")
             return
@@ -8995,7 +8997,7 @@ class CameraWireTool:
             self.selected_device = device
         self._redraw()
 
-        info = self.symbol_types.get(device["type"], {})
+        info = self._safe_sym(device["type"])
         wires = [w for w in self.wire_routes if w.get("device_id") == device["id"]]
         wire_total_in = sum(w.get("length_in", 0) or 0 for w in wires)
 
@@ -9207,8 +9209,7 @@ class CameraWireTool:
         skipped = 0
         entries: list[tuple[dict, dict | None, dict]] = []
         for d in self.devices:
-            info = self.symbol_types.get(d["type"], {})
-            if not info.get("is_camera"):
+            if not self._is_camera_type(d["type"]):
                 continue
             camera_count += 1
             if d.get("fov"):
@@ -9262,8 +9263,7 @@ class CameraWireTool:
         `record=False` (used by the auto-FOV-on-place flow) makes this a
         direct mutation so the surrounding AddDeviceCmd handles undo
         atomically — otherwise placing a camera would take 2 undos."""
-        info = self.symbol_types.get(device["type"], {})
-        if not info.get("is_camera"):
+        if not self._is_camera_type(device["type"]):
             return
         new_fov = default_fov_for_type(device["type"])
         if record:
@@ -10130,8 +10130,7 @@ class CameraWireTool:
         ix1, iy1 = self._canvas_to_img(cw, ch)
         slack = max((ix1 - ix0), (iy1 - iy0))
         for d in self.devices:
-            info = self.symbol_types.get(d["type"], {})
-            if not info.get("is_camera"):
+            if not self._is_camera_type(d["type"]):
                 continue
             if only_selected and (sel_id is None or d["id"] != sel_id):
                 continue
