@@ -1005,8 +1005,15 @@ class EditCableTypeCmd(Command):
                  old_info: dict | None, new_info: dict | None):
         self.app = app
         self.cable_id = cable_id
-        self.old_info = dict(old_info) if old_info else None
-        self.new_info = dict(new_info) if new_info else None
+        # Snapshot must be dict-shaped — undo's restore via dict(self.old_info)
+        # would crash on a corrupted non-dict pulled straight from the
+        # catalog. A non-dict 'old' means the value was already bad, so
+        # treat it as 'no prior value' on undo (better than reinstating
+        # garbage).
+        self.old_info = (dict(old_info)
+                         if isinstance(old_info, dict) else None)
+        self.new_info = (dict(new_info)
+                         if isinstance(new_info, dict) else None)
 
     def do(self):
         if self.new_info is None:

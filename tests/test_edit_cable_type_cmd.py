@@ -65,3 +65,36 @@ def test_redo_after_undo():
     cmd.undo()
     cmd.do()
     assert app.cable_types["RG6"] == new
+
+
+def test_non_dict_old_info_treated_as_no_prior_value():
+    """A corrupted (non-dict) catalog entry passed as old_info should
+    NOT be snapshot for undo — dict(non_dict) would crash. Treat the
+    edit as if there was no prior value, so undo cleans up the bad
+    state by popping the key rather than reinstating the corruption."""
+    app = _stub()
+    new = {"label": "Fixed", "color": "#0080FF", "cost_per_ft": 0.20}
+    cmd = cwt.EditCableTypeCmd(app, "BadKey",
+                                 old_info="this should have been a dict",
+                                 new_info=new)
+    cmd.do()
+    assert app.cable_types["BadKey"] == new
+    cmd.undo()
+    # Corrupted 'old' is gone; undo popped the key rather than crashing
+    # on dict('this should have been a dict').
+    assert "BadKey" not in app.cable_types
+
+
+def test_non_dict_new_info_treated_as_delete():
+    """Symmetric guard — a non-dict new_info shouldn't write garbage
+    into the catalog. Treat it as a delete."""
+    app = _stub()
+    old = dict(app.cable_types["Cat6"])
+    cmd = cwt.EditCableTypeCmd(app, "Cat6",
+                                 old_info=old,
+                                 new_info=12345)  # not a dict
+    cmd.do()
+    # Treated as a delete since new_info wasn't dict-shaped
+    assert "Cat6" not in app.cable_types
+    cmd.undo()
+    assert app.cable_types["Cat6"] == old
