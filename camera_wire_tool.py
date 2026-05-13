@@ -4605,7 +4605,7 @@ class CameraWireTool:
         if not cable_id and did:
             dev = next((d for d in self.devices if d["id"] == did), None)
             if dev:
-                sym = self.symbol_types.get(dev["type"], {})
+                sym = self._safe_sym(dev["type"])
                 cable_id = sym.get("cable_type") or bom_mod.default_cable_for(sym)
         if cable_id and cable_id in self.cable_types:
             ct = self.cable_types[cable_id]
@@ -9547,12 +9547,12 @@ class CameraWireTool:
         neither endpoint is a run point, prefer the source's. If both
         are run points, prefer the source's (arbitrary but consistent).
         """
-        src_info = self.symbol_types.get(src["type"], {})
+        src_info = self._safe_sym(src["type"])
         src_cable = (src_info.get("cable_type")
                      or bom_mod.default_cable_for(src_info))
         if dst is None:
             return src_cable
-        dst_info = self.symbol_types.get(dst["type"], {})
+        dst_info = self._safe_sym(dst["type"])
         dst_cable = (dst_info.get("cable_type")
                      or bom_mod.default_cable_for(dst_info))
         src_rp = bool(src_info.get("is_run_point"))
