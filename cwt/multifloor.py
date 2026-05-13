@@ -364,7 +364,10 @@ def save_project(project: ProjectState, project_path: str) -> None:
             f.id: [a for a in f.annotations if isinstance(a, dict)]
             for f in project.floors
         },
-        "risers": project.risers,
+        # Filter risers the same way wires/annotations are filtered —
+        # a non-dict entry would survive json.dump but be a tripping
+        # hazard on the next load. Skip it at save time too.
+        "risers": [r for r in project.risers if isinstance(r, dict)],
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,
