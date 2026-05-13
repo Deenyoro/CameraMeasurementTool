@@ -4343,12 +4343,12 @@ class CameraWireTool:
             cy = (d["y"] + d["h"]/2) * self.dy_scale
             mx = ox + cx * scale_x
             my = oy + cy * scale_y
-            info = self.symbol_types.get(d["type"], {})
             if d["id"] in sel_ids:
                 m.create_oval(mx-3, my-3, mx+3, my+3,
                                fill="#FF3030", outline="#FFFFFF", width=1)
             else:
-                color = "#FFE680" if info.get("is_camera") else "#7FC4FF"
+                color = ("#FFE680" if self._is_camera_type(d["type"])
+                         else "#7FC4FF")
                 m.create_oval(mx-1.5, my-1.5, mx+1.5, my+1.5,
                                fill=color, outline="")
 
@@ -6308,7 +6308,7 @@ class CameraWireTool:
             did = route.get("device_id")
             dev = devices_by_id_for_search.get(did) if did else None
             dev_type = dev["type"] if dev else ""
-            sym_info = self.symbol_types.get(dev_type, {}) if dev_type else {}
+            sym_info = self._safe_sym(dev_type) if dev_type else {}
             sym_label = sym_info.get("label", dev_type or "")
             # Match against the EFFECTIVE cable (what the row displays), not
             # only the explicit cable_type override — searching "Cat6" should
@@ -6426,7 +6426,7 @@ class CameraWireTool:
         self._primary_selected = chosen[-1]
         if self.mode == Mode.WIRE:
             dev = self._primary_selected
-            info = self.symbol_types.get(dev["type"], {})
+            info = self._safe_sym(dev["type"])
             self.status_label.config(
                 text=f'Wire Mode for {dev["id"]} ({dev["type"]} - {info.get("label", "")}) — '
                      f'click to route, right-click to finish',
@@ -6825,7 +6825,7 @@ class CameraWireTool:
         n_sel = len(self.selected_devices)
         if n_sel == 1:
             d = self.selected_devices[0]
-            info = self.symbol_types.get(d["type"], {})
+            info = self._safe_sym(d["type"])
             sel_str = f"Selected: {d['id']} ({d['type']} – {info.get('label','?')})"
             wires = [w for w in self.wire_routes if w.get("device_id") == d["id"]]
             if wires:
@@ -6947,7 +6947,7 @@ class CameraWireTool:
                 parent = cell.get("parent", "")
                 if cid in dev_map:
                     dev = dev_map[cid]
-                    info = self.symbol_types.get(dev["type"], {})
+                    info = self._safe_sym(dev["type"])
                     cell.set("value", dev["type"])
                     fs = 7 if len(dev["type"]) >= 3 else 8
                     new_style = SHAPE_STYLES.get(
@@ -6967,7 +6967,7 @@ class CameraWireTool:
             # Add new device cells
             for dev in self.devices:
                 if dev["id"] not in existing_ids:
-                    info = self.symbol_types.get(dev["type"], {})
+                    info = self._safe_sym(dev["type"])
                     fs = 7 if len(dev["type"]) >= 3 else 8
                     style = SHAPE_STYLES.get(
                         info.get("shape", "ellipse"), SHAPE_STYLES["ellipse"]
@@ -7107,12 +7107,13 @@ class CameraWireTool:
         # Build the candidate list — devices + symbol types + wires
         candidates: list[tuple[str, str, callable]] = []
         for d in self.devices:
-            info = self.symbol_types.get(d["type"], {})
+            info = self._safe_sym(d["type"])
             label = (f" DEV   {d['id']:6s}  {d['type']:5s}  "
                      f"{info.get('label', d['type'])}")
             candidates.append((label, f"{d['id']} {d['type']} {info.get('label','')}",
                                lambda d=d: self._jump_to_device(d)))
-        for code, info in sorted(self.symbol_types.items()):
+        for code, raw_info in sorted(self.symbol_types.items()):
+            info = raw_info if isinstance(raw_info, dict) else {}
             n = sum(1 for d in self.devices if d["type"] == code)
             tag = "[RP]" if info.get("is_run_point") else (
                   "[CAM]" if info.get("is_camera") else "    ")
@@ -8607,7 +8608,7 @@ class CameraWireTool:
         devs = [d for d in self.devices if d["type"] == code]
         if not devs:
             return
-        info = self.symbol_types.get(code, {})
+        info = self._safe_sym(code)
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label=f"{code} — {info.get('label', code)} "
                             f"({self._plural(len(devs), 'device')})",
@@ -9209,7 +9210,7 @@ class CameraWireTool:
         cx, cy = self._drawio_to_img(device["x"] + device["w"] / 2,
                                      device["y"] + device["h"] / 2)
         self.current_wire_points = [(cx, cy)]
-        info = self.symbol_types.get(device["type"], {})
+        info = self._safe_sym(device["type"])
         self.status_label.config(
             text=f"Drawing wire from {device['id']} ({info.get('label','?')}) — "
                  f"click route points, right-click to finish")
