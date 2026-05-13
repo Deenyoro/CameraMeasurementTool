@@ -10221,10 +10221,11 @@ class CameraWireTool:
                     and iy0 - slack <= cam_iy <= iy1 + slack):
                 continue
             f = d.get("fov")
-            # If the camera doesn't have its own FOV configured, fall back
-            # to the per-type preset so toggling 'Show FOV' shows ALL
-            # cameras' coverage immediately, even on a fresh project.
-            if not f:
+            # If the camera doesn't have its own FOV configured (or it's
+            # corrupted to a non-dict value), fall back to the per-type
+            # preset so toggling 'Show FOV' shows ALL cameras' coverage
+            # immediately, even on a fresh project.
+            if not isinstance(f, dict):
                 f = default_fov_for_type(d["type"])
             elif not f.get("show", True):
                 continue
