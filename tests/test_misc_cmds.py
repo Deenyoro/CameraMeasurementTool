@@ -109,6 +109,38 @@ def test_edit_symbol_is_new_only_runs_do_path():
     assert "NEW" not in app.symbol_types
 
 
+def test_edit_symbol_tolerates_non_dict_old_info():
+    """A corrupted catalog entry (non-dict) passed as old_info used to
+    crash __init__ on dict() iteration. Now snapshots an empty dict so
+    undo can still re-establish the slot without reinstating garbage."""
+    app = types.SimpleNamespace(
+        symbol_types={"MD": "should have been a dict"}, devices=[])
+    new_info = {"label": "Minidome", "shape": "ellipse",
+                "color": "#FFFF00", "is_camera": True}
+    cmd = cwt.EditSymbolCmd(app, "MD", "should have been a dict",
+                              "MD", new_info, is_new=False)
+    cmd.do()
+    assert app.symbol_types["MD"] == new_info
+    cmd.undo()
+    # Undo restores the snapshot — but since old was corrupted, snapshot
+    # is {} not the garbage string. Better than crashing on dict('...').
+    assert app.symbol_types["MD"] == {}
+
+
+def test_delete_symbol_tolerates_non_dict_info():
+    """Mirror — DeleteSymbolCmd's snapshot was 'dict(info)' which would
+    crash on a corrupted entry. Now substitutes empty dict so undo
+    re-establishes the slot for the user to fix."""
+    app = types.SimpleNamespace(
+        symbol_types={"BAD": "corrupted"}, devices=[], wire_routes=[])
+    cmd = cwt.DeleteSymbolCmd(app, "BAD", "corrupted", [])
+    cmd.do()
+    assert "BAD" not in app.symbol_types
+    cmd.undo()
+    # Re-established with empty placeholder; user can edit the row.
+    assert app.symbol_types["BAD"] == {}
+
+
 # ---------------- CalibrateCmd
 def test_calibrate_round_trip():
     """CalibrateCmd swaps scale_factor and triggers _recalc_all_wires."""
