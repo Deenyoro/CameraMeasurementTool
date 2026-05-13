@@ -3529,7 +3529,7 @@ class CameraWireTool:
         code = self._selected_symbol_code()
         if not code:
             return
-        info = self.symbol_types[code]
+        info = self._safe_sym(code)
         n = sum(1 for d in self.devices if d["type"] == code)
 
         m = tk.Menu(self.root, tearoff=0)
@@ -3884,7 +3884,7 @@ class CameraWireTool:
 
         new_id = f"s{self._next_device_id}"
         self._next_device_id += 1
-        info = self.symbol_types[code]
+        info = self._safe_sym(code)
         device = {
             "id": new_id, "type": code,
             "x": dx, "y": dy,
@@ -4438,7 +4438,7 @@ class CameraWireTool:
                                                   int(11 * self.zoom * self.dx_scale)))
 
         for i, code in enumerate(sorted_codes):
-            info = self.symbol_types[code]
+            info = self._safe_sym(code)
             icon_dx = box["x"] + 20
             icon_dy = box["y"] + 38 + i * C.LEGEND_ROW_H
             ix, iy = self._drawio_to_img(icon_dx, icon_dy)
@@ -4774,6 +4774,21 @@ class CameraWireTool:
         helper one corrupted entry could AttributeError each one."""
         sym = self.symbol_types.get(type_code, {})
         return isinstance(sym, dict) and bool(sym.get("is_camera"))
+
+    def _safe_sym(self, type_code) -> dict:
+        """Return self.symbol_types[type_code] coerced to a dict view,
+        with sensible defaults filled in for missing fields. A corrupted
+        non-dict entry or a partial dict (legacy / hand-edited) becomes
+        a fully-populated 'safe shape' the rest of the app can index
+        without checking. Read-only — never write back through this."""
+        raw = self.symbol_types.get(type_code, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        # Spread over a known-good template so callers can do sym["shape"]
+        # / sym["color"] / sym["label"] without bracket-key risk. Fields
+        # default to types-recognized values so the icon still renders.
+        return {"label": type_code or "?", "shape": "ellipse",
+                "color": "#FFFF00", "is_camera": False, **raw}
 
     def _format_length(self, inches) -> str:
         if inches is None:
@@ -6979,7 +6994,7 @@ class CameraWireTool:
             geom.set("as", "geometry")
 
             for i, code in enumerate(sorted_codes):
-                info = self.symbol_types[code]
+                info = self._safe_sym(code)
                 y_offset = 38 + i * row_h
                 fs = 7 if len(code) >= 3 else 8
                 icon_style = SHAPE_STYLES.get(info["shape"], SHAPE_STYLES["ellipse"]).format(
