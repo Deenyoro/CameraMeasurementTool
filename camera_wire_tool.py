@@ -4621,7 +4621,14 @@ class CameraWireTool:
             )
 
     def _draw_wire_route(self, route, idx) -> None:
-        if len(route["points"]) < 2:
+        # Defensive — the load + save filters drop malformed wires, but
+        # a transient in-memory mutation could land here briefly. Skip
+        # the wire entirely rather than crashing every redraw on the
+        # whole canvas.
+        if not isinstance(route, dict):
+            return
+        pts = route.get("points")
+        if not isinstance(pts, list) or len(pts) < 2:
             return
         sel = self.wire_listbox.curselection()
         is_selected = bool(sel) and self._wire_index_for_listbox(sel[0]) == idx
@@ -4629,8 +4636,8 @@ class CameraWireTool:
         # screen. Skip the cull for the selected wire so its glow still
         # renders even when it's parked offscreen during navigation.
         if not is_selected:
-            xs = [p[0] for p in route["points"]]
-            ys = [p[1] for p in route["points"]]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
             canvas_w = self.canvas.winfo_width() or 800
             canvas_h = self.canvas.winfo_height() or 600
             cx0, cy0 = self._img_to_canvas(min(xs), min(ys))
@@ -4661,7 +4668,7 @@ class CameraWireTool:
 
         color = "#FF4444" if is_selected else wire_color
         width = 4 if is_selected else 2
-        pts_canvas = [self._img_to_canvas(*p) for p in route["points"]]
+        pts_canvas = [self._img_to_canvas(*p) for p in pts]
         # If the wire's selected, draw a soft dim glow underneath so the
         # red line really pops against busy floor-plan backgrounds.
         # Tk's create_line takes a flat list of x,y,x,y,... and renders
