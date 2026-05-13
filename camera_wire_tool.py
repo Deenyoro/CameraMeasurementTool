@@ -7202,14 +7202,19 @@ class CameraWireTool:
     def _jump_to_wire(self, route_index: int) -> None:
         self._notebook.select(1)   # Wires tab
         self._select_wire_in_listbox(route_index)
-        # Pan canvas to the wire's midpoint so user sees it
+        # Pan canvas to the wire's midpoint so user sees it. Defensive
+        # against a wire route whose points list is empty / missing —
+        # the load path filters these but in-memory mutations could
+        # leave a malformed entry briefly.
         if 0 <= route_index < len(self.wire_routes):
             r = self.wire_routes[route_index]
-            mid = r["points"][len(r["points"]) // 2]
-            cw = self.canvas.winfo_width() or 800
-            ch = self.canvas.winfo_height() or 600
-            self.offset_x = cw / 2 - mid[0] * self.zoom
-            self.offset_y = ch / 2 - mid[1] * self.zoom
+            pts = r.get("points") if isinstance(r, dict) else None
+            if isinstance(pts, list) and pts:
+                mid = pts[len(pts) // 2]
+                cw = self.canvas.winfo_width() or 800
+                ch = self.canvas.winfo_height() or 600
+                self.offset_x = cw / 2 - mid[0] * self.zoom
+                self.offset_y = ch / 2 - mid[1] * self.zoom
         self._redraw()
         self.status_label.config(text=f"Jumped to wire #{route_index+1}.")
 
