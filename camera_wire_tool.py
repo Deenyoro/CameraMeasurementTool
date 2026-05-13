@@ -6817,12 +6817,16 @@ class CameraWireTool:
             ("(unassigned — no device)", None)
         ]
         for d in sorted(self.devices, key=lambda x: x["id"]):
-            sym = self.symbol_types.get(d["type"], {})
+            sym = self._safe_sym(d["type"])
             tag = "[CAM]" if sym.get("is_camera") else (
                 "[RP] " if sym.get("is_run_point") else "     ")
+            label = sym.get("label", d["type"])
+            # Defensive — non-string label would TypeError on [:34] slice.
+            if not isinstance(label, str):
+                label = str(label) if label is not None else d["type"]
             candidates.append((
                 f' {tag}  {d["id"]:6s}  {d["type"]:5s}  '
-                f'{sym.get("label", d["type"])[:34]}',
+                f'{label[:34]}',
                 d["id"],
             ))
 
@@ -6838,6 +6842,12 @@ class CameraWireTool:
             for i, (_, did) in enumerate(visible_rows):
                 if did == cur_did:
                     lb.selection_set(i); lb.see(i); break
+            # Empty-state placeholder so a non-matching filter doesn't
+            # look like the dialog broke. apply() guards against picking
+            # a placeholder row by checking visible_rows length.
+            if not visible_rows and q:
+                lb.insert(tk.END, f"  (no matches for '{query}')")
+                lb.itemconfig(0, foreground="#888888")
 
         populate()
         search_var.trace_add("write", lambda *_: populate(search_var.get()))
