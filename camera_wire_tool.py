@@ -2867,7 +2867,11 @@ class CameraWireTool:
         step = 45 if shift else 15
         if alt:
             step = -step
-        old_az = (dev.get("fov") or {}).get("azimuth_deg", 0)
+        # Corrupted non-dict 'fov' would AttributeError on the inner .get();
+        # RotateFovCmd.do will replace it with a default anyway, so just
+        # treat it as missing here for the starting azimuth.
+        fov_raw = dev.get("fov")
+        old_az = fov_raw.get("azimuth_deg", 0) if isinstance(fov_raw, dict) else 0
         new_az = (old_az + step) % 360
         cmd = RotateFovCmd(self, dev, old_az, new_az, time.monotonic())
         # Coalesce with the previous rotation if it was on the same camera,
