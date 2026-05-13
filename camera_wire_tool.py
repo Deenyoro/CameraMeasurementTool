@@ -3438,17 +3438,15 @@ class CameraWireTool:
             by_type.setdefault(d["type"], []).append(d)
             self._filtered_devices.append(d)
 
-        def _safe_sym(code):
-            """Return symbol_types[code] coerced to a dict for read-only
-            access. Tolerates corrupted hand-edited entries."""
-            s = self.symbol_types.get(code, {})
-            return s if isinstance(s, dict) else {}
+        # Sort categories: cameras → devices → run points (alpha within).
+        # _safe_sym is the class-level helper that does the same coerce
+        # this used to do via a local lambda; one source of truth now.
         for t_code in sorted(by_type.keys(),
                               key=lambda c: (
-                                  0 if _safe_sym(c).get("is_camera")
-                                  else 2 if _safe_sym(c).get("is_run_point")
+                                  0 if self._safe_sym(c).get("is_camera")
+                                  else 2 if self._safe_sym(c).get("is_run_point")
                                   else 1, c)):
-            sym = _safe_sym(t_code)
+            sym = self._safe_sym(t_code)
             sym_label = sym.get("label", t_code)
             # Coerce label to str — a corrupted None / int would TypeError
             # on the [:24] slice below.
