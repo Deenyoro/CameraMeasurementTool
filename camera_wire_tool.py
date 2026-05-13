@@ -5196,8 +5196,11 @@ class CameraWireTool:
             n = len(self._floor_anchors_picking)
             active, ref = self._floor_anchor_target
             if n < 2:
+                # Include the Esc hint so the user knows they can bail
+                # out of the anchor pick — was just '#N/2' without it.
                 self.status_label.config(
-                    text=f"ANCHOR: click point #{n+1}/2 on {active.id}")
+                    text=f"ANCHOR: click point #{n+1}/2 on {active.id}  "
+                         f"(Esc cancels)")
                 return
             # 2 picked on this floor; remember and switch to the reference floor
             active.anchor_points = [list(p) for p in self._floor_anchors_picking]
@@ -9973,7 +9976,8 @@ class CameraWireTool:
             self._floor_anchors_picking = []
             self._floor_anchor_target = (active, ref)
             self.status_label.config(
-                text=f"ANCHOR: click 2 reference points on {active.id}")
+                text=f"ANCHOR: click 2 reference points on {active.id}  "
+                     f"(Esc cancels)")
             dlg.destroy()
 
         btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
