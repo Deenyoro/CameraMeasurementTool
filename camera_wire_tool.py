@@ -9718,12 +9718,22 @@ class CameraWireTool:
         if self._dirty and not self._confirm_discard():
             return
 
-        # Save active floor's wires back to project
+        # Save active floor's wires back to project. Defensive: skip any
+        # malformed in-memory route so the floor switch can't crash on a
+        # bad wr["points"] subscript. save_project's serializer also
+        # filters non-dict / short-points entries, but we want a clean
+        # FloorState in memory too so the round-trip back through
+        # active_floor doesn't surprise us.
         active = self._project.get_floor(self._project.active_floor)
         if active is not None:
             active.wire_routes = []
             for wr in self.wire_routes:
-                e = {"points": [list(p) for p in wr["points"]],
+                if not isinstance(wr, dict):
+                    continue
+                pts = wr.get("points")
+                if not isinstance(pts, list):
+                    continue
+                e = {"points": [list(p) for p in pts],
                      "device_id": wr.get("device_id")}
                 if wr.get("cable_type"):
                     e["cable_type"] = wr["cable_type"]
