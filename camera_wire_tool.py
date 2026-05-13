@@ -1869,7 +1869,9 @@ class CameraWireTool:
         direction (collinear). Result has the same shape but fewer points."""
         route = self._selected_wire()
         if route is None:
-            messagebox.showinfo("Select", "Select a wire to simplify.")
+            self._flash_status(
+                "Select a wire (in the Wires tab) first, then click "
+                "Simplify.", ttl_ms=3000)
             return
         pts = route.get("points") if isinstance(route, dict) else None
         if not isinstance(pts, list) or len(pts) <= 2:
@@ -3887,7 +3889,9 @@ class CameraWireTool:
     def _start_place_device(self) -> None:
         code = self.place_type_var.get()
         if not code or code not in self.symbol_types:
-            messagebox.showinfo("Select", "Pick a symbol type first")
+            self._flash_status(
+                "Pick a symbol type from the Symbols tab first.",
+                ttl_ms=3000)
             return
         self._place_type = code
         self._set_mode(Mode.PLACE_DEVICE)
@@ -6690,7 +6694,9 @@ class CameraWireTool:
         first waypoint if it has no device association)."""
         sel = self.wire_listbox.curselection()
         if not sel:
-            messagebox.showinfo("Select", "Select a wire to re-route")
+            self._flash_status(
+                "Pick a wire in the Wires tab first, then click Re-route.",
+                ttl_ms=3000)
             return
         idx = self._wire_index_for_listbox(sel[0])
         if idx is None:
@@ -6733,7 +6739,9 @@ class CameraWireTool:
     def _reassign_selected_wire(self) -> None:
         sel = self.wire_listbox.curselection()
         if not sel:
-            messagebox.showinfo("Select", "Select a wire to reassign")
+            self._flash_status(
+                "Pick a wire in the Wires tab first, then click Reassign.",
+                ttl_ms=3000)
             return
         idx = self._wire_index_for_listbox(sel[0])
         if idx is None:
@@ -9073,9 +9081,15 @@ class CameraWireTool:
     # ============================================================ FOV / DORI editor
     def _open_fov_dialog_for_selected(self) -> None:
         if self.selected_device is None:
-            messagebox.showinfo("Select", "Select a camera device first")
+            self._flash_status(
+                "Click a camera on the map (or in the Devices tab) first, "
+                "then choose 'Edit FOV'.",
+                ttl_ms=3500)
             return
         if not self._is_camera_type(self.selected_device["type"]):
+            # 'Not a camera' is a stronger correction than 'pick first' —
+            # the user DID pick something, just the wrong type. Keep the
+            # modal so they don't miss the explanation.
             messagebox.showinfo("Not a camera",
                                 f"{self.selected_device['id']} is not flagged as a camera.")
             return
