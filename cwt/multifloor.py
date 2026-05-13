@@ -92,30 +92,48 @@ def compute_alignment(
     }
 
 
+def _safe_align_field(alignment: dict, key: str, default: float) -> float:
+    """Read a numeric alignment field with a fallback. Public-API
+    callers (apply_alignment / inverse_alignment) used to KeyError on
+    a manually-constructed partial dict; the loader normalize covers
+    file-load callers, but library users get the same robustness."""
+    if not isinstance(alignment, dict):
+        return default
+    raw = alignment.get(key, default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def apply_alignment(
     pt: tuple[float, float], alignment: dict,
 ) -> tuple[float, float]:
     """Apply (rotate around origin, scale, translate) to an image-pixel point."""
-    cos_r = math.cos(math.radians(alignment["rotation_deg"]))
-    sin_r = math.sin(math.radians(alignment["rotation_deg"]))
-    s = alignment["scale"]
-    x = s * (cos_r * pt[0] - sin_r * pt[1]) + alignment["tx"]
-    y = s * (sin_r * pt[0] + cos_r * pt[1]) + alignment["ty"]
+    rot = _safe_align_field(alignment, "rotation_deg", 0.0)
+    s   = _safe_align_field(alignment, "scale",        1.0)
+    tx  = _safe_align_field(alignment, "tx",           0.0)
+    ty  = _safe_align_field(alignment, "ty",           0.0)
+    cos_r = math.cos(math.radians(rot))
+    sin_r = math.sin(math.radians(rot))
+    x = s * (cos_r * pt[0] - sin_r * pt[1]) + tx
+    y = s * (sin_r * pt[0] + cos_r * pt[1]) + ty
     return x, y
 
 
 def inverse_alignment(alignment: dict) -> dict:
     """Inverse of a similarity transform — useful when projecting from
     project-frame back to a floor's local image-pixel coords."""
-    s = alignment["scale"]
+    s = _safe_align_field(alignment, "scale", 1.0)
     if s == 0:
         return dict(IDENTITY_ALIGNMENT)
     inv_s = 1.0 / s
-    inv_rot = -alignment["rotation_deg"]
+    inv_rot = -_safe_align_field(alignment, "rotation_deg", 0.0)
     cos_r = math.cos(math.radians(inv_rot))
     sin_r = math.sin(math.radians(inv_rot))
     # Inverse translation: -inv_rot/inv_s * t
-    tx = alignment["tx"]; ty = alignment["ty"]
+    tx = _safe_align_field(alignment, "tx", 0.0)
+    ty = _safe_align_field(alignment, "ty", 0.0)
     new_tx = -inv_s * (cos_r * tx - sin_r * ty)
     new_ty = -inv_s * (sin_r * tx + cos_r * ty)
     return {"tx": new_tx, "ty": new_ty, "scale": inv_s, "rotation_deg": inv_rot}

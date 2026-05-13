@@ -224,6 +224,46 @@ def test_load_project_handles_non_numeric_next_device_id(tmp_path):
     assert proj.scale_factor is None
 
 
+def test_apply_alignment_tolerates_partial_dict():
+    """A manually-constructed partial alignment (or one missing a key
+    from a hand-edited file that bypasses load_project) shouldn't
+    KeyError downstream — apply_alignment should fall back to the
+    identity default for each missing field."""
+    # Only tx provided; ty/scale/rotation_deg should default to 0/1/0.
+    out = mf.apply_alignment((10.0, 20.0), {"tx": 5.0})
+    # x = 1*(cos(0)*10 - sin(0)*20) + 5 = 15
+    # y = 1*(sin(0)*10 + cos(0)*20) + 0 = 20
+    assert out == (15.0, 20.0)
+
+
+def test_apply_alignment_tolerates_non_numeric_field():
+    """A non-numeric value for a known key falls back to the default
+    rather than letting math.radians(str) bubble out."""
+    out = mf.apply_alignment((10.0, 20.0),
+                              {"rotation_deg": "broken", "scale": 1.0,
+                               "tx": 0.0, "ty": 0.0})
+    # rotation falls back to 0 → identity-like rotation
+    assert out == (10.0, 20.0)
+
+
+def test_apply_alignment_with_non_dict_input():
+    """Defensive: a non-dict input (None, list, etc.) returns the
+    point untransformed (all defaults: rot=0, scale=1, tx=0, ty=0)."""
+    assert mf.apply_alignment((10.0, 20.0), None) == (10.0, 20.0)
+    assert mf.apply_alignment((10.0, 20.0), "nonsense") == (10.0, 20.0)
+
+
+def test_inverse_alignment_tolerates_partial_dict():
+    """Same contract for the inverse — missing keys default to
+    identity components rather than KeyError-ing."""
+    inv = mf.inverse_alignment({"scale": 2.0})
+    # 1/scale = 0.5; other fields default; tx/ty are 0 so new_tx/ty are 0
+    assert abs(inv["scale"] - 0.5) < 1e-9
+    assert inv["rotation_deg"] == 0.0
+    assert inv["tx"] == 0.0
+    assert inv["ty"] == 0.0
+
+
 def test_load_project_normalizes_partial_alignment(tmp_path):
     """A hand-edited alignment can be a partial dict (missing tx or scale)
     or carry non-numeric values for some keys. The loader should fill the
