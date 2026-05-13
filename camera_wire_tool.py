@@ -6450,11 +6450,23 @@ class CameraWireTool:
             self.wire_listbox.itemconfig(0, foreground="#888888")
 
         # Side-panel total (Wires tab footer)
+        # Defensive sums — every redraw hits this; a malformed in-memory
+        # route shouldn't blank the badge or spam the Tk callback log.
+        def _route_field_total(field: str) -> float:
+            t = 0.0
+            for r in self.wire_routes:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    t += float(r.get(field) or 0)
+                except (TypeError, ValueError):
+                    pass
+            return t
         if self.scale_factor:
-            grand_total_in = sum((r.get("length_in") or 0) for r in self.wire_routes)
+            grand_total_in = _route_field_total("length_in")
             total_text = f"Total Wire: {self._format_length(grand_total_in)}"
         elif self.wire_routes:
-            total_px = sum(r["length_px"] for r in self.wire_routes)
+            total_px = _route_field_total("length_px")
             total_text = f"Total Wire: {total_px:.0f}px (calibrate first)"
         else:
             total_text = "Total Wire: --"
@@ -6470,21 +6482,11 @@ class CameraWireTool:
             cost_str = f"  •  {cur}{report.grand_total:,.2f}"
         except Exception:
             cost_str = ""
-        # Defensive sum — a malformed route with no length_px shouldn't
-        # KeyError on the toolbar refresh (which fires every redraw).
-        def _safe_px_total():
-            t = 0.0
-            for r in self.wire_routes:
-                if not isinstance(r, dict):
-                    continue
-                try:
-                    t += float(r.get("length_px", 0) or 0)
-                except (TypeError, ValueError):
-                    pass
-            return int(t)
+        # Defensive sum — share the same helper used by the total_label
+        # branch above so a malformed route can't blank either widget.
         wire_str = (self._format_length(grand_total_in)
                     if self.scale_factor and self.wire_routes
-                    else (f"{_safe_px_total()}px"
+                    else (f"{int(_route_field_total('length_px'))}px"
                           if self.wire_routes else "—"))
         self.total_toolbar_label.config(
             text=f"Devices: {n_dev}  ·  Cameras: {n_cam}  ·  "
