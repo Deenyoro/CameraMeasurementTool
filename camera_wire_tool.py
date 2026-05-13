@@ -9854,8 +9854,10 @@ class CameraWireTool:
 
     def _open_alignment_dialog(self) -> None:
         if self._project is None or len(self._project.floors) < 2:
-            messagebox.showinfo("Alignment",
-                                "Add a second floor first (Floors menu → Add Floor).")
+            self._flash_status(
+                "Alignment needs ≥2 floors. Add another via "
+                "Floors → Add Floor first.",
+                ttl_ms=3500)
             return
         active = self._project.get_floor(self._project.active_floor)
         if active is None:
@@ -9971,7 +9973,9 @@ class CameraWireTool:
 
     def _open_floor_manager(self) -> None:
         if self._project is None or not self._project.floors:
-            messagebox.showinfo("Floors", "No floors yet — use Add Floor.")
+            self._flash_status(
+                "No floors yet — use Floors → Add Floor first.",
+                ttl_ms=3000)
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
