@@ -49,6 +49,7 @@ except ImportError:
     _HAS_SVTTK = False
 
 # cwt support package (always available — sits next to this script)
+import cwt
 from cwt import bom as bom_mod
 from cwt import fov as fov_mod
 from cwt import lenses as lenses_mod
@@ -7900,7 +7901,11 @@ class CameraWireTool:
         ttk.Label(dlg, text="Camera Wire Tool",
                   font=("Segoe UI", 18, "bold"),
                   ).pack(anchor=tk.W, padx=20, pady=(20, 0))
-        ttk.Label(dlg, text="v1.0.0  ·  estimation for security-camera cable runs",
+        # Single source of truth for the version string lives in
+        # cwt/__init__.py — bumping it there now updates the About card.
+        ttk.Label(dlg,
+                  text=f"v{cwt.__version__}  ·  estimation for "
+                       f"security-camera cable runs",
                   foreground="#7fc4ff", font=("Segoe UI", 10, "italic"),
                   ).pack(anchor=tk.W, padx=20, pady=(0, 14))
 
