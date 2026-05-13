@@ -6248,11 +6248,17 @@ class CameraWireTool:
             return
         sel_wire = self._selected_wire()
         if sel_wire is not None:
-            xs = [p[0] for p in sel_wire["points"]]
-            ys = [p[1] for p in sel_wire["points"]]
-            self._zoom_to_image_bbox(min(xs), min(ys), max(xs), max(ys),
-                                      pad=80)
-            self.status_label.config(text=f"Zoomed to selected wire.")
+            pts = (sel_wire.get("points")
+                   if isinstance(sel_wire, dict) else None)
+            if isinstance(pts, list) and pts:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                self._zoom_to_image_bbox(min(xs), min(ys), max(xs), max(ys),
+                                          pad=80)
+                self.status_label.config(text=f"Zoomed to selected wire.")
+            else:
+                self.status_label.config(
+                    text="Selected wire has no valid points to zoom to.")
             return
         if self.selected_devices:
             xs0 = [d["x"] * self.dx_scale for d in self.selected_devices]
