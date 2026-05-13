@@ -8260,12 +8260,18 @@ class CameraWireTool:
             menu.add_command(label="Fit view",
                              command=lambda: (self._fit_image(), self._redraw()))
             menu.add_separator()
-            menu.add_command(label="Show device IDs",
-                             command=lambda: (self._show_device_ids.set(
-                                 not self._show_device_ids.get()), self._redraw()))
-            menu.add_command(label="Toggle FOV overlays",
-                             command=lambda: (self._show_fov.set(
-                                 not self._show_fov.get()), self._redraw()))
+            # Show the current state in the label so the user knows what
+            # the toggle will switch TO, not just that it's a toggle.
+            ids_on = self._show_device_ids.get()
+            fov_on = self._show_fov.get()
+            menu.add_command(
+                label=f"{'Hide' if ids_on else 'Show'} device IDs",
+                command=lambda: (self._show_device_ids.set(not ids_on),
+                                  self._redraw()))
+            menu.add_command(
+                label=f"{'Hide' if fov_on else 'Show'} FOV overlays",
+                command=lambda: (self._show_fov.set(not fov_on),
+                                  self._redraw()))
 
         try:
             menu.tk_popup(event.x_root, event.y_root)
