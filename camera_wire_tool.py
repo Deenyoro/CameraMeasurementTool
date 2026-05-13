@@ -3273,6 +3273,13 @@ class CameraWireTool:
         }
         for code in self._sym_keys:
             info = self.symbol_types[code]
+            # Tolerate a corrupted non-dict entry (hand-edited project
+            # file) — render it under 'Devices' with empty fields rather
+            # than crashing the whole list build. The Symbols-tab Edit
+            # button now normalizes corrupted entries on open.
+            if not isinstance(info, dict):
+                info = {"label": code, "shape": "ellipse",
+                        "color": "#FFFF00", "is_camera": False}
             # Search across code, label, AND the (effective) cable so
             # typing 'Cat6' surfaces every symbol whose wires roll up to
             # Cat6 — matches what users see in the row format.
@@ -3310,9 +3317,14 @@ class CameraWireTool:
                 else:
                     tag = "    "
                 cable = info.get("cable_type") or bom_mod.default_cable_for(info)
+                # Coerce label to str — a corrupted entry could carry None
+                # or an int, both of which would TypeError on [:28] slicing.
+                label = info.get("label", code)
+                if not isinstance(label, str):
+                    label = str(label) if label is not None else code
                 self.sym_listbox.insert(
                     tk.END,
-                    f' {tag:5s} {code:5s} {info["label"][:28]:28s} {cable:8s} x{n}',
+                    f' {tag:5s} {code:5s} {label[:28]:28s} {cable:8s} x{n}',
                 )
 
         # Empty-state placeholder so users know the search is what's
