@@ -9015,10 +9015,18 @@ class CameraWireTool:
                 id_help.grid()
                 form.config(text="Add new cable")
             else:
+                # Tolerate a corrupted (non-dict) catalog entry — fields
+                # fall back to safe defaults so the user can fix the row.
                 ct = self.cable_types.get(cid, {})
+                if not isinstance(ct, dict):
+                    ct = {}
+                try:
+                    cost = float(ct.get("cost_per_ft", 0) or 0)
+                except (TypeError, ValueError):
+                    cost = 0.0
                 id_var.set(cid)
                 label_var.set(ct.get("label", ""))
-                cost_var.set(f"{ct.get('cost_per_ft', 0):.4f}")
+                cost_var.set(f"{cost:.4f}")
                 color_var.set(ct.get("color", "#888888"))
                 id_entry.config(state="disabled")
                 id_help.grid_remove()
@@ -9096,7 +9104,10 @@ class CameraWireTool:
                 "Wires that use this cable will fall back to their device's "
                 "default cable in the BOM.\n\nUndo with Ctrl+Z."):
                 return
-            old_info = dict(self.cable_types[cid])
+            # Corrupted (non-dict) catalog entry → snapshot {} so undo
+            # can re-establish the slot without crashing dict(string).
+            raw = self.cable_types[cid]
+            old_info = dict(raw) if isinstance(raw, dict) else {}
             self._execute(EditCableTypeCmd(self, cid, old_info, None))
             self._post_command_refresh()
             repop()
