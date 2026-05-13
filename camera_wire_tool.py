@@ -3547,6 +3547,17 @@ class CameraWireTool:
         self._open_type_editor(code, info, is_new=True)
 
     def _open_type_editor(self, old_code: str, info: dict, is_new: bool = False) -> None:
+        # Normalize a corrupted (non-dict) symbol_types entry into a safe
+        # template so the editor still opens and lets the user fix it.
+        # Without this, info["label"] / info["shape"] / info["color"] would
+        # crash on string subscript before the dialog rendered.
+        if not isinstance(info, dict):
+            info = {"label": old_code, "shape": "ellipse",
+                    "color": "#FFFF00", "is_camera": False}
+        # Fill missing keys with sensible defaults — same protection for
+        # a partial dict (e.g. {'label': 'X'} missing shape/color).
+        info = {"label": old_code, "shape": "ellipse",
+                "color": "#FFFF00", "is_camera": False, **info}
         dlg = tk.Toplevel(self.root)
         dlg.title("Edit Symbol Type" if not is_new else "Add Symbol Type")
         # Wider so the 120×120 preview canvas in column 2 fits cleanly next
