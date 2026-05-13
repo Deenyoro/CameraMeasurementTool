@@ -9722,6 +9722,17 @@ class CameraWireTool:
 
         if self._dirty and not self._confirm_discard():
             return
+        # Mid-wire-draw isn't reflected in the dirty flag (it's transient
+        # interaction state). Warn the user before silently losing the
+        # in-progress points across the floor switch.
+        if self.current_wire_points:
+            if not messagebox.askyesno(
+                "Discard wire in progress?",
+                f"You're in the middle of drawing a wire "
+                f"({len(self.current_wire_points)} point(s) placed).\n\n"
+                f"Switching floors will discard it. Continue?"):
+                return
+            self.current_wire_points = []
 
         # Save active floor's wires back to project. Defensive: skip any
         # malformed in-memory route so the floor switch can't crash on a
