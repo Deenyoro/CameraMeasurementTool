@@ -4093,7 +4093,13 @@ class CameraWireTool:
                 self.root.after_cancel(self._settle_id)
             except tk.TclError:
                 pass
-        self._redraw()
+        # Tolerate a Configure that fires during window close — the canvas
+        # may already be partially torn down. Same defensive shape as
+        # _do_deferred_redraw / _settle_redraw.
+        try:
+            self._redraw()
+        except tk.TclError:
+            return
         self._settle_id = self.root.after(
             C.SETTLE_REDRAW_MS, self._settle_redraw)
 
