@@ -6322,20 +6322,31 @@ class CameraWireTool:
         self._redraw()
 
     def _center_on_selected(self) -> None:
+        # Sync from the dev-listbox row in case the user invoked this
+        # from a single-click in the listbox (rather than a canvas click).
         sel_idx = self.dev_listbox.curselection()
         if (sel_idx and hasattr(self, "_dev_listbox_rows")
                 and sel_idx[0] < len(self._dev_listbox_rows)):
             row = self._dev_listbox_rows[sel_idx[0]]
             if row is not None:   # not a group header
                 self.selected_device = row
-        if self.selected_device is None:
+        # If multiple devices are selected, center on the group's bbox
+        # midpoint so all are at least in view — was just the primary
+        # before, which could leave the rest off-screen.
+        targets = self.selected_devices if self.selected_devices else (
+            [self.selected_device] if self.selected_device is not None else [])
+        if not targets:
             return
-        d = self.selected_device
-        ix, iy = self._drawio_to_img(d["x"] + d["w"] / 2, d["y"] + d["h"] / 2)
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        self.offset_x = cw / 2 - ix * self.zoom
-        self.offset_y = ch / 2 - iy * self.zoom
+        cx_img = sum(
+            (d["x"] + d["w"] / 2) * self.dx_scale for d in targets
+        ) / len(targets)
+        cy_img = sum(
+            (d["y"] + d["h"] / 2) * self.dy_scale for d in targets
+        ) / len(targets)
+        self.offset_x = cw / 2 - cx_img * self.zoom
+        self.offset_y = ch / 2 - cy_img * self.zoom
         self._redraw()
 
     # ============================================================ List management
