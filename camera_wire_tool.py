@@ -1971,6 +1971,11 @@ class CameraWireTool:
         # so the dirty-state + mid-draw prompts still fire.
         self.root.bind("<Control-q>", lambda _e: self._on_close())
         self.root.bind("<Control-Q>", lambda _e: self._on_close())
+        # Ctrl+, — Mac/web convention for 'open Preferences'. The Tools
+        # menu already has the Preferences… entry; this just adds the
+        # keyboard path.
+        self.root.bind("<Control-comma>",
+                       lambda _e: self._open_preferences_dialog())
 
         # Edit
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -2138,7 +2143,8 @@ class CameraWireTool:
                                accelerator="Ctrl+U")
         tools_menu.add_separator()
         tools_menu.add_command(label="Preferences…",
-                               command=self._open_preferences_dialog)
+                               command=self._open_preferences_dialog,
+                               accelerator="Ctrl+,")
 
         # Export submenu inside File
         file_menu.add_separator()
@@ -8081,6 +8087,7 @@ class CameraWireTool:
                 ("Ctrl+S",         "Save"),
                 ("Ctrl+Shift+S",   "Save As…"),
                 ("Ctrl+Q",         "Exit (prompts to save if dirty)"),
+                ("Ctrl+,",         "Preferences…"),
             ]),
             ("Wire drawing", [
                 ("Shift (hold)", "Lock segment to 0/45/90° from last point"),
