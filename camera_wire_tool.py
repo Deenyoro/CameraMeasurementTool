@@ -6363,19 +6363,26 @@ class CameraWireTool:
         for did in ordered_keys:
             entries = groups[did]
             n_entries = len(entries)
-            wire_word = "wire" if n_entries == 1 else "wires"
+            wire_count = self._plural(n_entries, "wire")
             if did is None:
-                header = f"── unassigned  ({n_entries} {wire_word}) ──"
+                header = f"── unassigned  ({wire_count}) ──"
             else:
                 dev = next((d for d in self.devices if d["id"] == did), None)
                 dev_type = dev["type"] if dev else "—"
-                sym_label = (self.symbol_types.get(dev_type, {})
-                             .get("label", dev_type)) if dev else ""
+                sym_label = (self._safe_sym(dev_type).get("label", dev_type)
+                              if dev else "")
                 tot_in = sum((r.get("length_in") or 0) for _, r in entries)
-                tot_str = (self._format_length(tot_in) if tot_in
-                           else f"{int(sum(r['length_px'] for _, r in entries))} px")
+                if tot_in:
+                    tot_str = self._format_length(tot_in)
+                else:
+                    # Sum length_px tolerantly — a malformed route would
+                    # KeyError on r['length_px'] in the original genexpr.
+                    total_px = sum(r.get("length_px", 0)
+                                    for _, r in entries
+                                    if isinstance(r, dict))
+                    tot_str = f"{int(total_px)} px"
                 header = (f"── {did}  {dev_type:5s}  {sym_label[:24]}"
-                          f"  ({n_entries} {wire_word}, {tot_str}) ──")
+                          f"  ({wire_count}, {tot_str}) ──")
             self.wire_listbox.insert(tk.END, header)
             self._wire_listbox_rows.append(None)
             self.wire_listbox.itemconfig(self.wire_listbox.size() - 1,
