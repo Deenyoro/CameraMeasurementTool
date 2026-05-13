@@ -8842,10 +8842,18 @@ class CameraWireTool:
             for it in tree.get_children():
                 tree.delete(it)
             for cid, ct in sorted(self.cable_types.items()):
+                # Tolerate corrupted (non-dict) catalog entries — same
+                # treatment as cwt.bom.rollup uses on the data side.
+                if not isinstance(ct, dict):
+                    ct = {}
                 color = ct.get("color", "#888888")
+                try:
+                    cost = float(ct.get("cost_per_ft", 0) or 0)
+                except (TypeError, ValueError):
+                    cost = 0.0
                 tree.insert("", tk.END, iid=cid,
                             values=(cid, ct.get("label", cid),
-                                    f"{cur_now}{ct.get('cost_per_ft', 0):.4f}",
+                                    f"{cur_now}{cost:.4f}",
                                     color),
                             tags=(f"c_{cid}",))
                 # Color swatch via tag-coloring on the swatch column
