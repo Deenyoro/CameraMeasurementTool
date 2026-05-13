@@ -10119,7 +10119,6 @@ class CameraWireTool:
         try:
             self._minimap_photo = None       # skip mini-map render
             self._minimap_built = True
-            saved_show_walls = False         # (no walls to hide here, just safe)
             self._redraw()
             # Use Win32 PrintWindow against the canvas widget so we capture
             # exactly what's on the canvas, even if other windows overlap.
