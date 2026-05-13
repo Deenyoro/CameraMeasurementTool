@@ -741,9 +741,12 @@ class EditSymbolCmd(Command):
                  new_code: str, new_info: dict, is_new: bool):
         self.app = app
         self.old_code = old_code
-        self.old_info = dict(old_info)
+        # A corrupted (non-dict) prior entry would crash dict() on
+        # iteration. Snapshot an empty dict instead so undo restores
+        # 'absent' rather than reinstating garbage.
+        self.old_info = dict(old_info) if isinstance(old_info, dict) else {}
         self.new_code = new_code
-        self.new_info = dict(new_info)
+        self.new_info = dict(new_info) if isinstance(new_info, dict) else {}
         self.is_new = is_new
 
     def do(self):
@@ -776,7 +779,11 @@ class DeleteSymbolCmd(Command):
     def __init__(self, app: "CameraWireTool", code: str, info: dict, removed_devices: list[dict]):
         self.app = app
         self.code = code
-        self.info = dict(info)
+        # Snapshot must be a dict for undo's restore — replace a corrupted
+        # non-dict prior entry with an empty placeholder so the symbol
+        # still re-appears in the catalog after undo (the user can edit
+        # it to fix the actual contents).
+        self.info = dict(info) if isinstance(info, dict) else {}
         self.removed_devices = list(removed_devices)
         self._removed_wires: list[tuple[int, dict]] = []
 
