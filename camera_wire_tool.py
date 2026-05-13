@@ -6609,6 +6609,10 @@ class CameraWireTool:
         if idx is None:
             return
         route = self.wire_routes[idx]
+        # Defensive — a corrupted in-memory route shouldn't crash the
+        # cable-type setter.
+        if not isinstance(route, dict):
+            return
         old = route.get("cable_type")
         if old == cable_id:
             self._flash_status("Cable type unchanged.", ttl_ms=2000)
@@ -6627,6 +6631,8 @@ class CameraWireTool:
             if ridx is None:
                 continue
             route = self.wire_routes[ridx]
+            if not isinstance(route, dict):
+                continue
             old = route.get("cable_type")
             if old != cable_id:
                 entries.append((route, old, cable_id))
