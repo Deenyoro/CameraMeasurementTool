@@ -3549,6 +3549,13 @@ class CameraWireTool:
         currently-selected symbol type on the map."""
         code = self._selected_symbol_code()
         if not code:
+            # Used to silently return — the user hitting 'Place on Map'
+            # with no row selected was left wondering why nothing
+            # happened. Surface the cue instead.
+            self._flash_status(
+                "Pick a symbol type from the list first, then click "
+                "'Place on Map' (or double-click the row).",
+                ttl_ms=3500)
             return
         self.place_type_var.set(code)
         self._start_place_device()
