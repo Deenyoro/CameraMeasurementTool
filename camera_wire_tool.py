@@ -1809,8 +1809,6 @@ class CameraWireTool:
         # Treat the FIRST clipboard entry's center as the offset reference;
         # paste maintains relative geometry of multi-device groups.
         first = clip[0]
-        first_cx = (first["x"] + first["w"]/2) * self.dx_scale
-        first_cy = (first["y"] + first["h"]/2) * self.dy_scale
         anchor_dx, anchor_dy = self._img_to_drawio(anchor_ix, anchor_iy)
         ref_dx = first["x"] + first["w"] / 2
         ref_dy = first["y"] + first["h"] / 2
