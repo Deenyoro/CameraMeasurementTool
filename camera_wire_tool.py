@@ -4393,7 +4393,7 @@ class CameraWireTool:
                 msg = (f"📍  PLACEMENT MODE — click on the map to drop "
                        f"annotation{preview}.   Esc to cancel.")
             else:
-                info = self.symbol_types.get(self._place_type, {})
+                info = self._safe_sym(self._place_type)
                 label = info.get("label", self._place_type)
                 msg = (f"📍  PLACEMENT MODE — click anywhere on the map to drop a "
                        f"'{self._place_type}' ({label}).   Esc to cancel.")
@@ -4637,7 +4637,7 @@ class CameraWireTool:
         elif did:
             dev = next((d for d in self.devices if d["id"] == did), None)
             if dev:
-                info = self.symbol_types.get(dev["type"], {})
+                info = self._safe_sym(dev["type"])
                 wire_color = info.get("color", "#00BFFF")
 
         color = "#FF4444" if is_selected else wire_color
@@ -4972,8 +4972,7 @@ class CameraWireTool:
             margin = max(dw, dh) * C.HIT_TEST_MARGIN_RATIO
             if (dx - margin <= ix <= dx + dw + margin
                     and dy - margin <= iy <= dy + dh + margin):
-                info = self.symbol_types.get(d["type"], {})
-                if info.get("is_camera"):
+                if self._is_camera_type(d["type"]):
                     return d
                 hit = d
         return hit
@@ -5329,7 +5328,7 @@ class CameraWireTool:
                     self.current_wire_points.append((cx_dev, cy_dev))
                     self._wire_snap = None
                     self._redraw()
-                    info = self.symbol_types.get(hit_dev["type"], {})
+                    info = self._safe_sym(hit_dev["type"])
                     self.status_label.config(
                         text=f"Wire from {hit_dev['id']} ({info.get('label','?')}) "
                              f"— click route points, right-click to finish.")
@@ -5745,7 +5744,7 @@ class CameraWireTool:
                 self._hover_device = dev_under
                 self.canvas.delete("hover_info")
                 if dev_under is not None:
-                    info = self.symbol_types.get(dev_under["type"], {})
+                    info = self._safe_sym(dev_under["type"])
                     label = info.get("label", dev_under["type"])
                     n_wires = sum(1 for w in self.wire_routes
                                   if w.get("device_id") == dev_under["id"])
