@@ -8199,8 +8199,17 @@ class CameraWireTool:
                     label=f"Apply default FOV for {dev['type']}",
                     command=lambda d=dev: self._apply_default_fov_to_one(d),
                 )
+                # State-aware toggle label so the user sees what the
+                # click will DO, not just that something will toggle.
+                # An absent / non-dict fov is treated as 'showing' since
+                # _draw_fov_cones falls back to per-type defaults.
+                fov_raw = dev.get("fov")
+                cone_visible = (fov_raw.get("show", True)
+                                if isinstance(fov_raw, dict) else True)
                 menu.add_command(
-                    label="Toggle FOV cone for this camera",
+                    label=("Hide FOV cone for this camera"
+                           if cone_visible else
+                           "Show FOV cone for this camera"),
                     command=lambda d=dev: self._toggle_camera_fov(d),
                 )
                 menu.add_separator()
