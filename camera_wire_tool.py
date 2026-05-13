@@ -2797,7 +2797,7 @@ class CameraWireTool:
         if not os.path.exists(path):
             messagebox.showwarning("Missing", f"File no longer exists:\n{path}")
             return
-        if self._dirty and not self._confirm_discard():
+        if not self._can_navigate_away():
             return
         self._flush_pending_settings()
         self.root.destroy()
@@ -3244,10 +3244,29 @@ class CameraWireTool:
             self._do_persist_user_settings()
 
     def _on_close(self) -> None:
-        if self._dirty and not self._confirm_discard():
+        if not self._can_navigate_away():
             return
         self._flush_pending_settings()
         self.root.quit()
+
+    def _can_navigate_away(self) -> bool:
+        """Combined gate for window-close / Open / Recent / floor-switch.
+        Asks about (a) an in-progress wire draw and (b) unsaved project
+        changes. Returns True only if the user OK'd both. Centralized so
+        every navigation path goes through the same prompts in the same
+        order — without this, _file_open + _open_recent + _switch_floor
+        each had to repeat the wire-mid-draw check separately."""
+        if self.current_wire_points:
+            if not messagebox.askyesno(
+                "Discard wire in progress?",
+                f"You're in the middle of drawing a wire "
+                f"({len(self.current_wire_points)} point(s) placed).\n\n"
+                f"Continuing will discard it. Proceed?"):
+                return False
+            self.current_wire_points = []
+        if self._dirty and not self._confirm_discard():
+            return False
+        return True
 
     def _confirm_discard(self) -> bool:
         ans = messagebox.askyesnocancel(
@@ -6855,7 +6874,7 @@ class CameraWireTool:
 
     # ============================================================ File operations
     def _file_open(self) -> None:
-        if self._dirty and not self._confirm_discard():
+        if not self._can_navigate_away():
             return
         path = filedialog.askopenfilename(
             title="Open .drawio file",
@@ -9720,19 +9739,8 @@ class CameraWireTool:
         if target is None or floor_id == self._project.active_floor:
             return
 
-        if self._dirty and not self._confirm_discard():
+        if not self._can_navigate_away():
             return
-        # Mid-wire-draw isn't reflected in the dirty flag (it's transient
-        # interaction state). Warn the user before silently losing the
-        # in-progress points across the floor switch.
-        if self.current_wire_points:
-            if not messagebox.askyesno(
-                "Discard wire in progress?",
-                f"You're in the middle of drawing a wire "
-                f"({len(self.current_wire_points)} point(s) placed).\n\n"
-                f"Switching floors will discard it. Continue?"):
-                return
-            self.current_wire_points = []
 
         # Save active floor's wires back to project. Defensive: skip any
         # malformed in-memory route so the floor switch can't crash on a
