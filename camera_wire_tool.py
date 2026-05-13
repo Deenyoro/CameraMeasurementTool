@@ -6467,9 +6467,21 @@ class CameraWireTool:
             cost_str = f"  •  {cur}{report.grand_total:,.2f}"
         except Exception:
             cost_str = ""
+        # Defensive sum — a malformed route with no length_px shouldn't
+        # KeyError on the toolbar refresh (which fires every redraw).
+        def _safe_px_total():
+            t = 0.0
+            for r in self.wire_routes:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    t += float(r.get("length_px", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+            return int(t)
         wire_str = (self._format_length(grand_total_in)
                     if self.scale_factor and self.wire_routes
-                    else (f"{int(sum(r['length_px'] for r in self.wire_routes))}px"
+                    else (f"{_safe_px_total()}px"
                           if self.wire_routes else "—"))
         self.total_toolbar_label.config(
             text=f"Devices: {n_dev}  ·  Cameras: {n_cam}  ·  "
