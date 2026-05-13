@@ -1574,8 +1574,15 @@ class CameraWireTool:
         # under the cursor (FOV for cameras, reassign for wires, edit
         # for annotations). One of the most common UX expectations.
         self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
-        # Clear cursor coord readout when cursor leaves the canvas
-        self.canvas.bind("<Leave>", lambda _e: self.cursor_label.config(text=""))
+        # Clear cursor coord readout when cursor leaves the canvas.
+        # Mouse-leave during window close can hit a torn-down label —
+        # silently swallow rather than spam the callback log.
+        def _on_canvas_leave(_e=None):
+            try:
+                self.cursor_label.config(text="")
+            except tk.TclError:
+                pass
+        self.canvas.bind("<Leave>", _on_canvas_leave)
 
     # ============================================================ Tab cycling / select-all
     def _cycle_tab(self, direction: int) -> None:
