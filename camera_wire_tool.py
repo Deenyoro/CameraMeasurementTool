@@ -7236,11 +7236,21 @@ class CameraWireTool:
         def populate(query: str = "") -> None:
             listbox.delete(0, tk.END)
             q = query.lower().strip()
+            n_matched = 0
             for visible_label, search_text, _ in candidates:
                 if not q or all(tok in search_text.lower() for tok in q.split()):
                     listbox.insert(tk.END, visible_label)
-            if listbox.size():
+                    n_matched += 1
+            if n_matched:
                 listbox.selection_set(0)
+            elif q:
+                # Empty-state placeholder so the user knows the search hit
+                # nothing — without this, an empty listbox looks like the
+                # palette broke. State=disabled would be nicer but Tk's
+                # Listbox doesn't support per-item disable; grey foreground
+                # is the next best signal.
+                listbox.insert(tk.END, f"  (no matches for '{query}')")
+                listbox.itemconfig(0, foreground="#888888")
         populate()
 
         # Filter list as the user types
