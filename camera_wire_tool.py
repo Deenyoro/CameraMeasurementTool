@@ -3347,6 +3347,10 @@ class CameraWireTool:
         # Cameras float to the top, then access/intrusion, then run points.
         def _sort_key(d):
             sym = self.symbol_types.get(d["type"], {})
+            # Defensive — symbol_types entry might be a corrupted non-dict
+            # from a hand-edited project file. Treat as empty for sort.
+            if not isinstance(sym, dict):
+                sym = {}
             cat = (0 if sym.get("is_camera")
                    else 2 if sym.get("is_run_point")
                    else 1)
@@ -3379,6 +3383,10 @@ class CameraWireTool:
         by_type: dict[str, list[dict]] = {}
         for d in self.devices:
             info = self.symbol_types.get(d["type"], {})
+            # Same defensive coerce as the sort key — a corrupted symbol
+            # entry shouldn't break the entire device list.
+            if not isinstance(info, dict):
+                info = {}
             label = info.get("label", d["type"])
             # Include the effective cable in the search blob so 'Cat6'
             # surfaces every device whose wires roll up to Cat6 — matches
@@ -3395,13 +3403,22 @@ class CameraWireTool:
             by_type.setdefault(d["type"], []).append(d)
             self._filtered_devices.append(d)
 
+        def _safe_sym(code):
+            """Return symbol_types[code] coerced to a dict for read-only
+            access. Tolerates corrupted hand-edited entries."""
+            s = self.symbol_types.get(code, {})
+            return s if isinstance(s, dict) else {}
         for t_code in sorted(by_type.keys(),
                               key=lambda c: (
-                                  0 if self.symbol_types.get(c, {}).get("is_camera")
-                                  else 2 if self.symbol_types.get(c, {}).get("is_run_point")
+                                  0 if _safe_sym(c).get("is_camera")
+                                  else 2 if _safe_sym(c).get("is_run_point")
                                   else 1, c)):
-            sym = self.symbol_types.get(t_code, {})
+            sym = _safe_sym(t_code)
             sym_label = sym.get("label", t_code)
+            # Coerce label to str — a corrupted None / int would TypeError
+            # on the [:24] slice below.
+            if not isinstance(sym_label, str):
+                sym_label = str(sym_label) if sym_label is not None else t_code
             count = len(by_type[t_code])
             # Pluralize the category word — 'run point' / 'run points' etc.
             cat_singular = ("camera" if sym.get("is_camera")
