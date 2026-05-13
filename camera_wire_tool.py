@@ -10417,6 +10417,11 @@ def main() -> None:
     root = tk.Tk()
     apply_theme(root)
     root.title("Camera Wire Estimation Tool")
+    # Floor plan + 4-tab side panel needs room — without a minsize the
+    # user can drag the window so narrow the toolbar wraps and the
+    # tab notebook clips. Tk's default size on Windows is around
+    # 200×200 which is essentially unusable; set a sensible floor.
+    root.minsize(900, 600)
 
     drawio_files = _discover_drawio_files()
     script_dir = os.path.dirname(os.path.abspath(__file__))
