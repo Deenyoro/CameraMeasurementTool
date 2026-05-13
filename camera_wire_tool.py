@@ -1611,7 +1611,7 @@ class CameraWireTool:
         if self._show_only_selected_fov.get():
             sel = self._primary_selected
             is_cam = (sel is not None
-                      and self.symbol_types.get(sel["type"], {}).get("is_camera"))
+                      and self._is_camera_type(sel["type"]))
             if not is_cam:
                 self._flash_status(
                     "Select a camera to see its FOV — this toggle "
@@ -1630,7 +1630,7 @@ class CameraWireTool:
                                   ttk.Spinbox, ttk.Combobox)):
             return
         cameras = [d for d in self.devices
-                   if self.symbol_types.get(d["type"], {}).get("is_camera")]
+                   if self._is_camera_type(d["type"])]
         if not cameras:
             self._flash_status("No cameras placed yet.", ttl_ms=2500)
             return
@@ -2052,12 +2052,11 @@ class CameraWireTool:
         def _refresh_tools_menu_state():
             try:
                 cams = [d for d in self.devices
-                        if self.symbol_types.get(d["type"], {}).get("is_camera")]
+                        if self._is_camera_type(d["type"])]
                 n_cams = len(cams)
                 sel = self._primary_selected
-                sel_is_cam = (sel is not None and
-                              self.symbol_types.get(sel["type"], {})
-                              .get("is_camera"))
+                sel_is_cam = (sel is not None
+                              and self._is_camera_type(sel["type"]))
                 tools_menu.entryconfig(
                     "Edit FOV for Selected Camera…",
                     state=tk.NORMAL if sel_is_cam else tk.DISABLED)
@@ -3461,7 +3460,7 @@ class CameraWireTool:
             n_filtered = len(self._filtered_devices)
             n_cam_filtered = sum(
                 1 for d in self._filtered_devices
-                if self.symbol_types.get(d["type"], {}).get("is_camera"))
+                if self._is_camera_type(d["type"]))
             if query and n_filtered != n_total:
                 txt = (f"{n_filtered} of "
                        f"{self._plural(n_total, 'device')} match "
@@ -4767,6 +4766,14 @@ class CameraWireTool:
         Defaults plural to singular + 's' (works for device/wire/run/symbol/
         camera/point/etc.). Pass explicit `plural` for irregulars."""
         return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+    def _is_camera_type(self, type_code) -> bool:
+        """Resolve `is_camera` for a symbol code, tolerating corrupted
+        (non-dict) symbol_types entries from hand-edited project files.
+        Used by every camera-counting loop in the app — without this
+        helper one corrupted entry could AttributeError each one."""
+        sym = self.symbol_types.get(type_code, {})
+        return isinstance(sym, dict) and bool(sym.get("is_camera"))
 
     def _format_length(self, inches) -> str:
         if inches is None:
@@ -6347,8 +6354,7 @@ class CameraWireTool:
 
         # Toolbar metrics: device counts + total wire + total cost.
         n_dev = len(self.devices)
-        n_cam = sum(1 for d in self.devices
-                    if self.symbol_types.get(d["type"], {}).get("is_camera"))
+        n_cam = sum(1 for d in self.devices if self._is_camera_type(d["type"]))
         n_wire = len(self.wire_routes)
         cur = self._bom_currency_var.get() or "$"
         try:
@@ -6797,7 +6803,7 @@ class CameraWireTool:
             # always-visible default. Quiet, info-dense.
             n_dev = len(self.devices)
             n_cam = sum(1 for d in self.devices
-                        if self.symbol_types.get(d["type"], {}).get("is_camera"))
+                        if self._is_camera_type(d["type"]))
             n_other = n_dev - n_cam
             n_wire = len(self.wire_routes)
             # Pluralize cleanly — "1 device", "2 devices", not "1 device(s)".
@@ -7970,8 +7976,7 @@ class CameraWireTool:
         stats = ttk.LabelFrame(dlg, text="This project")
         stats.pack(fill=tk.X, padx=20, pady=10)
         n_dev = len(self.devices)
-        n_cam = sum(1 for d in self.devices
-                    if self.symbol_types.get(d["type"], {}).get("is_camera"))
+        n_cam = sum(1 for d in self.devices if self._is_camera_type(d["type"]))
         n_wire = len(self.wire_routes)
         n_floor = len(self._project.floors) if self._project else 1
         for label, value in (
@@ -8449,7 +8454,7 @@ class CameraWireTool:
             cam_count = 0; cam_runs = 0; cam_in = 0.0
             total_count = 0; total_runs = 0; total_in = 0.0
             for line in inv:
-                is_cam = self.symbol_types.get(line.code, {}).get("is_camera")
+                is_cam = self._is_camera_type(line.code)
                 tag = "cam" if is_cam else "other"
                 wire_str = (self._format_length(line.total_in)
                             if line.total_in else "—")
