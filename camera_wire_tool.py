@@ -1507,6 +1507,15 @@ class CameraWireTool:
         b("<plus>", _canvas_only(lambda: self._zoom_button(1)))
         b("<equal>", _canvas_only(lambda: self._zoom_button(1)))
         b("<minus>", _canvas_only(lambda: self._zoom_button(-1)))
+        # Browser-convention aliases for zoom — Ctrl++ / Ctrl+= /
+        # Ctrl+-. Tk's <equal> covers the unshifted '+ ' key on US
+        # keyboards (typed as Shift+=).
+        b("<Control-plus>",  lambda _e: self._zoom_button(1)
+            if not self._is_text_focus(_e) else None)
+        b("<Control-equal>", lambda _e: self._zoom_button(1)
+            if not self._is_text_focus(_e) else None)
+        b("<Control-minus>", lambda _e: self._zoom_button(-1)
+            if not self._is_text_focus(_e) else None)
         # Arrow keys — nudge selected device(s) by 1 drawio-unit (10 with Shift).
         # Standard CAD pattern; honors text-widget focus AND only fires in
         # Move mode so it doesn't yank the in-progress wire/cal anchor
@@ -8055,6 +8064,7 @@ class CameraWireTool:
                 ("Ctrl+0",       "Fit (alternate — for muscle memory from "
                                  "browsers)"),
                 ("+ / −",        "Zoom in / out around viewport center"),
+                ("Ctrl++ / Ctrl+−", "Zoom alternate (matches browsers)"),
                 ("Z",            "Zoom to current selection"),
                 ("[ / ]",        "Cycle through devices in id order"),
                 ("Shift+[ / ]",  "Cycle through wires"),
