@@ -1871,8 +1871,8 @@ class CameraWireTool:
         if route is None:
             messagebox.showinfo("Select", "Select a wire to simplify.")
             return
-        pts = route["points"]
-        if len(pts) <= 2:
+        pts = route.get("points") if isinstance(route, dict) else None
+        if not isinstance(pts, list) or len(pts) <= 2:
             self._flash_status("Wire already minimal — nothing to simplify.")
             return
         new_pts = [pts[0]]
@@ -6664,13 +6664,16 @@ class CameraWireTool:
         if idx is None:
             return  # header / placeholder row
         route = self.wire_routes[idx]
-        did = route.get("device_id")
+        did = route.get("device_id") if isinstance(route, dict) else None
         device = next((d for d in self.devices if d["id"] == did), None)
-
+        # Defensive — a malformed route shouldn't crash the confirm prompt
+        # build on len(route['points']).
+        pts = route.get("points") if isinstance(route, dict) else None
+        n_points = len(pts) if isinstance(pts, list) else 0
         if not messagebox.askyesno(
             "Re-route wire?",
-            f"Delete this wire ({len(route['points'])} points, "
-            f"{self._format_length(route.get('length_in') or 0)}) "
+            f"Delete this wire ({n_points} points, "
+            f"{self._format_length(route.get('length_in') or 0) if isinstance(route, dict) else '--'}) "
             "and start a new one in its place?\n\n"
             "Undo (Ctrl+Z) restores the original wire."):
             return
