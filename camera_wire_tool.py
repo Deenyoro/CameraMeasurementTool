@@ -1497,6 +1497,13 @@ class CameraWireTool:
                 fn()
             return _w
         b("<Home>", _canvas_only(lambda: (self._fit_image(), self._redraw())))
+        # Ctrl+0 is the browser convention for 'reset zoom'. Map it to
+        # Fit since that's our canonical 'reset the view' action — more
+        # useful here than a literal 100% zoom (the user wants to see
+        # the whole floor plan, not a pixel-accurate scale).
+        b("<Control-Key-0>", lambda _e: (
+            self._fit_image(), self._redraw()) if not self._is_text_focus(_e)
+            else None)
         b("<plus>", _canvas_only(lambda: self._zoom_button(1)))
         b("<equal>", _canvas_only(lambda: self._zoom_button(1)))
         b("<minus>", _canvas_only(lambda: self._zoom_button(-1)))
@@ -8045,6 +8052,8 @@ class CameraWireTool:
                 ("Ctrl+drag",    "Pan (alternate)"),
                 ("Space + drag", "Temporary pan"),
                 ("Home",         "Fit floor plan to viewport"),
+                ("Ctrl+0",       "Fit (alternate — for muscle memory from "
+                                 "browsers)"),
                 ("+ / −",        "Zoom in / out around viewport center"),
                 ("Z",            "Zoom to current selection"),
                 ("[ / ]",        "Cycle through devices in id order"),
