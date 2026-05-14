@@ -2713,18 +2713,28 @@ class CameraWireTool:
             justify=tk.CENTER,
         )
         self._bom_pill_subtotal.pack(side=tk.LEFT, padx=(0, 4))
+        Tooltip(self._bom_pill_subtotal,
+                "Σ (cable cost per ft × total wire ft) across every cable "
+                "type in the BOM. Before waste + tax.")
         self._bom_pill_waste = tk.Label(
             totals_frame, text="Waste\n—", padx=10, pady=4,
             bg="#33231a", fg="#ffd0a0", font=("Segoe UI", 9),
             justify=tk.CENTER,
         )
         self._bom_pill_waste.pack(side=tk.LEFT, padx=2)
+        Tooltip(self._bom_pill_waste,
+                "Extra material allowance: subtotal × (waste_factor − 1). "
+                "Default waste is 10% (1.10). Edit in the BOM input row "
+                "or Preferences.")
         self._bom_pill_tax = tk.Label(
             totals_frame, text="Tax\n—", padx=10, pady=4,
             bg="#1a3328", fg="#a0e0c0", font=("Segoe UI", 9),
             justify=tk.CENTER,
         )
         self._bom_pill_tax.pack(side=tk.LEFT, padx=2)
+        Tooltip(self._bom_pill_tax,
+                "Tax on (subtotal + waste). Enter as a decimal — "
+                "0.08 = 8%. Edit in the BOM input row or Preferences.")
         self._bom_pill_total = tk.Label(
             totals_frame, text="GRAND TOTAL\n—",
             padx=12, pady=4,
@@ -2732,6 +2742,9 @@ class CameraWireTool:
             justify=tk.CENTER,
         )
         self._bom_pill_total.pack(side=tk.RIGHT, padx=(8, 0))
+        Tooltip(self._bom_pill_total,
+                "Subtotal + Waste + Tax. The number to put on the "
+                "installer quote.")
         # Warning band — surfaces "scale not set" / "N unassigned wires"
         # written by _refresh_bom_tab. Packed so it's actually visible
         # (was a no-op stub for several rounds — bug fixed).
