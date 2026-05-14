@@ -3315,6 +3315,11 @@ class CameraWireTool:
         else:
             self._dirty = True
         self._update_title()
+        # Reflect the dirty toggle in the toolbar indicator immediately —
+        # same as _mark_dirty / _mark_clean. Without this, undoing back
+        # to the saved state would leave '● Modified' showing for up
+        # to 15s.
+        self._tick_save_indicator()
 
     def _update_title(self) -> None:
         name = os.path.basename(self.drawio_path)
