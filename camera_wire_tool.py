@@ -2415,7 +2415,9 @@ class CameraWireTool:
         ttk.Label(s_frame, text="🔎").pack(side=tk.LEFT)
         self._dev_search_entry = ttk.Entry(s_frame, textvariable=self._dev_search_var)
         self._dev_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        Tooltip(self._dev_search_entry, "Filter devices by ID, type, or label (Ctrl+F)")
+        Tooltip(self._dev_search_entry,
+                "Filter devices by ID, type, label, or effective cable "
+                "(Cat6 / Cat5e / …). Ctrl+F focuses.")
         self._dev_search_var.trace_add("write", lambda *_: self._refresh_device_list())
 
         df = ttk.Frame(tab_dev)
@@ -2471,7 +2473,9 @@ class CameraWireTool:
         ttk.Label(ws_frame, text="🔎").pack(side=tk.LEFT)
         self._wire_search_entry = ttk.Entry(ws_frame, textvariable=self._wire_search_var)
         self._wire_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        Tooltip(self._wire_search_entry, "Filter wires by associated device ID (Ctrl+F)")
+        Tooltip(self._wire_search_entry,
+                "Filter wires by device ID, type, label, or effective "
+                "cable (Cat6 / Cat5e / RG59 / …). Ctrl+F focuses.")
         self._wire_search_var.trace_add("write", lambda *_: self._refresh_wire_list())
 
         wf = ttk.Frame(tab_wire)
@@ -2534,7 +2538,9 @@ class CameraWireTool:
         ttk.Label(ss_frame, text="🔎").pack(side=tk.LEFT)
         self._sym_search_entry = ttk.Entry(ss_frame, textvariable=self._sym_search_var)
         self._sym_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        Tooltip(self._sym_search_entry, "Filter symbol types (Ctrl+F)")
+        Tooltip(self._sym_search_entry,
+                "Filter symbol types by code, label, or effective "
+                "cable. Ctrl+F focuses.")
         self._sym_search_var.trace_add("write", lambda *_: self._refresh_symbol_list())
 
         sf = ttk.Frame(tab_sym)
