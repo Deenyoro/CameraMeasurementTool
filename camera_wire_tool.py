@@ -2017,6 +2017,10 @@ class CameraWireTool:
                     state=tk.NORMAL if self.future else tk.DISABLED)
                 n_sel = len(self.selected_devices)
                 sel_state = tk.NORMAL if n_sel else tk.DISABLED
+                edit_menu.entryconfig("Copy Selected", state=sel_state)
+                edit_menu.entryconfig("Paste", state=(
+                    tk.NORMAL if getattr(self, "_device_clipboard", None)
+                    else tk.DISABLED))
                 edit_menu.entryconfig("Duplicate Selected", state=sel_state)
                 edit_menu.entryconfig("Delete Selected", state=(
                     tk.NORMAL if (n_sel or
@@ -2030,6 +2034,15 @@ class CameraWireTool:
         edit_menu.config(postcommand=_refresh_edit_menu_state)
         edit_menu.add_command(label="Undo", command=self._undo, accelerator="Ctrl+Z")
         edit_menu.add_command(label="Redo", command=self._redo, accelerator="Ctrl+Y")
+        edit_menu.add_separator()
+        # Clipboard ops were keyboard-only before — add menu entries so
+        # they're discoverable.
+        edit_menu.add_command(label="Copy Selected",
+                              command=self._copy_selected_devices,
+                              accelerator="Ctrl+C")
+        edit_menu.add_command(label="Paste",
+                              command=lambda: self._paste_devices(),
+                              accelerator="Ctrl+V")
         edit_menu.add_separator()
         edit_menu.add_command(label="Select All Devices",
                               command=self._select_all_devices,
