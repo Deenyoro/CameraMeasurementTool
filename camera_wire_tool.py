@@ -6147,10 +6147,16 @@ class CameraWireTool:
         try:
             self.canvas.delete("wire_preview")
             self.canvas.delete("wip_wire")
+            # wire_snap is the colored ring drawn around the snap target
+            # while the cursor hovers near a snap-eligible point. Was
+            # cleared on every Motion but not on Esc — could linger
+            # after the wire mode exits.
+            self.canvas.delete("wire_snap")
             self.canvas.delete("anchor")
             self.canvas.delete("cal_preview")
         except tk.TclError:
             pass
+        self._wire_snap = None
         self.cal_points = []
         self._floor_anchors_picking = None
         # Clear annotation-placement state so Esc/cancel doesn't leave a
