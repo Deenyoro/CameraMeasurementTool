@@ -5130,20 +5130,62 @@ class CameraWireTool:
         """If the click is near ANY waypoint of the selected wire (start,
         intermediate, or end), return (route, point_index). Hit threshold
         scales inversely with zoom so the handle is grabbable at any
-        zoom level."""
+        zoom level. Endpoint handles (drawn as 14-canvas-px squares) get
+        a wider grab radius so they're reliably draggable when they sit
+        on top of a device — the device's edge would otherwise look
+        equally grabbable, and a missed click on the handle silently
+        falls through to device-drag and confuses the user."""
         route = self._selected_wire()
         if route is None:
             return None
-        pts = route["points"]
-        if len(pts) < 2:
+        pts = route.get("points") if isinstance(route, dict) else None
+        if not isinstance(pts, list) or len(pts) < 2:
             return None
-        # 10 canvas-pixel grab radius → image-pixel equivalent
+        # Endpoints: 16-canvas-px radius (the handle itself is 14px wide,
+        # so this is a small forgiveness zone around the visible square).
+        # Interior points: 12-canvas-px radius (drawn as 10px circles).
+        end_thresh = max(8.0, 16.0 / max(self.zoom, 0.01))
+        mid_thresh = max(6.0, 12.0 / max(self.zoom, 0.01))
+        last = len(pts) - 1
+        best_i = None; best_d = float("inf")
+        for i in range(len(pts)):
+            try:
+                px, py = float(pts[i][0]), float(pts[i][1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            d = math.hypot(ix - px, iy - py)
+            t = end_thresh if (i == 0 or i == last) else mid_thresh
+            if d <= t and d < best_d:
+                best_d = d; best_i = i
+        if best_i is None:
+            return None
+        return (route, best_i)
+
+    def _any_waypoint_at(self, ix: float, iy: float):
+        """Like _waypoint_at, but searches every wire — not just the
+        currently selected one. Used so a single click on a visible
+        waypoint can BOTH select the wire AND arm the drag, instead of
+        forcing two clicks (one to select, one to grab the handle).
+        Returns (route, point_index) for the nearest hit, or None."""
         thresh = max(6.0, 10.0 / max(self.zoom, 0.01))
-        for i in range(len(pts)):       # all points draggable
-            px, py = pts[i]
-            if math.hypot(ix - px, iy - py) <= thresh:
-                return (route, i)
-        return None
+        best = None
+        best_d = float("inf")
+        for route in self.wire_routes:
+            if not isinstance(route, dict):
+                continue
+            pts = route.get("points")
+            if not isinstance(pts, list) or len(pts) < 2:
+                continue
+            for i in range(len(pts)):
+                try:
+                    px, py = float(pts[i][0]), float(pts[i][1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                d = math.hypot(ix - px, iy - py)
+                if d <= thresh and d < best_d:
+                    best_d = d
+                    best = (route, i)
+        return best
 
     def _wire_at(self, ix: float, iy: float) -> int | None:
         """Return the wire index whose line passes near (ix, iy). Used to
@@ -5570,6 +5612,10 @@ class CameraWireTool:
 
             # 2. Click on a wire line (not at a device, not on a handle):
             #    select that wire so its waypoints become editable.
+            #    If the click also happens to land near a waypoint of
+            #    that wire, ALSO arm the drag in one action — so the
+            #    user gets click-and-drag reshape in a single gesture
+            #    instead of click-then-click-then-drag.
             if self._device_at(ix, iy) is None:
                 w_idx = self._wire_at(ix, iy)
                 if w_idx is not None:
@@ -5582,10 +5628,38 @@ class CameraWireTool:
                         if dev is not None:
                             self.selected_device = dev
                     self._redraw()
+                    # Check waypoint proximity on the just-selected wire
+                    # and arm the drag if the click is on or near a handle.
+                    pts = route.get("points")
+                    if isinstance(pts, list) and len(pts) >= 2:
+                        # Wider grab radius here than _waypoint_at — the
+                        # user clicked the wire-line intentionally and
+                        # we know the wire is the target, so be generous.
+                        thresh = max(10.0, 14.0 / max(self.zoom, 0.01))
+                        best_i = None; best_d = float("inf")
+                        for i in range(len(pts)):
+                            try:
+                                px, py = float(pts[i][0]), float(pts[i][1])
+                            except (TypeError, ValueError, IndexError):
+                                continue
+                            d = math.hypot(ix - px, iy - py)
+                            if d <= thresh and d < best_d:
+                                best_d = d; best_i = i
+                        if best_i is not None:
+                            self._dragging_waypoint = (
+                                route, best_i, route["points"][best_i])
+                            try:
+                                self.canvas.config(cursor="fleur")
+                            except tk.TclError:
+                                pass
+                            self.status_label.config(
+                                text=f"Dragging waypoint #{best_i+1}/"
+                                     f"{len(pts)} — release to commit.")
+                            return
                     self.status_label.config(
                         text=f"Wire selected ({len(route['points'])} pts, "
                              f"{self._format_length(route.get('length_in') or 0)}). "
-                             "Drag any interior handle to reshape.")
+                             "Drag any handle to reshape.")
                     return
 
             dev = self._device_at(ix, iy)
