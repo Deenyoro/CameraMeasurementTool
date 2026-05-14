@@ -6839,6 +6839,15 @@ class CameraWireTool:
                           command=self._reroute_selected_wire)
             m.add_command(label="🔗  Reassign device…",
                           command=self._reassign_selected_wire)
+            # Center the wire on the map — matches the Center entry on
+            # the device-list right-click. Uses the route midpoint via
+            # _jump_to_wire (which also brings the Wires tab forward,
+            # harmless since we're already there).
+            route_idx_for_jump = self._wire_index_for_listbox(idx)
+            if route_idx_for_jump is not None:
+                m.add_command(label="🎯  Center on map",
+                              command=lambda ri=route_idx_for_jump:
+                                  self._jump_to_wire(ri))
             cable_sub = self._build_cable_type_submenu(
                 m, self._set_selected_wire_cable_type)
             if cable_sub is not None:
