@@ -3279,6 +3279,11 @@ class CameraWireTool:
     def _mark_dirty(self) -> None:
         self._dirty = True
         self._update_title()
+        # Refresh the toolbar's '● Modified' / 'Saved Xs ago' indicator
+        # immediately. Without this, the indicator could lag up to the
+        # 15s tick interval before reflecting the dirty state — confusing
+        # right after a Ctrl+Z that re-dirties the project.
+        self._tick_save_indicator()
 
     def _mark_clean(self) -> None:
         self._dirty = False
@@ -7459,9 +7464,23 @@ class CameraWireTool:
 
     # ============================================================ Save indicator
     def _tick_save_indicator(self) -> None:
-        """Refresh the 'Saved Xm ago / Modified' label and re-arm in 15s."""
+        """Refresh the 'Saved Xm ago / Modified' label and re-arm in 15s.
+
+        Cancels any existing pending tick first so callers that invoke
+        this manually (e.g. _mark_dirty for immediate feedback) don't
+        cause after() callbacks to pile up — without the cancel, each
+        manual call would add a 15s tick, and a dozen dirty-marks per
+        minute would queue a dozen redundant ticks."""
         if not hasattr(self, "save_indicator"):
             return
+        # Cancel any pending tick so this call replaces it.
+        prev = getattr(self, "_save_indicator_tick_id", None)
+        if prev is not None:
+            try:
+                self.root.after_cancel(prev)
+            except tk.TclError:
+                pass
+            self._save_indicator_tick_id = None
         if self._dirty:
             self.save_indicator.config(text="● Modified",
                                         foreground="#FF8C42")
@@ -7491,8 +7510,8 @@ class CameraWireTool:
             self._save_tip.text = tip
         # Re-arm
         try:
-            self.root.after(C.SAVE_INDICATOR_TICK_MS,
-                              self._tick_save_indicator)
+            self._save_indicator_tick_id = self.root.after(
+                C.SAVE_INDICATOR_TICK_MS, self._tick_save_indicator)
         except tk.TclError:
             pass
 
