@@ -1969,6 +1969,10 @@ class CameraWireTool:
         file_menu.add_command(label="Open .drawio…", command=self._file_open, accelerator="Ctrl+O")
         self._recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
+        # Refresh on every open so a file deleted externally during this
+        # session shows as (missing) rather than appearing clickable.
+        # Cheap — recent list is capped at MAX_RECENT_FILES entries.
+        self._recent_menu.config(postcommand=self._refresh_recent_menu)
         self._refresh_recent_menu()
         file_menu.add_separator()
         file_menu.add_command(label="Save", command=self._save_drawio, accelerator="Ctrl+S")
