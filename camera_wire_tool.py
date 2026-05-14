@@ -6839,6 +6839,8 @@ class CameraWireTool:
                           command=self._reroute_selected_wire)
             m.add_command(label="🔗  Reassign device…",
                           command=self._reassign_selected_wire)
+            m.add_command(label="✂  Simplify (drop colinear points)",
+                          command=self._simplify_selected_wire)
             # Center the wire on the map — matches the Center entry on
             # the device-list right-click. Uses the route midpoint via
             # _jump_to_wire (which also brings the Wires tab forward,
