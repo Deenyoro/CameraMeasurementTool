@@ -10965,9 +10965,10 @@ class CameraWireTool:
         ref_combo.pack(side=tk.LEFT)
 
         help_lbl = ttk.Label(dlg, text=
-            "Drag the colored floor with the LEFT mouse button to translate. "
-            "Mouse wheel scales it. Use Shift+wheel to zoom the preview, "
-            "right-drag to pan the preview. Sliders give precise control.",
+            "LEFT drag: move the orange floor.  RIGHT drag: pan the view.  "
+            "MOUSE WHEEL: zoom in/out of the workspace (toward cursor).  "
+            "SHIFT or CTRL + wheel: resize the orange floor around cursor.  "
+            "Spinboxes on the right give precise values.",
             font=("Segoe UI", 9), foreground="#888888",
             wraplength=1060, justify=tk.LEFT)
         help_lbl.pack(anchor=tk.W, padx=10, pady=(2, 4))
@@ -11011,17 +11012,29 @@ class CameraWireTool:
             ty_var.set(draft["ty"])
 
         # ---- Image build helpers ----
-        # Cache for the heavy PIL ops; we throw it away on every redraw
-        # since the transform changes constantly during drag.
-        held = {"img": None}
-
-        def _ghost(img, alpha_byte):
-            """Return img as RGBA with uniform alpha applied."""
+        # Pre-cache the source bg images as RGBA + apply a precomputed
+        # alpha mask once per dialog open. Per-frame work then becomes
+        # just crop + resize on already-RGBA images, which is cheap.
+        # Without this, every wheel event was running .convert("RGBA")
+        # + .split() + .point() over 4000×3000+ pixels = laggy.
+        def _premake(img, alpha_byte, tint=None):
             rgba = img.convert("RGBA")
             r, g, b, a = rgba.split()
             a = a.point(lambda v: alpha_byte)
-            rgba.putalpha(a)
-            return rgba
+            if tint == "orange":
+                r = r.point(lambda v: min(255, int(v * 1.05) + 30))
+                b = b.point(lambda v: max(0, int(v * 0.85) - 20))
+            return Image.merge("RGBA", (r, g, b, a))
+
+        held = {
+            "img": None,
+            "ref_src": _premake(ref_bg, 160),
+            "act_src": _premake(active_bg, 170, tint="orange"),
+            "redraw_id": None,
+        }
+
+        def _refresh_premade_for_ref(new_ref_bg):
+            held["ref_src"] = _premake(new_ref_bg, 160)
 
         def _ensure_view_fit():
             if view["_initialized"]:
@@ -11056,61 +11069,108 @@ class CameraWireTool:
                 except tk.TclError:
                     pass
 
+        def _render_layer_to_canvas(src_rgba, dest, src_to_canvas_scale,
+                                      src_origin_canvas, rotation_deg):
+            """Crop the visible portion of src_rgba (in source pixel
+            space) and paste it onto dest (canvas-sized) at the right
+            place. Bounds the resize output to canvas size so PIL
+            never works on a 4000+ pixel image just to show a slice."""
+            cw, ch = dest.size
+            sx, sy = src_origin_canvas
+            sw_c = src_rgba.width * src_to_canvas_scale
+            sh_c = src_rgba.height * src_to_canvas_scale
+            # Compute which canvas-rect the layer occupies, then clip
+            # to (0, 0, cw, ch). Anything outside is invisible.
+            x0 = max(0.0, sx)
+            y0 = max(0.0, sy)
+            x1 = min(float(cw), sx + sw_c)
+            y1 = min(float(ch), sy + sh_c)
+            if x1 <= x0 or y1 <= y0:
+                return
+            # Map the clipped canvas rect back to source pixel space.
+            inv = 1.0 / src_to_canvas_scale if src_to_canvas_scale else 1.0
+            src_x0 = max(0, int(math.floor((x0 - sx) * inv)))
+            src_y0 = max(0, int(math.floor((y0 - sy) * inv)))
+            src_x1 = min(src_rgba.width, int(math.ceil((x1 - sx) * inv)))
+            src_y1 = min(src_rgba.height, int(math.ceil((y1 - sy) * inv)))
+            if src_x1 <= src_x0 or src_y1 <= src_y0:
+                return
+            cropped = src_rgba.crop((src_x0, src_y0, src_x1, src_y1))
+            # Display size = the clipped canvas rect rounded out a hair.
+            dst_w = max(1, int(math.ceil(x1 - x0)))
+            dst_h = max(1, int(math.ceil(y1 - y0)))
+            # NEAREST during interaction = ~10× faster than BILINEAR.
+            # Quality settles on idle via the schedule below.
+            resample = Image.NEAREST if held.get("interactive") else Image.BILINEAR
+            scaled = cropped.resize((dst_w, dst_h), resample)
+            if abs(rotation_deg) > 0.01:
+                scaled = scaled.rotate(-rotation_deg, resample=resample,
+                                       expand=True)
+                dest.paste(scaled,
+                           (int(x0 - (scaled.width - dst_w) / 2),
+                            int(y0 - (scaled.height - dst_h) / 2)),
+                           scaled)
+            else:
+                dest.paste(scaled, (int(x0), int(y0)), scaled)
+
         def _draw_unsafe():
             _ensure_view_fit()
             cw = canvas.winfo_width() or 900
             ch = canvas.winfo_height() or 640
             z = view["zoom"]
             ox, oy = view["ox"], view["oy"]
-            # --- Render reference at view zoom ---
-            ref_w = max(1, int(ref_bg.width * z))
-            ref_h = max(1, int(ref_bg.height * z))
-            ref_scaled = ref_bg.resize((ref_w, ref_h), Image.BILINEAR)
-            ref_layer = _ghost(ref_scaled, 160)
-            # --- Render target with alignment applied, then view zoom ---
-            act_w = max(1, int(active_bg.width * draft["scale"] * z))
-            act_h = max(1, int(active_bg.height * draft["scale"] * z))
-            act_scaled = active_bg.resize((act_w, act_h), Image.BILINEAR)
-            if abs(draft["rotation_deg"]) > 0.01:
-                # rotate(-deg) so positive degrees matches the math
-                # convention (counter-clockwise on screen would look
-                # backwards otherwise).
-                act_scaled = act_scaled.rotate(
-                    -draft["rotation_deg"],
-                    resample=Image.BILINEAR, expand=True)
-            act_layer = _ghost(act_scaled, 170)
-            # Tint the target layer slightly so it's visually distinct
-            # from the reference even when both are grey buildings.
-            r, g, b, a = act_layer.split()
-            # Add a subtle orange tint by boosting R and dropping B.
-            r = r.point(lambda v: min(255, int(v * 1.05) + 30))
-            b = b.point(lambda v: max(0, int(v * 0.85) - 20))
-            act_layer = Image.merge("RGBA", (r, g, b, a))
 
-            # Final composite at canvas size, dark bg. Use paste() with
-            # the layer's own alpha channel as the mask — paste() clips
-            # gracefully when the layer extends past the canvas edge
-            # (or the user dragged it off-screen), whereas
-            # alpha_composite raises ValueError on negative offsets and
-            # would blow up the whole dialog the moment the user
-            # over-dragged.
             comp = Image.new("RGBA", (cw, ch), (32, 32, 32, 255))
-            comp.paste(ref_layer, (int(ox), int(oy)), ref_layer)
-            # Target offset = reference origin + (alignment.tx, ty) * view zoom.
-            tx_disp = int(ox + draft["tx"] * z)
-            ty_disp = int(oy + draft["ty"] * z)
-            comp.paste(act_layer, (tx_disp, ty_disp), act_layer)
+            # Reference: scale = view.zoom, origin = (ox, oy), no rotation.
+            _render_layer_to_canvas(
+                held["ref_src"], comp,
+                src_to_canvas_scale=z,
+                src_origin_canvas=(ox, oy),
+                rotation_deg=0)
+            # Target: scale = draft.scale * view.zoom, origin shifted by
+            # alignment translation (in source pixels) * view zoom.
+            act_scale = draft["scale"] * z
+            tx_disp = ox + draft["tx"] * z
+            ty_disp = oy + draft["ty"] * z
+            _render_layer_to_canvas(
+                held["act_src"], comp,
+                src_to_canvas_scale=act_scale,
+                src_origin_canvas=(tx_disp, ty_disp),
+                rotation_deg=draft["rotation_deg"])
 
             tk_img = ImageTk.PhotoImage(comp)
             held["img"] = tk_img  # prevent GC
             canvas.delete("all")
             canvas.create_image(0, 0, anchor=tk.NW, image=tk_img)
-            # Crosshair marker at reference origin so user has a fixed
-            # visual anchor when wheeling/dragging.
+            # Crosshair at the reference origin — fixed visual anchor.
             canvas.create_line(ox - 8, oy, ox + 8, oy,
                                 fill="#ff5050", width=1)
             canvas.create_line(ox, oy - 8, ox, oy + 8,
                                 fill="#ff5050", width=1)
+
+        def _schedule_redraw(interactive=True):
+            """Coalesce rapid wheel/drag events into one redraw via
+            after_idle. Without this every wheel tick fired a full PIL
+            crop+resize round-trip, which feels laggy on big drawios.
+            Also flips the resample mode: NEAREST during interaction,
+            BILINEAR on the trailing settle."""
+            held["interactive"] = interactive
+            if held.get("redraw_id") is not None:
+                return   # already scheduled
+            def _go():
+                held["redraw_id"] = None
+                _draw()
+                # Settle pass — re-render with BILINEAR for crispness
+                # once the user stops interacting. Only if we were just
+                # interactive (otherwise the first call was already
+                # BILINEAR).
+                if held.get("interactive"):
+                    held["interactive"] = False
+                    def _settle():
+                        held["redraw_id"] = None
+                        _draw()
+                    held["redraw_id"] = canvas.after(120, _settle)
+            held["redraw_id"] = canvas.after_idle(_go)
 
         # ---- Mouse interactions ----
         drag_state = {"active": False, "last_x": 0, "last_y": 0,
@@ -11137,11 +11197,12 @@ class CameraWireTool:
                 view["ox"] += dx
                 view["oy"] += dy
             _sync_vars_from_draft()
-            _draw()
+            _schedule_redraw(interactive=True)
 
         def on_release(_event):
             drag_state["active"] = False
             drag_state["kind"] = None
+            _schedule_redraw(interactive=False)
 
         def on_right_press(event):
             drag_state["active"] = True
@@ -11150,38 +11211,47 @@ class CameraWireTool:
             drag_state["kind"] = "pan"
 
         def on_wheel(event):
-            # Shift+wheel zooms the preview view; plain wheel scales
-            # the alignment around the cursor.
+            # Plain wheel = ZOOM the preview view (universal convention).
+            # Shift+wheel  = SCALE the alignment target around the cursor.
+            # Ctrl+wheel   = also scale the alignment target (alt modifier
+            #                in case Shift is taken by a system gesture).
             shift_held = bool(event.state & 0x0001)
+            ctrl_held  = bool(event.state & 0x0004)
             delta = 1 if event.delta > 0 else -1
-            if shift_held:
-                # View zoom (preview only)
-                factor = 1.1 if delta > 0 else (1 / 1.1)
-                view["zoom"] *= factor
-                view["zoom"] = max(0.05, min(20.0, view["zoom"]))
-                view_zoom_var.set(view["zoom"] * 100)
-            else:
-                # Alignment scale — zoom toward the cursor on the target.
+            if shift_held or ctrl_held:
+                # Alignment scale — keep cursor anchored on the target
+                # so zoom feels centered on what you're looking at.
                 factor = 1.05 if delta > 0 else (1 / 1.05)
                 new_scale = draft["scale"] * factor
                 new_scale = max(0.05, min(20.0, new_scale))
-                # Keep cursor anchored on the target by adjusting tx/ty
-                # so the point under the cursor stays put in image
-                # coords. (cursor canvas → image coord = (cursor - origin
-                # - tx*z) / (scale * z) for x, similarly for y).
                 z = max(0.0001, view["zoom"])
-                cx_img = (event.x - view["ox"] - draft["tx"] * z) / (
-                    draft["scale"] * z) if draft["scale"] else 0
-                cy_img = (event.y - view["oy"] - draft["ty"] * z) / (
-                    draft["scale"] * z) if draft["scale"] else 0
-                # After scale change, want cursor over (cx_img, cy_img) again.
+                if draft["scale"]:
+                    cx_img = (event.x - view["ox"] - draft["tx"] * z) / (
+                        draft["scale"] * z)
+                    cy_img = (event.y - view["oy"] - draft["ty"] * z) / (
+                        draft["scale"] * z)
+                else:
+                    cx_img = cy_img = 0
                 draft["scale"] = new_scale
                 new_tx_disp = event.x - view["ox"] - cx_img * new_scale * z
                 new_ty_disp = event.y - view["oy"] - cy_img * new_scale * z
                 draft["tx"] = new_tx_disp / z
                 draft["ty"] = new_ty_disp / z
+            else:
+                # Preview view zoom — zoom toward the cursor so the
+                # point under the mouse stays put, just like any modern
+                # map / image viewer.
+                factor = 1.15 if delta > 0 else (1 / 1.15)
+                old_z = max(0.0001, view["zoom"])
+                new_z = max(0.05, min(40.0, old_z * factor))
+                # canvas point under cursor stays fixed in source space:
+                # (event.x - ox_new) / new_z == (event.x - ox_old) / old_z
+                view["ox"] = event.x - (event.x - view["ox"]) * (new_z / old_z)
+                view["oy"] = event.y - (event.y - view["oy"]) * (new_z / old_z)
+                view["zoom"] = new_z
+                view_zoom_var.set(view["zoom"] * 100)
             _sync_vars_from_draft()
-            _draw()
+            _schedule_redraw(interactive=True)
 
         canvas.bind("<Button-1>", on_press)
         canvas.bind("<B1-Motion>", on_motion)
@@ -11192,7 +11262,7 @@ class CameraWireTool:
         canvas.bind("<MouseWheel>", on_wheel)
         canvas.bind("<Configure>",
                     lambda _e: (view.__setitem__("_initialized", False),
-                                 _draw()))
+                                 _schedule_redraw(interactive=False)))
 
         # ---- Control panel ----
         ttk.Label(panel, text="Alignment", font=("Segoe UI", 10, "bold"),
@@ -11211,25 +11281,25 @@ class CameraWireTool:
                 draft["scale"] = max(0.05, min(20.0, float(scale_var.get())))
             except (tk.TclError, ValueError):
                 return
-            _draw()
+            _schedule_redraw(interactive=False)
         def _on_rot_var(*_):
             try:
                 draft["rotation_deg"] = float(rot_var.get())
             except (tk.TclError, ValueError):
                 return
-            _draw()
+            _schedule_redraw(interactive=False)
         def _on_tx_var(*_):
             try:
                 draft["tx"] = float(tx_var.get())
             except (tk.TclError, ValueError):
                 return
-            _draw()
+            _schedule_redraw(interactive=False)
         def _on_ty_var(*_):
             try:
                 draft["ty"] = float(ty_var.get())
             except (tk.TclError, ValueError):
                 return
-            _draw()
+            _schedule_redraw(interactive=False)
         scale_var.trace_add("write", _on_scale_var)
         rot_var.trace_add("write",   _on_rot_var)
         tx_var.trace_add("write",    _on_tx_var)
@@ -11250,8 +11320,8 @@ class CameraWireTool:
                 z = float(view_zoom_var.get()) / 100.0
             except (tk.TclError, ValueError):
                 return
-            view["zoom"] = max(0.05, min(20.0, z))
-            _draw()
+            view["zoom"] = max(0.05, min(40.0, z))
+            _schedule_redraw(interactive=False)
         ttk.Spinbox(zoom_row, textvariable=view_zoom_var, width=10,
                     from_=5, to=2000, increment=10, format="%.0f"
                     ).pack(side=tk.LEFT)
@@ -11262,13 +11332,13 @@ class CameraWireTool:
         def reset_draft():
             draft.update(dict(mf_mod.IDENTITY_ALIGNMENT))
             _sync_vars_from_draft()
-            _draw()
+            _schedule_redraw(interactive=False)
         ttk.Button(panel, text="Reset to identity",
                    command=reset_draft).pack(fill=tk.X, pady=2)
 
         def fit_view():
             view["_initialized"] = False
-            _draw()
+            _schedule_redraw(interactive=False)
         ttk.Button(panel, text="Fit preview to reference",
                    command=fit_view).pack(fill=tk.X, pady=2)
 
@@ -11284,8 +11354,9 @@ class CameraWireTool:
                 return
             ref_floor = new_ref
             ref_bg = new_bg
+            _refresh_premade_for_ref(new_ref_bg=new_bg)
             view["_initialized"] = False   # refit
-            _draw()
+            _schedule_redraw(interactive=False)
         ref_combo.bind("<<ComboboxSelected>>", _on_ref_change)
 
         # ---- Bottom action buttons ----
@@ -11327,7 +11398,7 @@ class CameraWireTool:
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
 
         # Draw on first idle once the canvas has a real size.
-        dlg.after(20, _draw)
+        dlg.after(20, lambda: _schedule_redraw(interactive=False))
 
     def _open_alignment_dialog(self) -> None:
         if self._project is None or len(self._project.floors) < 2:
