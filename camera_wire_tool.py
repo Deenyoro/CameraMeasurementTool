@@ -8507,13 +8507,20 @@ class CameraWireTool:
                 label="📐  Draw wire from here…",
                 command=lambda d=dev: self._draw_wire_from(d),
             )
-            menu.add_command(
-                label="🔁  Replace last wire (re-route)…",
-                command=lambda d=dev: self._reroute_last_wire_from(d),
-            )
             wires_for_dev = [w for w in self.wire_routes
                              if w.get("device_id") == dev["id"]]
             if wires_for_dev:
+                # Show the run-count on the label so the user can tell
+                # at a glance how many wires this device already owns —
+                # matches the device-list right-click. The entry was
+                # always shown before, even with zero wires (which made
+                # 'Replace last' meaningless until you knew it would
+                # just enter draw-mode).
+                menu.add_command(
+                    label=f"🔁  Replace last wire "
+                          f"({self._plural(len(wires_for_dev), 'run')})",
+                    command=lambda d=dev: self._reroute_last_wire_from(d),
+                )
                 menu.add_command(
                     label=f"🗑  Clear all wires for this device "
                           f"({self._plural(len(wires_for_dev), 'run')})",
