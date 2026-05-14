@@ -7162,6 +7162,19 @@ class CameraWireTool:
             filetypes=[("Draw.io files", "*.drawio")])
         if not path:
             return
+        # Sanity-check the new file BEFORE destroying the current root.
+        # parse_drawio raises RuntimeError on bad XML / missing root
+        # cells; if it fails, surface the error and let the user pick
+        # again rather than ripping their session out from under them.
+        try:
+            parse_drawio(path)
+        except (RuntimeError, OSError) as e:
+            log_error(f"Refused to open malformed .drawio: {path}", e)
+            messagebox.showerror(
+                "Couldn't open file",
+                f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
+                f"The current project is untouched.")
+            return
         self._flush_pending_settings()
         self.root.destroy()
         new_root = tk.Tk()
