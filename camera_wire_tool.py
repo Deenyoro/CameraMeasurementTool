@@ -5348,6 +5348,12 @@ class CameraWireTool:
         on top of a device — the device's edge would otherwise look
         equally grabbable, and a missed click on the handle silently
         falls through to device-drag and confuses the user."""
+        # Hidden wire layer = handles also hidden = non-interactive.
+        try:
+            if not self._show_wires.get():
+                return None
+        except (AttributeError, tk.TclError):
+            pass
         route = self._selected_wire()
         if route is None:
             return None
@@ -5406,6 +5412,13 @@ class CameraWireTool:
         non-dict route or a route with a missing / non-list points list
         — a single bad entry would otherwise crash every canvas
         click."""
+        # Hidden wire layer = non-interactive, same logic as _device_at.
+        # Lets the user click 'through' the wires to whatever's beneath.
+        try:
+            if not self._show_wires.get():
+                return None
+        except (AttributeError, tk.TclError):
+            pass
         thresh = max(4.0, 6.0 / max(self.zoom, 0.01))
         best_idx = None
         best_dist = float("inf")
@@ -5488,6 +5501,15 @@ class CameraWireTool:
             self._primary_selected = dev
 
     def _device_at(self, ix, iy):
+        # When the user has hidden the device layer, treat the layer as
+        # non-interactive — otherwise an invisible device under the
+        # cursor would intercept clicks meant for the floor plan
+        # underneath, which is the whole reason the user hid it.
+        try:
+            if not self._show_devices.get():
+                return None
+        except (AttributeError, tk.TclError):
+            pass
         # Defensive over every device entry — a non-dict or one with
         # non-numeric x/y/w/h would otherwise crash on every mouse-move
         # hit test, taking the whole canvas down with it. Cheaper to
