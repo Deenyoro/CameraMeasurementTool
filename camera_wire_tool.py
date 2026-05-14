@@ -9409,6 +9409,21 @@ class CameraWireTool:
         if info.get("is_camera"):
             m.add_command(label="📷  Edit FOV / DORI…",
                            command=lambda d=device: self._open_fov_dialog(d))
+            m.add_command(
+                label=f"Apply default FOV for {device['type']}",
+                command=lambda d=device: self._apply_default_fov_to_one(d),
+            )
+            # State-aware toggle label so the user sees what the click
+            # will DO. Mirrors the canvas right-click on a camera.
+            fov_raw = device.get("fov")
+            cone_visible = (fov_raw.get("show", True)
+                            if isinstance(fov_raw, dict) else True)
+            m.add_command(
+                label=("Hide FOV cone for this camera"
+                       if cone_visible else
+                       "Show FOV cone for this camera"),
+                command=lambda d=device: self._toggle_camera_fov(d),
+            )
         same_type = [d for d in self.devices if d["type"] == device["type"]]
         if len(same_type) > 1:
             m.add_command(
