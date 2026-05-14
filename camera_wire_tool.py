@@ -1966,6 +1966,17 @@ class CameraWireTool:
         # File
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
+        # State-driven Save greyout — visible cue that there's nothing
+        # to save. Save itself is idempotent (flashes 'Already saved'),
+        # but the greyed entry tells the user that before they click.
+        def _refresh_file_menu_state():
+            try:
+                file_menu.entryconfig(
+                    "Save",
+                    state=tk.NORMAL if self._dirty else tk.DISABLED)
+            except tk.TclError:
+                pass
+        file_menu.config(postcommand=_refresh_file_menu_state)
         file_menu.add_command(label="Open .drawio…", command=self._file_open, accelerator="Ctrl+O")
         self._recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
