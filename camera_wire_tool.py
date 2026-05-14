@@ -11064,10 +11064,19 @@ class CameraWireTool:
         if _is_identity(target.alignment):
             self._fit_image()
         self._redraw()
+        # Status hint adapts based on whether this floor is already
+        # aligned — no point telling the user to align it if they
+        # already did, and no point hiding the suggestion when they
+        # haven't.
+        if _is_identity(target.alignment):
+            hint = (" Doesn't line up with the previous floor? Use the "
+                    "Floor: toolbar button → 'Drag-align (visual)' to "
+                    "map them onto a shared frame.")
+        else:
+            hint = (" Aligned to a shared frame — wire lengths share the "
+                    "project scale across floors.")
         self._flash_status(
-            f"Switched to {floor_id} — {target.name}. "
-            f"Doesn't line up with the previous floor? Use Floors → "
-            f"Align Floor to Reference to map them onto a shared frame.",
+            f"Switched to {floor_id} — {target.name}.{hint}",
             ttl_ms=6000)
 
     def _clear_active_floor_alignment(self) -> None:
