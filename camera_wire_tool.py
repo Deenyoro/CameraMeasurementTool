@@ -11400,11 +11400,46 @@ class CameraWireTool:
         ttk.Button(panel, text="Reset to identity",
                    command=reset_draft).pack(fill=tk.X, pady=2)
 
+        def center_on_ref():
+            """Translate target so its center sits on reference's center.
+            Doesn't touch scale or rotation. Useful for getting a sane
+            starting overlap when the two floors are different sizes."""
+            ref_cx = held["ref_raw"].width / 2
+            ref_cy = held["ref_raw"].height / 2
+            act_cx = held["act_raw"].width / 2 * draft["scale"]
+            act_cy = held["act_raw"].height / 2 * draft["scale"]
+            draft["tx"] = ref_cx - act_cx
+            draft["ty"] = ref_cy - act_cy
+            _sync_vars_from_draft()
+            _schedule_redraw(interactive=False)
+        ttk.Button(panel, text="Center on reference",
+                   command=center_on_ref).pack(fill=tk.X, pady=2)
+
+        def fit_width():
+            """Set draft.scale so target's width equals reference's
+            width, then center. One-click rough fit when one floor's
+            way bigger than the other."""
+            rw = max(1, held["ref_raw"].width)
+            aw = max(1, held["act_raw"].width)
+            draft["scale"] = rw / aw
+            center_on_ref()
+        ttk.Button(panel, text="Fit width + center",
+                   command=fit_width).pack(fill=tk.X, pady=2)
+
         def fit_view():
             view["_initialized"] = False
             _schedule_redraw(interactive=False)
         ttk.Button(panel, text="Fit preview to reference",
                    command=fit_view).pack(fill=tk.X, pady=2)
+
+        # If the saved alignment is identity (i.e. user hasn't touched
+        # this floor yet), seed with a sensible auto-fit so the very
+        # first frame shows the two floors overlapping at a similar
+        # size — not stacked corner-to-corner at top-left.
+        if (abs(draft["tx"]) < 0.5 and abs(draft["ty"]) < 0.5
+                and abs(draft["scale"] - 1.0) < 1e-4
+                and abs(draft["rotation_deg"]) < 0.01):
+            dlg.after(40, fit_width)
 
         def _on_ref_change(_e=None):
             nonlocal ref_floor, ref_bg
