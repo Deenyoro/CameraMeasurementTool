@@ -721,6 +721,50 @@ class InsertWaypointCmd(Command):
             self._recalc()
 
 
+class DeleteWaypointCmd(Command):
+    """Remove a single interior waypoint from a wire. Mirror of
+    InsertWaypointCmd. Endpoints (idx 0 / last) are NOT deletable via
+    this command — they're the source/destination handles and removing
+    them would silently corrupt the wire's device association."""
+
+    def __init__(self, app: "CameraWireTool", route: dict, point_idx: int):
+        self.app = app
+        self.route = route
+        self.point_idx = point_idx
+        # Snapshot the point so undo can re-insert it at the same idx.
+        pts = route.get("points", [])
+        self.xy = (tuple(pts[point_idx])
+                   if 0 <= point_idx < len(pts) else None)
+
+    def _recalc(self) -> None:
+        pts = self.route["points"]
+        self.route["length_px"] = self.app._calc_wire_length(pts)
+        sf = self.app.scale_factor
+        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+
+    def do(self):
+        if self.xy is None:
+            return
+        pts = list(self.route.get("points", []))
+        if (0 <= self.point_idx < len(pts)
+                and tuple(pts[self.point_idx]) == self.xy):
+            pts.pop(self.point_idx)
+            self.route["points"] = pts
+            self._recalc()
+
+    def undo(self):
+        if self.xy is None:
+            return
+        pts = list(self.route.get("points", []))
+        idx = max(0, min(self.point_idx, len(pts)))
+        # Idempotent: don't re-insert if it's already there.
+        if 0 <= idx < len(pts) and tuple(pts[idx]) == self.xy:
+            return
+        pts.insert(idx, self.xy)
+        self.route["points"] = pts
+        self._recalc()
+
+
 class ClearDeviceWiresCmd(Command):
     """Remove every wire associated with a single device."""
 
@@ -2043,6 +2087,51 @@ class CameraWireTool:
         self._flash_status(
             f"Waypoint inserted (now {new_count} pts). Drag the white "
             f"handle to reshape. Ctrl+Z to undo.", ttl_ms=4000)
+
+    def _delete_waypoint_at(self, route, point_idx: int) -> None:
+        """Right-click → 'Delete this waypoint'. Only valid for interior
+        points — start (idx 0) and end (last idx) are the wire's
+        source/destination and removing them would orphan the device
+        association. Caller is expected to gate the menu entry, but
+        also re-checked here so a stale callback can't corrupt state."""
+        if not isinstance(route, dict):
+            return
+        pts = route.get("points")
+        if not isinstance(pts, list) or len(pts) <= 2:
+            return
+        if not (0 < point_idx < len(pts) - 1):
+            return
+        cmd = DeleteWaypointCmd(self, route, point_idx)
+        self._execute(cmd)
+        self._post_command_refresh()
+        self._flash_status(
+            f"Waypoint removed (now {len(route['points'])} pts). "
+            f"Ctrl+Z to undo.", ttl_ms=4000)
+
+    def _waypoint_index_at(self, route, ix: float, iy: float) -> int | None:
+        """Return the index of the waypoint nearest to (ix, iy) on the
+        given route, or None if no point is within grab distance. Used
+        by the right-click menu to detect 'on a handle' vs 'on the
+        line'. Mirrors the threshold logic in _waypoint_at."""
+        if not isinstance(route, dict):
+            return None
+        pts = route.get("points")
+        if not isinstance(pts, list) or len(pts) < 2:
+            return None
+        end_thresh = max(8.0, 16.0 / max(self.zoom, 0.01))
+        mid_thresh = max(6.0, 12.0 / max(self.zoom, 0.01))
+        last = len(pts) - 1
+        best_i = None; best_d = float("inf")
+        for i in range(len(pts)):
+            try:
+                px, py = float(pts[i][0]), float(pts[i][1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            d = math.hypot(ix - px, iy - py)
+            t = end_thresh if (i == 0 or i == last) else mid_thresh
+            if d <= t and d < best_d:
+                best_d = d; best_i = i
+        return best_i
 
     def _simplify_selected_wire(self) -> None:
         """Drop interior waypoints whose direction equals the previous step's
@@ -3412,6 +3501,7 @@ class CameraWireTool:
             "ClearDeviceWiresCmd":lambda c: f"clear wires on {c.device_id}",
             "MoveWaypointCmd":    lambda c: f"reshape wire (waypoint #{c.point_idx})",
             "InsertWaypointCmd":  lambda c: f"insert waypoint #{c.insert_idx} on wire",
+            "DeleteWaypointCmd":  lambda c: f"delete waypoint #{c.point_idx} on wire",
             "AddDeviceCmd":       lambda c: f"add device {c.device['id']}",
             "DeleteDeviceCmd":    lambda c: f"delete device {c.device['id']}",
             "EditSymbolCmd":      lambda c: f"edit symbol {c.old_code} → {c.new_code}",
@@ -8810,6 +8900,21 @@ class CameraWireTool:
                 state=tk.DISABLED,
             )
             menu.add_separator()
+            # If the right-click landed on an interior waypoint, the
+            # primary action is 'Delete this waypoint' — the user likely
+            # wants to remove that specific bend. Endpoints get an
+            # 'Insert waypoint here' fallback since they can't be
+            # individually deleted (they're the device anchors).
+            wp_idx = self._waypoint_index_at(route, ix, iy)
+            pt_count = len(route.get("points", []))
+            is_interior = (wp_idx is not None
+                            and 0 < wp_idx < pt_count - 1)
+            if is_interior:
+                menu.add_command(
+                    label=f"🗑  Delete this waypoint  (#{wp_idx+1}/{pt_count})",
+                    command=lambda r=route, i=wp_idx:
+                        self._delete_waypoint_at(r, i),
+                )
             menu.add_command(
                 label="➕  Insert waypoint here",
                 command=lambda r=route, x=ix, y=iy:
