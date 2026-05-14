@@ -4638,7 +4638,6 @@ class CameraWireTool:
                                     fill="yellow", outline="black", width=2, tags="cal")
 
         self._draw_mode_banner()
-        self._draw_welcome_banner()
         self._draw_minimap()
         # Zoom indicator updates with every redraw — cheap, accurate
         if hasattr(self, "zoom_indicator"):
@@ -4648,73 +4647,6 @@ class CameraWireTool:
                 pass
 
     # ============================================================ Welcome banner
-    def _draw_welcome_banner(self) -> None:
-        """A friendly onboarding card on the canvas — only shows when the
-        project hasn't been calibrated yet OR has zero wire routes. Goes
-        away as soon as either threshold is crossed."""
-        # Active state check: hide if scale is set AND there's at least 1 wire.
-        if self.scale_factor and self.wire_routes:
-            return
-        cw = self.canvas.winfo_width() or 800
-        ch = self.canvas.winfo_height() or 600
-        if cw < 460 or ch < 200:   # too small to fit comfortably
-            return
-        # Banner sits below the mode banner (which is 0..32) at top center
-        x0 = max(40, (cw - 540) // 2)
-        y0 = 48
-        x1 = x0 + 540
-        y1 = y0 + 96   # tall enough to hold the F1 footer hint
-
-        self.canvas.create_rectangle(
-            x0, y0, x1, y1,
-            fill="#1a1f2e", outline="#7fc4ff", width=2,
-            tags=("welcome", "welcome_bg"),
-        )
-        self.canvas.create_text(
-            x0 + 16, y0 + 8, anchor=tk.NW,
-            text="Getting started", fill="#7fc4ff",
-            font=("Segoe UI", 10, "bold"), tags="welcome",
-        )
-        # Step indicators with state colors
-        steps = [
-            ("1.  Set Scale",
-             bool(self.scale_factor),
-             "Click two points of a known dimension on the plan."),
-            ("2.  Draw Wires",
-             bool(self.wire_routes),
-             "Right-click any device on the map → 'Draw wire from here'."),
-        ]
-        sx = x0 + 16
-        sy = y0 + 30
-        for label, done, hint in steps:
-            color = "#3ddc84" if done else "#FFB347"
-            check = "✓" if done else "○"
-            self.canvas.create_text(
-                sx, sy, anchor=tk.NW, text=check,
-                fill=color, font=("Segoe UI", 11, "bold"),
-                tags="welcome",
-            )
-            self.canvas.create_text(
-                sx + 24, sy, anchor=tk.NW, text=label,
-                fill="#FFFFFF" if not done else "#7fc4ff",
-                font=("Segoe UI", 10, "bold"), tags="welcome",
-            )
-            self.canvas.create_text(
-                sx + 24, sy + 16, anchor=tk.NW, text=hint,
-                fill="#a0a8b8", font=("Segoe UI", 8, "italic"),
-                tags="welcome",
-            )
-            sx += 270  # next column
-        # Footer hint pointing at the shortcuts dialog — most discoverable
-        # surface in the app once you know it exists.
-        self.canvas.create_text(
-            x0 + 16, y1 - 16, anchor=tk.NW,
-            text="Press  F1  for keyboard shortcuts  ·  "
-                 "Right-click anywhere for contextual actions",
-            fill="#6f7a90", font=("Segoe UI", 8, "italic"),
-            tags="welcome",
-        )
-
     # ============================================================ Grid overlay
     def _draw_grid_overlay(self) -> None:
         """Faint orthogonal grid for visual alignment when placing or
@@ -10710,9 +10642,14 @@ class CameraWireTool:
         elev_var = tk.DoubleVar(value=14.0 * (n - 1))
         ttk.Entry(dlg, textvariable=elev_var, width=10).pack(anchor=tk.W, padx=10, pady=2)
 
-        # Make path relative if possible (project file's directory)
+        # Make path relative to the PROJECT file's directory (stable
+        # across floor switches). Using drawio_path's dir broke as soon
+        # as the user switched floors, because self.drawio_path then
+        # pointed at the other floor's dir and every other floor's
+        # relative path stopped resolving.
         try:
-            rel = os.path.relpath(path, os.path.dirname(self.drawio_path))
+            rel = os.path.relpath(path,
+                                   os.path.dirname(self.project_path))
         except ValueError:
             rel = path
 
@@ -10817,14 +10754,14 @@ class CameraWireTool:
             active.annotations = [dict(a) for a in self.annotations
                                   if isinstance(a, dict)]
 
-        # Resolve target's drawio path (relative paths are relative to
-        # the *current* drawio's directory — keep this lookup before we
-        # swap self.drawio_path to the new value).
+        # Resolve target's drawio path. Relative paths anchor on the
+        # PROJECT file's directory (stable across floor switches),
+        # not on self.drawio_path which we're about to swap.
         if os.path.isabs(target.drawio_file):
             new_path = target.drawio_file
         else:
             new_path = os.path.normpath(
-                os.path.join(os.path.dirname(self.drawio_path),
+                os.path.join(os.path.dirname(self.project_path),
                               target.drawio_file))
         if not os.path.exists(new_path):
             messagebox.showerror("Missing file",
@@ -10968,32 +10905,45 @@ class CameraWireTool:
         if not others:
             return
 
-        # ---- Load both floors' bg images ----
+        # ---- Load both floors' bg images. Relative paths resolve
+        # against the PROJECT file's directory, which stays put across
+        # floor switches (drawio_path doesn't). ----
         def _resolve_floor_path(f) -> str:
             if os.path.isabs(f.drawio_file):
                 return f.drawio_file
             return os.path.normpath(
-                os.path.join(os.path.dirname(self.drawio_path),
+                os.path.join(os.path.dirname(self.project_path),
                               f.drawio_file))
 
         def _load_bg(f):
+            """Return (bg_image_or_None, why_str). why_str describes
+            the failure if any so the dialog can show a real diagnostic
+            instead of the old 'parse failed' shrug."""
             path = _resolve_floor_path(f)
             if not os.path.exists(path):
-                return None
+                return None, f"file not found: {path}"
             try:
                 bg, _, _, _, _, _ = parse_drawio(path)
-                return bg
-            except (RuntimeError, OSError):
-                return None
+            except (RuntimeError, OSError) as e:
+                return None, f"parse error: {e}"
+            if bg is None:
+                return None, ("the .drawio carries no embedded "
+                              "background image")
+            return bg, ""
 
         ref_floor = others[0]
-        ref_bg = _load_bg(ref_floor)
-        active_bg = _load_bg(active)
+        ref_bg, ref_err = _load_bg(ref_floor)
+        active_bg, active_err = _load_bg(active)
         if ref_bg is None or active_bg is None:
+            details = []
+            if ref_bg is None:
+                details.append(f"  {ref_floor.id} ({ref_floor.name}): {ref_err}")
+            if active_bg is None:
+                details.append(f"  {active.id} ({active.name}): {active_err}")
             messagebox.showerror(
                 "Can't drag-align",
-                "Failed to parse one of the floor .drawio files. "
-                "Verify both files open cleanly first.")
+                "Failed to load one of the floors:\n\n"
+                + "\n".join(details))
             return
 
         # ---- Build the dialog ----
@@ -11327,10 +11277,10 @@ class CameraWireTool:
             new_ref = self._project.get_floor(ref_var.get())
             if new_ref is None:
                 return
-            new_bg = _load_bg(new_ref)
+            new_bg, why = _load_bg(new_ref)
             if new_bg is None:
                 messagebox.showerror("Can't load reference",
-                                      f"Failed to parse {new_ref.id}'s .drawio.")
+                                      f"{new_ref.id} ({new_ref.name}): {why}")
                 return
             ref_floor = new_ref
             ref_bg = new_bg
