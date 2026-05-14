@@ -10884,8 +10884,31 @@ class CameraWireTool:
         if target is None or floor_id == self._project.active_floor:
             return
 
-        if not self._can_navigate_away():
-            return
+        # Wire-in-progress always needs a prompt (it's transient state,
+        # not on disk). But unsaved-changes get silent-saved on switch
+        # rather than prompted — the user is just navigating between
+        # floors in the same project, not closing the app, so dropping
+        # them into a 'save before closing?' dialog every time they
+        # press PgDn is friction. The current floor's .drawio + the
+        # project file are both written before the swap.
+        if self.current_wire_points:
+            if not messagebox.askyesno(
+                "Discard wire in progress?",
+                f"You're in the middle of drawing a wire "
+                f"({len(self.current_wire_points)} point(s) placed).\n\n"
+                f"Continuing will discard it. Proceed?"):
+                return
+            self.current_wire_points = []
+        if self._dirty:
+            try:
+                self._save_drawio()
+            except Exception as e:
+                # _save_drawio itself already shows error dialogs; here
+                # we only need to bail if it somehow raised past its
+                # own handler. Log + abort the switch so the user
+                # isn't moved off unsaved data.
+                log_error("Silent save before floor switch failed", e)
+                return
 
         # Save active floor's wires + annotations back to its FloorState
         # so a subsequent switch back round-trips correctly. Defensive:
