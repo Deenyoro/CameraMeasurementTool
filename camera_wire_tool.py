@@ -2557,6 +2557,28 @@ class CameraWireTool:
         Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
+        # Floor switcher — visible at all times so multi-floor mode is
+        # discoverable. Click pops a menu that lists every floor plus
+        # 'Add floor…' / 'Manage floors…' shortcuts so the user never
+        # has to hunt through the Floors menu.
+        self._floor_mb_var = tk.StringVar(value="Floor: —")
+        floor_mb = ttk.Menubutton(
+            toolbar, textvariable=self._floor_mb_var,
+            style="Toolbutton", width=22,
+        )
+        self._floor_mb = floor_mb
+        self._floor_mb_menu = tk.Menu(floor_mb, tearoff=0,
+                                       postcommand=self._refresh_floor_mb_menu)
+        floor_mb.configure(menu=self._floor_mb_menu)
+        floor_mb.pack(side=tk.LEFT, padx=4, pady=2)
+        Tooltip(floor_mb,
+                "Multi-floor projects: click to switch floors, add a new "
+                "floor, or align one floor to another's frame. Each floor "
+                "is its own .drawio — the project (.wiremap.json) bundles "
+                "them together. PgUp/PgDn also switches.")
+        self._refresh_floor_mb_label()
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+
         # Mode segmented control
         seg = ttk.Frame(toolbar)
         seg.pack(side=tk.LEFT, padx=4, pady=2)
@@ -10500,7 +10522,61 @@ class CameraWireTool:
         return src_cable        # both regular OR both run points → source
 
     # ============================================================ Multi-floor
+    def _refresh_floor_mb_label(self) -> None:
+        """Update the toolbar Floor button's caption to reflect the
+        current floor. Called after any switch / add / delete."""
+        if not hasattr(self, "_floor_mb_var"):
+            return
+        proj = self._project
+        if proj is None or not proj.floors:
+            self._floor_mb_var.set("Floor: (single)")
+            return
+        active = proj.get_floor(proj.active_floor)
+        if active is None:
+            self._floor_mb_var.set(f"Floor: {proj.active_floor or '?'}")
+            return
+        # Tight format so the toolbar doesn't grow too wide on long names.
+        name = (active.name or active.id)
+        if len(name) > 14:
+            name = name[:13] + "…"
+        n_total = len(proj.floors)
+        self._floor_mb_var.set(f"Floor: {active.id} · {name}  ({n_total})")
+
+    def _refresh_floor_mb_menu(self) -> None:
+        """postcommand for the toolbar Floor menubutton. Builds the
+        menu on open so it always reflects current project state."""
+        if not hasattr(self, "_floor_mb_menu"):
+            return
+        m = self._floor_mb_menu
+        m.delete(0, tk.END)
+        proj = self._project
+        n_floors = len(proj.floors) if proj is not None else 0
+        if n_floors == 0:
+            m.add_command(label="(single-floor mode — no project yet)",
+                          state=tk.DISABLED)
+        else:
+            m.add_command(label=f"— {self._plural(n_floors, 'floor')} —",
+                          state=tk.DISABLED)
+            for f in proj.floors:
+                marker = "● " if f.id == proj.active_floor else "   "
+                m.add_command(label=f"{marker}{f.id}  {f.name}",
+                              command=lambda fid=f.id: self._switch_floor(fid))
+        m.add_separator()
+        m.add_command(label="➕  Add floor…",
+                      command=self._add_floor_dialog)
+        manage_state = tk.NORMAL if n_floors >= 1 else tk.DISABLED
+        align_state = tk.NORMAL if n_floors >= 2 else tk.DISABLED
+        m.add_command(label="⇄  Align floor to reference…",
+                      command=self._open_alignment_dialog,
+                      state=align_state)
+        m.add_command(label="⚙  Manage floors…",
+                      command=self._open_floor_manager,
+                      state=manage_state)
+
     def _refresh_floor_menu(self) -> None:
+        # Keep the toolbar floor button in sync with the menu — every
+        # caller that refreshes one wants the other refreshed too.
+        self._refresh_floor_mb_label()
         if not hasattr(self, "_floor_menu"):
             return
         m = self._floor_menu
@@ -10600,8 +10676,30 @@ class CameraWireTool:
             self._mark_dirty()
             self._refresh_floor_menu()
             dlg.destroy()
-            if messagebox.askyesno("Switch?", f"Switch to {new_id} now?"):
+            n_total = len(self._project.floors)
+            # Explicit primer on what just happened — multi-floor mode is
+            # new ground for first-time users and the post-switch view
+            # change (different .drawio rendered) can be disorienting if
+            # they expected both floors layered on the same canvas.
+            if messagebox.askyesno(
+                "Floor added",
+                f"Added {new_id} — {new_floor.name}.\n"
+                f"Project now has {n_total} floors.\n\n"
+                f"The Camera Wire Tool shows ONE floor at a time. To go "
+                f"back to the previous floor, use the 'Floor:' button in "
+                f"the toolbar (or press PgUp / PgDn). 'Align floor to "
+                f"reference' (in that same menu) maps this floor's coords "
+                f"onto another's frame so they share a coordinate space.\n\n"
+                f"Switch to {new_id} now?"):
                 self._switch_floor(new_id)
+            else:
+                # Stay on the current floor — but explicitly call out
+                # how to switch later so they don't lose the new floor.
+                self._flash_status(
+                    f"Added {new_id} (still viewing "
+                    f"{self._project.active_floor}). PgUp/PgDn or the "
+                    f"Floor: toolbar button switches floors.",
+                    ttl_ms=6000)
 
         btns = ttk.Frame(dlg); btns.pack(pady=8)
         ttk.Button(btns, text="Add", command=add).pack(side=tk.LEFT, padx=4)
