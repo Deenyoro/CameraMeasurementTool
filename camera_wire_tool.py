@@ -7523,8 +7523,26 @@ class CameraWireTool:
                                lambda c=code: self._jump_to_symbol(c)))
         devices_by_id_qj = {d["id"]: d for d in self.devices}
         for i, r in enumerate(self.wire_routes):
+            if not isinstance(r, dict):
+                continue   # corrupted in-memory entry; skip rather than crash
             did = r.get("device_id") or "—"
-            length = self._format_length(r.get("length_in") or 0) if r.get("length_in") else f"{r['length_px']:.0f}px"
+            # Defensive length display. length_in is the canonical
+            # human-facing value; length_px is the fallback. If both are
+            # missing / non-numeric, show '—' so a corrupted route can't
+            # KeyError or TypeError here.
+            length_in_raw = r.get("length_in")
+            try:
+                length_in = float(length_in_raw) if length_in_raw is not None else None
+            except (TypeError, ValueError):
+                length_in = None
+            if length_in is not None:
+                length = self._format_length(length_in)
+            else:
+                length_px_raw = r.get("length_px")
+                try:
+                    length = f"{float(length_px_raw):.0f}px"
+                except (TypeError, ValueError):
+                    length = "—"
             # Resolve the effective cable so a user typing 'Cat6' finds
             # both explicit-cable wires and auto-resolved ones.
             eff_cable = bom_mod.cable_for_route(
