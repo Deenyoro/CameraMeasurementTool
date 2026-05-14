@@ -2129,6 +2129,11 @@ class CameraWireTool:
         floor_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Floors", menu=floor_menu)
         self._floor_menu = floor_menu
+        # postcommand re-renders the floor list on every open so the
+        # active-floor '●' marker, the Add/Align/Manage greyout state,
+        # and the list itself all stay in sync without manual refresh
+        # calls from every code path that mutates _project.floors.
+        floor_menu.config(postcommand=self._refresh_floor_menu)
         self._refresh_floor_menu()
 
         # Tools
