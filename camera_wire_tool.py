@@ -11026,15 +11026,30 @@ class CameraWireTool:
                 b = b.point(lambda v: max(0, int(v * 0.85) - 20))
             return Image.merge("RGBA", (r, g, b, a))
 
+        # Per-layer alpha (0–255). User-tweakable so they can fade one
+        # floor down when the overlap is hard to read at the default
+        # 60/65% mix.
         held = {
             "img": None,
+            "ref_alpha": 160,
+            "act_alpha": 170,
+            "ref_raw": ref_bg,
+            "act_raw": active_bg,
             "ref_src": _premake(ref_bg, 160),
             "act_src": _premake(active_bg, 170, tint="orange"),
             "redraw_id": None,
         }
 
         def _refresh_premade_for_ref(new_ref_bg):
-            held["ref_src"] = _premake(new_ref_bg, 160)
+            held["ref_raw"] = new_ref_bg
+            held["ref_src"] = _premake(new_ref_bg, held["ref_alpha"])
+
+        def _refresh_ref_alpha():
+            held["ref_src"] = _premake(held["ref_raw"], held["ref_alpha"])
+
+        def _refresh_act_alpha():
+            held["act_src"] = _premake(
+                held["act_raw"], held["act_alpha"], tint="orange")
 
         def _ensure_view_fit():
             if view["_initialized"]:
@@ -11309,6 +11324,55 @@ class CameraWireTool:
         _entry_row(panel, "Rotate°", rot_var,  "%.2f", -180.0, 180.0, 1.0)
         _entry_row(panel, "X off",  tx_var,   "%.1f", -10000.0, 10000.0, 1.0)
         _entry_row(panel, "Y off",  ty_var,   "%.1f", -10000.0, 10000.0, 1.0)
+
+        ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Label(panel, text="Transparency",
+                  font=("Segoe UI", 10, "bold"),
+                  foreground="#7fc4ff").pack(anchor=tk.W)
+        # Per-layer opacity sliders. Stored as 0–255 internally but
+        # shown to the user as 0–100% which is what people expect.
+        ref_alpha_var = tk.IntVar(value=round(held["ref_alpha"] / 255 * 100))
+        act_alpha_var = tk.IntVar(value=round(held["act_alpha"] / 255 * 100))
+
+        def _on_ref_alpha(*_):
+            try:
+                pct = max(0, min(100, int(ref_alpha_var.get())))
+            except (tk.TclError, ValueError):
+                return
+            held["ref_alpha"] = int(round(pct / 100 * 255))
+            _refresh_ref_alpha()
+            _schedule_redraw(interactive=False)
+
+        def _on_act_alpha(*_):
+            try:
+                pct = max(0, min(100, int(act_alpha_var.get())))
+            except (tk.TclError, ValueError):
+                return
+            held["act_alpha"] = int(round(pct / 100 * 255))
+            _refresh_act_alpha()
+            _schedule_redraw(interactive=False)
+
+        ref_alpha_row = ttk.Frame(panel); ref_alpha_row.pack(fill=tk.X, pady=2)
+        ttk.Label(ref_alpha_row, text="Ref %", width=8,
+                  foreground="#a0a8b8").pack(side=tk.LEFT)
+        ttk.Scale(ref_alpha_row, from_=0, to=100, variable=ref_alpha_var,
+                  orient=tk.HORIZONTAL,
+                  command=lambda _v: _on_ref_alpha()).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 4))
+        ttk.Spinbox(ref_alpha_row, textvariable=ref_alpha_var, width=5,
+                    from_=0, to=100, increment=5).pack(side=tk.LEFT)
+        ref_alpha_var.trace_add("write", _on_ref_alpha)
+
+        act_alpha_row = ttk.Frame(panel); act_alpha_row.pack(fill=tk.X, pady=2)
+        ttk.Label(act_alpha_row, text="Orange %", width=8,
+                  foreground="#f4a060").pack(side=tk.LEFT)
+        ttk.Scale(act_alpha_row, from_=0, to=100, variable=act_alpha_var,
+                  orient=tk.HORIZONTAL,
+                  command=lambda _v: _on_act_alpha()).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 4))
+        ttk.Spinbox(act_alpha_row, textvariable=act_alpha_var, width=5,
+                    from_=0, to=100, increment=5).pack(side=tk.LEFT)
+        act_alpha_var.trace_add("write", _on_act_alpha)
 
         ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
         ttk.Label(panel, text="Preview", font=("Segoe UI", 10, "bold"),
