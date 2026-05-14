@@ -249,7 +249,12 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             continue
         fid = f.get("id")
         drawio_file = f.get("drawio_file")
-        if not fid or not drawio_file or not isinstance(fid, str):
+        # Both id + drawio_file must be non-empty strings. Without the
+        # isinstance check on drawio_file, a hand-edited integer (or
+        # path-like Path) would survive into FloorState and then break
+        # os.path operations downstream (e.g. relative path resolve).
+        if (not fid or not isinstance(fid, str)
+                or not drawio_file or not isinstance(drawio_file, str)):
             continue
         try:
             elev = float(f.get("elevation_ft", 0))
