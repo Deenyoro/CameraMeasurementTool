@@ -2933,6 +2933,18 @@ class CameraWireTool:
         if not os.path.exists(path):
             messagebox.showwarning("Missing", f"File no longer exists:\n{path}")
             return
+        # Pre-flight parse BEFORE asking about unsaved changes — if the
+        # file is malformed, the user shouldn't even be asked to discard
+        # their work for it. Mirrors the same pattern in _file_open.
+        try:
+            parse_drawio(path)
+        except (RuntimeError, OSError) as e:
+            log_error(f"Refused to open malformed .drawio: {path}", e)
+            messagebox.showerror(
+                "Couldn't open file",
+                f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
+                f"The current project is untouched.")
+            return
         if not self._can_navigate_away():
             return
         self._flush_pending_settings()
