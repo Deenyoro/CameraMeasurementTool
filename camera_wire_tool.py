@@ -682,6 +682,45 @@ class MoveWaypointCmd(Command):
     def undo(self): self._set(self.old_xy)
 
 
+class InsertWaypointCmd(Command):
+    """Insert a new waypoint into an existing wire at a given index.
+    Used by the canvas right-click → 'Insert waypoint here' action so
+    the user can subdivide a long segment and then drag the new point
+    to reshape — no need to delete + redraw the whole wire."""
+
+    def __init__(self, app: "CameraWireTool", route: dict, insert_idx: int,
+                 xy: tuple[float, float]):
+        self.app = app
+        self.route = route
+        self.insert_idx = insert_idx
+        self.xy = xy
+
+    def _recalc(self) -> None:
+        pts = self.route["points"]
+        self.route["length_px"] = self.app._calc_wire_length(pts)
+        sf = self.app.scale_factor
+        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+
+    def do(self):
+        pts = list(self.route.get("points", []))
+        idx = max(0, min(self.insert_idx, len(pts)))
+        # Idempotent: if the point's already at that index (a stray
+        # double-do from undo→redo), don't insert it twice.
+        if 0 <= idx < len(pts) and pts[idx] == self.xy:
+            return
+        pts.insert(idx, self.xy)
+        self.route["points"] = pts
+        self._recalc()
+
+    def undo(self):
+        pts = list(self.route.get("points", []))
+        idx = self.insert_idx
+        if 0 <= idx < len(pts) and pts[idx] == self.xy:
+            pts.pop(idx)
+            self.route["points"] = pts
+            self._recalc()
+
+
 class ClearDeviceWiresCmd(Command):
     """Remove every wire associated with a single device."""
 
@@ -1960,6 +1999,50 @@ class CameraWireTool:
             "Press Del to bulk-delete.",
         )
         self._redraw()
+
+    def _insert_waypoint_at(self, route, ix: float, iy: float) -> None:
+        """Right-click → 'Insert waypoint here' on a wire. Projects the
+        click onto the wire's closest segment and inserts a new waypoint
+        at that projection point, ready for the user to drag. Undoable
+        via Ctrl+Z. Without this the only way to add an interior bend
+        was to re-route the whole wire."""
+        if not isinstance(route, dict):
+            return
+        pts = route.get("points")
+        if not isinstance(pts, list) or len(pts) < 2:
+            return
+        best_idx = -1
+        best_d = float("inf")
+        best_proj = None
+        for j in range(len(pts) - 1):
+            try:
+                ax = float(pts[j][0]); ay = float(pts[j][1])
+                bx = float(pts[j+1][0]); by = float(pts[j+1][1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            ddx = bx - ax; ddy = by - ay
+            if ddx == 0 and ddy == 0:
+                t = 0.0
+            else:
+                t = ((ix - ax) * ddx + (iy - ay) * ddy) / (ddx*ddx + ddy*ddy)
+                t = max(0.0, min(1.0, t))
+            px = ax + t * ddx
+            py = ay + t * ddy
+            d = math.hypot(ix - px, iy - py)
+            if d < best_d:
+                best_d = d
+                best_idx = j
+                best_proj = (px, py)
+        if best_proj is None or best_idx < 0:
+            return
+        # Insert after pts[best_idx] (i.e., between segment endpoints).
+        cmd = InsertWaypointCmd(self, route, best_idx + 1, best_proj)
+        self._execute(cmd)
+        self._post_command_refresh()
+        new_count = len(route.get("points", []))
+        self._flash_status(
+            f"Waypoint inserted (now {new_count} pts). Drag the white "
+            f"handle to reshape. Ctrl+Z to undo.", ttl_ms=4000)
 
     def _simplify_selected_wire(self) -> None:
         """Drop interior waypoints whose direction equals the previous step's
@@ -3328,6 +3411,7 @@ class CameraWireTool:
             "ClearWiresCmd":      lambda c: f"clear all wires",
             "ClearDeviceWiresCmd":lambda c: f"clear wires on {c.device_id}",
             "MoveWaypointCmd":    lambda c: f"reshape wire (waypoint #{c.point_idx})",
+            "InsertWaypointCmd":  lambda c: f"insert waypoint #{c.insert_idx} on wire",
             "AddDeviceCmd":       lambda c: f"add device {c.device['id']}",
             "DeleteDeviceCmd":    lambda c: f"delete device {c.device['id']}",
             "EditSymbolCmd":      lambda c: f"edit symbol {c.old_code} → {c.new_code}",
@@ -8726,6 +8810,11 @@ class CameraWireTool:
                 state=tk.DISABLED,
             )
             menu.add_separator()
+            menu.add_command(
+                label="➕  Insert waypoint here",
+                command=lambda r=route, x=ix, y=iy:
+                    self._insert_waypoint_at(r, x, y),
+            )
             menu.add_command(label="🔁  Re-route this wire",
                              command=self._reroute_selected_wire)
             menu.add_command(label="✂  Simplify (drop colinear points)",
