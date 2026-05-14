@@ -10256,13 +10256,27 @@ class CameraWireTool:
         info_label.pack(anchor=tk.W, padx=10, pady=8)
 
         def show_current():
-            a = active.alignment
+            # Read with explicit defaults so a corrupted / partial
+            # alignment dict can't KeyError or crash with TypeError when
+            # the user opens this dialog. A missing-key dict is what the
+            # loader's normalize step protects against, but a manually-
+            # edited project file can still arrive here unsafe.
+            a = active.alignment if isinstance(active.alignment, dict) else {}
+            def _num(key, default):
+                raw = a.get(key, default)
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    return default
+            anchors = (active.anchor_points
+                       if isinstance(active.anchor_points, list) else [])
             info_label.config(
                 text=f"Current alignment for {active.id}:\n"
-                     f"  translation: ({a['tx']:.1f}, {a['ty']:.1f}) px\n"
-                     f"  scale:       {a['scale']:.4f}\n"
-                     f"  rotation:    {a['rotation_deg']:.2f}°\n"
-                     f"  anchors:     {len(active.anchor_points)} stored")
+                     f"  translation: ({_num('tx', 0.0):.1f}, "
+                     f"{_num('ty', 0.0):.1f}) px\n"
+                     f"  scale:       {_num('scale', 1.0):.4f}\n"
+                     f"  rotation:    {_num('rotation_deg', 0.0):.2f}°\n"
+                     f"  anchors:     {len(anchors)} stored")
         show_current()
 
         def reset():
@@ -10283,8 +10297,16 @@ class CameraWireTool:
                               "(Shift+Arrow = 10px).").pack(padx=10, pady=8)
             grid = ttk.Frame(n); grid.pack(pady=6)
             def nudge(dx, dy):
-                active.alignment["tx"] += dx
-                active.alignment["ty"] += dy
+                # Ensure the dict has the keys we need before incrementing,
+                # otherwise a corrupted/partial alignment dict KeyErrors.
+                if not isinstance(active.alignment, dict):
+                    active.alignment = dict(mf_mod.IDENTITY_ALIGNMENT)
+                for k, default in (("tx", 0.0), ("ty", 0.0),
+                                    ("scale", 1.0), ("rotation_deg", 0.0)):
+                    if k not in active.alignment:
+                        active.alignment[k] = default
+                active.alignment["tx"] = float(active.alignment["tx"]) + dx
+                active.alignment["ty"] = float(active.alignment["ty"]) + dy
                 self._mark_dirty()
                 show_current()
             ttk.Button(grid, text="↑",  width=4, command=lambda: nudge(0, -1)).grid(row=0, column=1)
