@@ -4464,11 +4464,35 @@ class CameraWireTool:
     def _fit_image(self) -> None:
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        zx = cw / self.img_w
-        zy = ch / self.img_h
+        # Fit needs the ALIGNED bounding box, not the raw image size.
+        # Without this, an alignment.scale != 1 floor renders bigger or
+        # smaller than _fit_image expects, so the user opens the file
+        # and sees a huge image clipped to the corner (or a tiny one
+        # adrift in the middle) — exactly the 'ultra small' / 'doesn't
+        # line up' symptom from the report.
+        corners_raw = [
+            (0.0, 0.0), (self.img_w, 0.0),
+            (0.0, self.img_h), (self.img_w, self.img_h),
+        ]
+        align = self._current_alignment() if hasattr(self, "_project") else None
+        if isinstance(align, dict):
+            corners_aligned = [
+                mf_mod.apply_alignment(p, align) for p in corners_raw]
+            xs = [c[0] for c in corners_aligned]
+            ys = [c[1] for c in corners_aligned]
+            ax0, ay0 = min(xs), min(ys)
+            ax1, ay1 = max(xs), max(ys)
+            eff_w = max(1.0, ax1 - ax0)
+            eff_h = max(1.0, ay1 - ay0)
+        else:
+            ax0 = ay0 = 0.0
+            eff_w, eff_h = float(self.img_w), float(self.img_h)
+        zx = cw / eff_w
+        zy = ch / eff_h
         self.zoom = min(zx, zy) * C.FIT_MARGIN
-        self.offset_x = (cw - self.img_w * self.zoom) / 2
-        self.offset_y = (ch - self.img_h * self.zoom) / 2
+        # offset positions the aligned bounding box at the canvas center.
+        self.offset_x = (cw - eff_w * self.zoom) / 2 - ax0 * self.zoom
+        self.offset_y = (ch - eff_h * self.zoom) / 2 - ay0 * self.zoom
 
     def _get_viewport_image(self):
         cw = self.canvas.winfo_width() or 800
@@ -10953,22 +10977,46 @@ class CameraWireTool:
         dlg.title(f"Drag-align {active.id} to reference")
         dlg.geometry("1100x780")
 
+        # Two explicit selectors so the user always knows which floor
+        # will be transformed and which stays as the fixed background.
+        # Before this, the dialog implicitly used the active floor as
+        # the target — if you were viewing F1 and picked F2 as 'ref',
+        # F1 got the scale/offset applied and ended up tiny on the
+        # main canvas. Now it's spelled out + swappable.
         top = ttk.Frame(dlg); top.pack(fill=tk.X, padx=10, pady=(8, 4))
-        ttk.Label(top, text=f"Aligning {active.id}: {active.name}",
-                  font=("Segoe UI", 11, "bold"),
+        ttk.Label(top, text="Floor to ALIGN (orange, will be transformed):",
+                  font=("Segoe UI", 10, "bold"),
+                  foreground="#FF8C42").pack(side=tk.LEFT)
+        target_var = tk.StringVar(value=active.id)
+        all_ids = [f.id for f in self._project.floors]
+        target_combo = ttk.Combobox(top, textvariable=target_var,
+                                     values=all_ids, state="readonly",
+                                     width=10)
+        target_combo.pack(side=tk.LEFT, padx=(6, 14))
+        ttk.Label(top, text="onto REFERENCE (grey, stays fixed):",
+                  font=("Segoe UI", 10, "bold"),
                   foreground="#7fc4ff").pack(side=tk.LEFT)
-        ttk.Label(top, text="  onto reference:").pack(side=tk.LEFT, padx=(20, 4))
         ref_var = tk.StringVar(value=ref_floor.id)
         ref_combo = ttk.Combobox(top, textvariable=ref_var,
                                   values=[f.id for f in others],
                                   state="readonly", width=10)
-        ref_combo.pack(side=tk.LEFT)
+        ref_combo.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Swap button — most users will misclick once and want a quick fix.
+        def swap_target_ref():
+            t = target_var.get(); r = ref_var.get()
+            if t == r:
+                return
+            target_var.set(r); ref_var.set(t)
+        ttk.Button(top, text="⇄  Swap",
+                   command=swap_target_ref).pack(side=tk.LEFT, padx=10)
 
         help_lbl = ttk.Label(dlg, text=
-            "LEFT drag: move the orange floor.  RIGHT drag: pan the view.  "
-            "MOUSE WHEEL: zoom in/out of the workspace (toward cursor).  "
-            "SHIFT or CTRL + wheel: resize the orange floor around cursor.  "
-            "Spinboxes on the right give precise values.",
+            "Only the ORANGE floor gets transformed — the grey reference "
+            "stays as the fixed coordinate frame. LEFT drag: move orange. "
+            "RIGHT drag: pan the view. WHEEL: zoom workspace. SHIFT/CTRL + "
+            "wheel: resize the orange floor. Spinboxes on the right give "
+            "precise values. Hit Apply to save.",
             font=("Segoe UI", 9), foreground="#888888",
             wraplength=1060, justify=tk.LEFT)
         help_lbl.pack(anchor=tk.W, padx=10, pady=(2, 4))
@@ -10984,8 +11032,14 @@ class CameraWireTool:
         panel = ttk.Frame(body)
         panel.grid(row=0, column=1, sticky="ns", padx=(8, 0))
 
-        # ---- Draft alignment (seeded from current) ----
-        cur = active.alignment if isinstance(active.alignment, dict) else {}
+        # The dialog operates on the floor chosen in target_combo —
+        # captured here as a mutable state so the combo callback can
+        # repoint everything without rebuilding the dialog.
+        state = {"target_floor": active}
+
+        # ---- Draft alignment (seeded from TARGET's current alignment) ----
+        cur = state["target_floor"].alignment \
+            if isinstance(state["target_floor"].alignment, dict) else {}
         draft = {
             "tx":           float(cur.get("tx", 0.0) or 0.0),
             "ty":           float(cur.get("ty", 0.0) or 0.0),
@@ -11441,27 +11495,68 @@ class CameraWireTool:
                 and abs(draft["rotation_deg"]) < 0.01):
             dlg.after(40, fit_width)
 
-        def _on_ref_change(_e=None):
+        def _on_pair_change(_e=None):
+            """Triggered when either combo (target or reference) changes.
+            Reloads the corresponding bg image, re-seeds the draft from
+            the new target's stored alignment, and refits the view."""
             nonlocal ref_floor, ref_bg
-            new_ref = self._project.get_floor(ref_var.get())
-            if new_ref is None:
+            # Disallow target == reference.
+            if target_var.get() == ref_var.get():
+                # Pick a different reference so the dialog isn't useless.
+                for f in self._project.floors:
+                    if f.id != target_var.get():
+                        ref_var.set(f.id)
+                        break
+            new_target = self._project.get_floor(target_var.get())
+            new_ref    = self._project.get_floor(ref_var.get())
+            if new_target is None or new_ref is None:
                 return
-            new_bg, why = _load_bg(new_ref)
-            if new_bg is None:
-                messagebox.showerror("Can't load reference",
-                                      f"{new_ref.id} ({new_ref.name}): {why}")
+            new_target_bg, t_why = _load_bg(new_target)
+            new_ref_bg,    r_why = _load_bg(new_ref)
+            if new_target_bg is None or new_ref_bg is None:
+                details = []
+                if new_target_bg is None:
+                    details.append(f"  target {new_target.id}: {t_why}")
+                if new_ref_bg is None:
+                    details.append(f"  reference {new_ref.id}: {r_why}")
+                messagebox.showerror("Can't load floor",
+                                      "\n".join(details))
                 return
+            # Repoint state + caches
+            state["target_floor"] = new_target
             ref_floor = new_ref
-            ref_bg = new_bg
-            _refresh_premade_for_ref(new_ref_bg=new_bg)
-            view["_initialized"] = False   # refit
+            ref_bg = new_ref_bg
+            held["ref_raw"] = new_ref_bg
+            held["act_raw"] = new_target_bg
+            held["ref_src"] = _premake(new_ref_bg, held["ref_alpha"])
+            held["act_src"] = _premake(
+                new_target_bg, held["act_alpha"], tint="orange")
+            # Re-seed draft from THIS target's stored alignment, not the
+            # previous target's.
+            cur2 = (new_target.alignment
+                    if isinstance(new_target.alignment, dict) else {})
+            draft.update({
+                "tx":           float(cur2.get("tx", 0.0) or 0.0),
+                "ty":           float(cur2.get("ty", 0.0) or 0.0),
+                "scale":        float(cur2.get("scale", 1.0) or 1.0),
+                "rotation_deg": float(cur2.get("rotation_deg", 0.0) or 0.0),
+            })
+            _sync_vars_from_draft()
+            view["_initialized"] = False  # refit
+            # Auto fit-width if the new target's alignment is identity.
+            if (abs(draft["tx"]) < 0.5 and abs(draft["ty"]) < 0.5
+                    and abs(draft["scale"] - 1.0) < 1e-4
+                    and abs(draft["rotation_deg"]) < 0.01):
+                dlg.after(40, fit_width)
             _schedule_redraw(interactive=False)
-        ref_combo.bind("<<ComboboxSelected>>", _on_ref_change)
+        target_combo.bind("<<ComboboxSelected>>", _on_pair_change)
+        ref_combo.bind("<<ComboboxSelected>>", _on_pair_change)
 
         # ---- Bottom action buttons ----
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
         def apply_now():
-            active.alignment = {
+            target = state["target_floor"]
+            target.alignment = {
                 "tx": float(draft["tx"]),
                 "ty": float(draft["ty"]),
                 "scale": float(draft["scale"]),
@@ -11472,24 +11567,26 @@ class CameraWireTool:
                 mf_mod.save_project(self._project, self.project_path)
             except OSError as e:
                 log_error("Save after drag-align failed", e)
-            # Trigger a redraw of the main canvas so the alignment
-            # takes effect immediately (no floor-switch required).
+            # Trigger a redraw + refit of the main canvas so the
+            # alignment takes effect immediately even without a floor
+            # switch. _fit_image now accounts for alignment so the
+            # aligned floor lands centered + sized to the viewport.
+            if target.id == self._project.active_floor:
+                self._fit_image()
             self._redraw()
             # If the project has a calibrated scale, the aligned floor
             # automatically shares it — pixels are in the reference's
-            # frame after alignment. Mention this so the user knows
-            # they don't need to re-calibrate.
+            # frame after alignment.
             if self.scale_factor:
-                scale_msg = (f" Wire lengths on {active.id} will use the "
-                             f"project scale ({self._format_length(1.0)} = 1 px) "
-                             f"since the aligned pixels share "
-                             f"{ref_floor.id}'s frame.")
+                scale_msg = (f" Wire lengths on {target.id} now use the "
+                             f"project scale since the aligned pixels "
+                             f"share {ref_floor.id}'s frame.")
             else:
-                scale_msg = (" Project scale isn't calibrated yet — set it "
-                             "via Tools → Set Scale on the reference floor "
-                             "and the aligned floor inherits it.")
+                scale_msg = (" Project scale isn't calibrated yet — set "
+                             "it via Tools → Set Scale on the reference "
+                             "floor and the aligned floor inherits it.")
             self._flash_status(
-                f"Alignment applied to {active.id}.{scale_msg}",
+                f"Alignment applied to {target.id}.{scale_msg}",
                 ttl_ms=7000)
             dlg.destroy()
         ttk.Button(btns, text="Apply", command=apply_now).pack(side=tk.RIGHT,
