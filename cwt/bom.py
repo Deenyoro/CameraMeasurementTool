@@ -297,9 +297,15 @@ def device_inventory(
                     or default_cable_for(sym))
         if cable_id not in cable_types:
             cable_id = "—"
+        # Coerce label to str — callers slice line.label[:24] which
+        # would TypeError on None / int / other non-string values that
+        # a hand-edited symbol entry might carry.
+        raw_label = sym.get("label", dt)
+        label = (raw_label if isinstance(raw_label, str)
+                 else (str(raw_label) if raw_label is not None else dt))
         out.append(DeviceInventoryLine(
             code=dt,
-            label=sym.get("label", dt),
+            label=label,
             count=counts.get(dt, 0),
             cable_id=cable_id,
             runs=runs.get(dt, 0),
