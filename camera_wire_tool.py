@@ -6666,6 +6666,10 @@ class CameraWireTool:
             # string instead of a dict. Treat as empty rather than crash
             # the menu build with AttributeError on .get().
             ct_label = (ct.get("label", cid) if isinstance(ct, dict) else cid)
+            # Also coerce label to str — a non-string would TypeError
+            # on [:24] slicing.
+            if not isinstance(ct_label, str):
+                ct_label = str(ct_label) if ct_label is not None else cid
             label = f"{cid}  ({ct_label[:24]})"
             sub.add_command(label=label,
                              command=lambda c=cid: apply_fn(c))
