@@ -10058,6 +10058,18 @@ class CameraWireTool:
             filetypes=[("Draw.io files", "*.drawio")])
         if not path:
             return
+        # Pre-flight parse — same UX as _file_open + _open_recent. A
+        # malformed floor file would otherwise add a phantom row to
+        # the floor list, then fail when the user tried to switch.
+        try:
+            parse_drawio(path)
+        except (RuntimeError, OSError) as e:
+            log_error(f"Refused to add floor with malformed .drawio: {path}", e)
+            messagebox.showerror(
+                "Can't add floor",
+                f"{path}\n\nIsn't a valid .drawio:\n{e}\n\n"
+                f"No floor was added.")
+            return
         if self._project is None:
             # Bootstrap into multi-floor mode by capturing current floor as F1
             self._project = mf_mod.ProjectState(
