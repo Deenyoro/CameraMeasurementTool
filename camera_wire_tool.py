@@ -10722,6 +10722,16 @@ class CameraWireTool:
         self._switch_floor(nxt)
 
     def _switch_floor(self, floor_id: str) -> None:
+        """Swap the active floor in place. The old behavior was a full
+        tool destroy + relaunch with the new .drawio, which silently
+        lost the multi-floor project because the new instance computed
+        its own project_path (Floor2.wiremap.json) instead of the
+        original bundle file (Floor1.wiremap.json) — meaning your
+        floor list and risers vanished after every switch.
+
+        Now we keep the same instance, project, autosave path, and UI.
+        Just reparse the target .drawio, swap the canvas state, refresh
+        the side panel lists, and redraw. Much faster too."""
         if self._project is None:
             return
         target = self._project.get_floor(floor_id)
@@ -10731,12 +10741,9 @@ class CameraWireTool:
         if not self._can_navigate_away():
             return
 
-        # Save active floor's wires back to project. Defensive: skip any
-        # malformed in-memory route so the floor switch can't crash on a
-        # bad wr["points"] subscript. save_project's serializer also
-        # filters non-dict / short-points entries, but we want a clean
-        # FloorState in memory too so the round-trip back through
-        # active_floor doesn't surprise us.
+        # Save active floor's wires + annotations back to its FloorState
+        # so a subsequent switch back round-trips correctly. Defensive:
+        # skip malformed entries.
         active = self._project.get_floor(self._project.active_floor)
         if active is not None:
             active.wire_routes = []
@@ -10751,33 +10758,134 @@ class CameraWireTool:
                 if wr.get("cable_type"):
                     e["cable_type"] = wr["cable_type"]
                 active.wire_routes.append(e)
+            active.annotations = [dict(a) for a in self.annotations
+                                  if isinstance(a, dict)]
 
-        # Resolve target's drawio path (relative or absolute)
+        # Resolve target's drawio path (relative paths are relative to
+        # the *current* drawio's directory — keep this lookup before we
+        # swap self.drawio_path to the new value).
         if os.path.isabs(target.drawio_file):
             new_path = target.drawio_file
         else:
             new_path = os.path.normpath(
-                os.path.join(os.path.dirname(self.drawio_path), target.drawio_file))
+                os.path.join(os.path.dirname(self.drawio_path),
+                              target.drawio_file))
         if not os.path.exists(new_path):
             messagebox.showerror("Missing file",
                                  f"Drawio file not found:\n{new_path}")
             return
 
-        # Reload — relaunch the tool with the new file (cleaner than reparenting state)
-        self._save_project()  # persist the v2 project
-        # Hand the active_floor change off to the new instance via the project file:
+        # Parse the new drawio. Bail BEFORE mutating state so a parse
+        # failure leaves the user on the current floor instead of a
+        # half-loaded mess.
+        try:
+            bg, pw, ph, devs, syms, leg = parse_drawio(new_path)
+        except (RuntimeError, OSError) as e:
+            log_error(f"Refused to switch to malformed .drawio: {new_path}", e)
+            messagebox.showerror(
+                "Can't switch floor",
+                f"{target.id} ({new_path}) failed to parse:\n{e}\n\n"
+                f"Staying on {self._project.active_floor}.")
+            return
+        if bg is None:
+            messagebox.showerror(
+                "Missing background image",
+                f"{target.id}'s .drawio carries no embedded image. "
+                f"Add one in draw.io, save, and try again.\n\n"
+                f"Staying on {self._project.active_floor}.")
+            return
+
+        # ---- Commit the swap: replace drawing state in place ----
+        self.drawio_path = new_path
+        self.bg_image = bg
+        self.page_w, self.page_h = pw, ph
+        self.img_w, self.img_h = bg.size
+        self.dx_scale = self.img_w / self.page_w
+        self.dy_scale = self.img_h / self.page_h
+        self.devices = devs
+        # symbol_types is per-floor today (each .drawio carries its own
+        # named styles). Merge new entries onto whatever the project
+        # had so a previously-edited symbol on Floor 1 doesn't disappear
+        # when the user switches to Floor 2.
+        merged_syms = dict(self.symbol_types or {})
+        for k, v in (syms or {}).items():
+            merged_syms.setdefault(k, v)
+        self.symbol_types = merged_syms
+        if leg is not None:
+            self.legend_box = leg
+
         self._project.active_floor = floor_id
+
+        # Reset transient interaction state — keeping a half-finished
+        # drag / lasso / wire across a floor swap would point at stale
+        # devices and corrupt the new floor.
+        self.selected_devices = []
+        self._primary_selected = None
+        self.dragging_device = None
+        self._drag_start_pos = None
+        self.drag_offset = (0.0, 0.0)
+        self._multi_drag_starts = {}
+        self._dragging_waypoint = None
+        self._dragging_legend = None
+        self._rotating_fov = None
+        self.current_wire_points = []
+        self.cal_points = []
+        self._floor_anchors_picking = None
+        self._floor_align_target = None
+        self._lasso = None
+        try:
+            self.mode = Mode.MOVE
+            if hasattr(self, "mode_var"):
+                self.mode_var.set(Mode.MOVE.name)
+        except (tk.TclError, AttributeError):
+            pass
+
+        # Load target floor's wire_routes + annotations from the
+        # FloorState (mirrors _load_project's defensive coerce).
+        self.wire_routes = []
+        for wr in (target.wire_routes or []):
+            if not isinstance(wr, dict):
+                continue
+            pts = []
+            for p in wr.get("points", []):
+                try:
+                    pts.append((float(p[0]), float(p[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if len(pts) < 2:
+                continue
+            px_len = self._calc_wire_length(pts)
+            real_in = (px_len * self.scale_factor) if self.scale_factor else None
+            entry = {"points": pts, "length_px": px_len, "length_in": real_in,
+                     "device_id": wr.get("device_id")}
+            if wr.get("cable_type"):
+                entry["cable_type"] = wr["cable_type"]
+            self.wire_routes.append(entry)
+        self.annotations = [dict(a) for a in (target.annotations or [])
+                            if isinstance(a, dict)]
+
+        # Persist project file so a crash right after the switch keeps
+        # the active_floor + per-floor wires consistent on next launch.
         try:
             mf_mod.save_project(self._project, self.project_path)
-        except OSError:
-            pass
-        self._flush_pending_settings()
-        self.root.destroy()
-        new_root = tk.Tk()
-        apply_theme(new_root)
-        new_root.title("Camera Wire Estimation Tool")
-        CameraWireTool(new_root, new_path)
-        new_root.mainloop()
+        except OSError as e:
+            log_error("Save after floor switch failed", e)
+
+        # Refresh every surface that depends on swapped state.
+        self._update_title()
+        self._refresh_floor_menu()
+        self._refresh_mode_ui()
+        self._refresh_symbol_list()
+        self._refresh_device_list()
+        self._refresh_wire_list()
+        self._refresh_bom_tab()
+        self._fit_image()
+        self._redraw()
+        self._flash_status(
+            f"Switched to {floor_id} — {target.name}. "
+            f"Doesn't line up with the previous floor? Use Floors → "
+            f"Align Floor to Reference to map them onto a shared frame.",
+            ttl_ms=6000)
 
     def _open_alignment_dialog(self) -> None:
         if self._project is None or len(self._project.floors) < 2:
