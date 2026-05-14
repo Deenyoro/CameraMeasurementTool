@@ -5220,6 +5220,15 @@ class CameraWireTool:
 
     # ============================================================ Mouse handlers
     def _on_left_press(self, event) -> None:
+        # Transfer keyboard focus to the canvas on click so M/W/C and
+        # other mode shortcuts work right after the user clicked the
+        # canvas — without this, focus stays on whatever they last typed
+        # in (search Entry, etc.) and _is_text_focus blocks every
+        # canvas-only key handler.
+        try:
+            self.canvas.focus_set()
+        except tk.TclError:
+            pass
         if (event.state & 0x4) or self._space_pan:
             self._on_pan_start(event)
             return
