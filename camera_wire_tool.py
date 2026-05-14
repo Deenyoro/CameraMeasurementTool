@@ -5135,12 +5135,19 @@ class CameraWireTool:
 
     def _wire_at(self, ix: float, iy: float) -> int | None:
         """Return the wire index whose line passes near (ix, iy). Used to
-        click-to-select a wire on the canvas."""
+        click-to-select a wire on the canvas. Defensive against a
+        non-dict route or a route with a missing / non-list points list
+        — a single bad entry would otherwise crash every canvas
+        click."""
         thresh = max(4.0, 6.0 / max(self.zoom, 0.01))
         best_idx = None
         best_dist = float("inf")
         for idx, route in enumerate(self.wire_routes):
-            pts = route["points"]
+            if not isinstance(route, dict):
+                continue
+            pts = route.get("points")
+            if not isinstance(pts, list) or len(pts) < 2:
+                continue
             for j in range(len(pts) - 1):
                 d = self._point_to_segment_dist((ix, iy), pts[j], pts[j+1])
                 if d < best_dist and d <= thresh:
@@ -8060,7 +8067,13 @@ class CameraWireTool:
                 ix_img, iy_img = self._canvas_to_img(ix_a, iy_a)
                 best = None; best_d = float("inf")
                 for ann in self.annotations:
-                    a_ix, a_iy = self._drawio_to_img(ann["x"], ann["y"])
+                    if not isinstance(ann, dict):
+                        continue
+                    try:
+                        ax = float(ann["x"]); ay = float(ann["y"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    a_ix, a_iy = self._drawio_to_img(ax, ay)
                     d = math.hypot(ix_img - a_ix, iy_img - a_iy)
                     if d < best_d:
                         best_d = d; best = ann
