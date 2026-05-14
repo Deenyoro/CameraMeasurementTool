@@ -1343,6 +1343,12 @@ class CameraWireTool:
         self._show_only_selected_fov = tk.BooleanVar(value=False)
         self._show_legend = tk.BooleanVar(value=True)
         self._show_grid = tk.BooleanVar(value=False)
+        # Master visibility toggles for the two main on-canvas layers.
+        # Useful when the user wants a "clean floor plan" view for a
+        # screenshot, or to hide one layer while reasoning about the
+        # other. Default ON so the app looks normal on first launch.
+        self._show_devices = tk.BooleanVar(value=True)
+        self._show_wires = tk.BooleanVar(value=True)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -1380,6 +1386,8 @@ class CameraWireTool:
             ("show_grid",       self._show_grid),
             ("show_device_ids", self._show_device_ids),
             ("show_legend",     self._show_legend),
+            ("show_devices",    self._show_devices),
+            ("show_wires",      self._show_wires),
         ):
             if key in prefs:
                 try:
@@ -2325,6 +2333,13 @@ class CameraWireTool:
         view_menu.add_command(label="Zoom Out", command=lambda: self._zoom_button(-1),
                               accelerator="-")
         view_menu.add_separator()
+        view_menu.add_checkbutton(label="Show All Devices",
+                                  variable=self._show_devices,
+                                  command=self._redraw)
+        view_menu.add_checkbutton(label="Show All Wires",
+                                  variable=self._show_wires,
+                                  command=self._redraw)
+        view_menu.add_separator()
         view_menu.add_checkbutton(label="Show Device IDs on Map",
                                   variable=self._show_device_ids,
                                   command=self._redraw)
@@ -2496,6 +2511,26 @@ class CameraWireTool:
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         # Quick toggles
+        # Master layer-visibility toggles — quick way to declutter the
+        # canvas for a screenshot or focus on just one layer.
+        devs_btn = ttk.Checkbutton(
+            toolbar, text="Devices", variable=self._show_devices,
+            style="Toolbutton", command=self._redraw,
+        )
+        devs_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(devs_btn,
+                "Show / hide ALL device symbols on the map. Off = floor "
+                "plan + wires only — useful for screenshots that focus "
+                "on cable runs.")
+        wires_btn = ttk.Checkbutton(
+            toolbar, text="Wires", variable=self._show_wires,
+            style="Toolbutton", command=self._redraw,
+        )
+        wires_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(wires_btn,
+                "Show / hide ALL wire runs on the map. Off = clean "
+                "device layout view, e.g. for verifying placement "
+                "without route clutter.")
         ids_btn = ttk.Checkbutton(
             toolbar, text="IDs", variable=self._show_device_ids,
             style="Toolbutton", command=self._redraw,
@@ -4495,8 +4530,11 @@ class CameraWireTool:
         if self._show_fov.get():
             self._draw_fov_cones()
 
-        for i, route in enumerate(self.wire_routes):
-            self._draw_wire_route(route, i)
+        # Master visibility gates — let the user hide an entire layer for
+        # screenshots or to declutter while focusing on the other layer.
+        if self._show_wires.get():
+            for i, route in enumerate(self.wire_routes):
+                self._draw_wire_route(route, i)
 
         if self.current_wire_points:
             pts_canvas = [self._img_to_canvas(*p) for p in self.current_wire_points]
@@ -4511,8 +4549,9 @@ class CameraWireTool:
                 self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3,
                                         fill="#00BFFF", outline="white", tags="wip_wire")
 
-        for d in self.devices:
-            self._draw_device(d)
+        if self._show_devices.get():
+            for d in self.devices:
+                self._draw_device(d)
 
         if self._show_legend.get():
             self._draw_legend()
@@ -7110,6 +7149,8 @@ class CameraWireTool:
                 "show_grid":        bool(self._show_grid.get()),
                 "show_device_ids":  bool(self._show_device_ids.get()),
                 "show_legend":      bool(self._show_legend.get()),
+                "show_devices":     bool(self._show_devices.get()),
+                "show_wires":       bool(self._show_wires.get()),
             }
         except (tk.TclError, ValueError, AttributeError):
             return
