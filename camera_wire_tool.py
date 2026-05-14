@@ -8452,10 +8452,19 @@ class CameraWireTool:
             # Right-click directly on a wire line: show wire actions menu.
             self._select_wire_in_listbox(wire_idx)
             route = self.wire_routes[wire_idx]
-            did = route.get("device_id") or "—"
-            length = (self._format_length(route.get("length_in") or 0)
-                      if route.get("length_in") is not None
-                      else f"{route['length_px']:.0f}px")
+            did = (route.get("device_id") or "—"
+                   if isinstance(route, dict) else "—")
+            length_in = (route.get("length_in")
+                         if isinstance(route, dict) else None)
+            if length_in is not None:
+                length = self._format_length(length_in)
+            elif isinstance(route, dict):
+                try:
+                    length = f"{float(route.get('length_px', 0) or 0):.0f}px"
+                except (TypeError, ValueError):
+                    length = "--"
+            else:
+                length = "--"
             menu.add_command(
                 label=f"Wire #{wire_idx+1} → {did}  ({length})",
                 state=tk.DISABLED,
