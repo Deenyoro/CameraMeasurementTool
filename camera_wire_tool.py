@@ -4436,11 +4436,29 @@ class CameraWireTool:
     def _img_to_drawio(self, ix, iy):
         return ix / self.dx_scale, iy / self.dy_scale
 
+    def _current_alignment(self) -> dict:
+        """The current floor's alignment dict, or identity if none.
+        Used by the canvas coordinate transforms so the drag-align /
+        anchor-align values actually take effect on the main canvas."""
+        if self._project is None:
+            return dict(mf_mod.IDENTITY_ALIGNMENT)
+        active = self._project.get_floor(self._project.active_floor)
+        if active is None or not isinstance(active.alignment, dict):
+            return dict(mf_mod.IDENTITY_ALIGNMENT)
+        return active.alignment
+
     def _img_to_canvas(self, ix, iy):
-        return ix * self.zoom + self.offset_x, iy * self.zoom + self.offset_y
+        # Apply the current floor's alignment (raw image → aligned
+        # image), then zoom + offset (aligned image → canvas pixel).
+        ax, ay = mf_mod.apply_alignment((ix, iy), self._current_alignment())
+        return ax * self.zoom + self.offset_x, ay * self.zoom + self.offset_y
 
     def _canvas_to_img(self, cx, cy):
-        return (cx - self.offset_x) / self.zoom, (cy - self.offset_y) / self.zoom
+        # Inverse: canvas → aligned image → raw image.
+        ax = (cx - self.offset_x) / self.zoom
+        ay = (cy - self.offset_y) / self.zoom
+        return mf_mod.apply_alignment(
+            (ax, ay), mf_mod.inverse_alignment(self._current_alignment()))
 
     # ============================================================ Rendering
     def _fit_image(self) -> None:
@@ -4455,17 +4473,35 @@ class CameraWireTool:
     def _get_viewport_image(self):
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        img_left, img_top = self._canvas_to_img(0, 0)
-        img_right, img_bot = self._canvas_to_img(cw, ch)
-        src_x0 = max(0, int(math.floor(img_left)))
-        src_y0 = max(0, int(math.floor(img_top)))
-        src_x1 = min(self.img_w, int(math.ceil(img_right)))
-        src_y1 = min(self.img_h, int(math.ceil(img_bot)))
+        # _canvas_to_img now applies inverse alignment, so the four
+        # visible-region corners come back in RAW image space — same
+        # space the bg_image PIL data lives in. We need ALL four corners
+        # (not just two) when alignment has rotation, since the inverse-
+        # mapped viewport rectangle may not be axis-aligned in raw space.
+        align = self._current_alignment()
+        has_rot = abs(float(align.get("rotation_deg", 0) or 0)) > 0.01
+        corners = [
+            self._canvas_to_img(0, 0),
+            self._canvas_to_img(cw, 0),
+            self._canvas_to_img(0, ch),
+            self._canvas_to_img(cw, ch),
+        ]
+        xs = [c[0] for c in corners]; ys = [c[1] for c in corners]
+        src_x0 = max(0, int(math.floor(min(xs))))
+        src_y0 = max(0, int(math.floor(min(ys))))
+        src_x1 = min(self.img_w, int(math.ceil(max(xs))))
+        src_y1 = min(self.img_h, int(math.ceil(max(ys))))
         if src_x1 <= src_x0 or src_y1 <= src_y0:
             return None, 0, 0
         cropped = self.bg_image.crop((src_x0, src_y0, src_x1, src_y1))
-        dst_w = max(1, int((src_x1 - src_x0) * self.zoom))
-        dst_h = max(1, int((src_y1 - src_y0) * self.zoom))
+        # Each raw image pixel maps to alignment.scale aligned pixels,
+        # and each aligned pixel maps to zoom canvas pixels. So the
+        # displayed crop size is raw_size * alignment.scale * zoom.
+        a_scale = float(align.get("scale", 1.0) or 1.0)
+        a_rot = float(align.get("rotation_deg", 0.0) or 0.0)
+        eff_scale = self.zoom * a_scale
+        dst_w = max(1, int((src_x1 - src_x0) * eff_scale))
+        dst_h = max(1, int((src_y1 - src_y0) * eff_scale))
         if dst_w > C.VIEWPORT_MAX_DIM or dst_h > C.VIEWPORT_MAX_DIM:
             sc = C.VIEWPORT_MAX_DIM / max(dst_w, dst_h)
             dst_w = max(1, int(dst_w * sc))
@@ -4475,8 +4511,22 @@ class CameraWireTool:
         # to LANCZOS on settle for the final crisp frame.
         resample = Image.BILINEAR if self._interactive else Image.LANCZOS
         resized = cropped.resize((dst_w, dst_h), resample)
+        if has_rot:
+            # Rotate AFTER resize so we operate on a smaller image —
+            # negative degree to match the screen convention (positive
+            # rotation_deg = counter-clockwise on screen, otherwise we'd
+            # be flipping vs the dialog's preview).
+            resized = resized.rotate(-a_rot, resample=resample, expand=True)
         tk_img = ImageTk.PhotoImage(resized)
         place_x, place_y = self._img_to_canvas(src_x0, src_y0)
+        if has_rot:
+            # After PIL's expand=True rotate, the image's origin shifted —
+            # offset the placement so the visible centre stays put.
+            # Compute the centre of the un-rotated dst rect mapped to
+            # canvas, then translate by half the rotated image size.
+            rx = tk_img.width(); ry = tk_img.height()
+            place_x -= (rx - dst_w) / 2
+            place_y -= (ry - dst_h) / 2
         return tk_img, place_x, place_y
 
     def _schedule_redraw(self) -> None:
@@ -10566,7 +10616,10 @@ class CameraWireTool:
                       command=self._add_floor_dialog)
         manage_state = tk.NORMAL if n_floors >= 1 else tk.DISABLED
         align_state = tk.NORMAL if n_floors >= 2 else tk.DISABLED
-        m.add_command(label="⇄  Align floor to reference…",
+        m.add_command(label="🖱  Drag-align (visual)…",
+                      command=self._open_drag_align_dialog,
+                      state=align_state)
+        m.add_command(label="⇄  Align by anchor points…",
                       command=self._open_alignment_dialog,
                       state=align_state)
         m.add_command(label="⚙  Manage floors…",
@@ -10598,7 +10651,10 @@ class CameraWireTool:
         # that just open a 'need at least one/two floors first' popup.
         align_state = tk.NORMAL if n_floors >= 2 else tk.DISABLED
         manage_state = tk.NORMAL if n_floors >= 1 else tk.DISABLED
-        m.add_command(label="Align Floor to Reference…",
+        m.add_command(label="Drag-align (visual)…",
+                      command=self._open_drag_align_dialog,
+                      state=align_state)
+        m.add_command(label="Align by anchor points…",
                       command=self._open_alignment_dialog,
                       state=align_state)
         m.add_command(label="Manage Floors…",
@@ -10886,6 +10942,417 @@ class CameraWireTool:
             f"Doesn't line up with the previous floor? Use Floors → "
             f"Align Floor to Reference to map them onto a shared frame.",
             ttl_ms=6000)
+
+    def _open_drag_align_dialog(self) -> None:
+        """Visual drag-and-scale alignment. Shows the reference floor as
+        a ghosted underlay and the floor-being-aligned on top, both at
+        partial alpha so the user can see how well they line up.
+
+        Mouse interactions on the preview canvas:
+          - Left drag        → translate the target floor (alignment.tx/ty)
+          - Mouse wheel      → scale the target floor around the cursor
+          - Shift+wheel      → zoom the view (not the alignment)
+          - Right drag       → pan the view (not the alignment)
+        Sliders give precise control over scale + rotation. Apply
+        writes the resulting transform to the active floor's
+        alignment field and persists the project."""
+        if self._project is None or len(self._project.floors) < 2:
+            self._flash_status(
+                "Drag-align needs ≥2 floors. Add another via "
+                "Floors → Add Floor first.", ttl_ms=3500)
+            return
+        active = self._project.get_floor(self._project.active_floor)
+        if active is None:
+            return
+        others = [f for f in self._project.floors if f.id != active.id]
+        if not others:
+            return
+
+        # ---- Load both floors' bg images ----
+        def _resolve_floor_path(f) -> str:
+            if os.path.isabs(f.drawio_file):
+                return f.drawio_file
+            return os.path.normpath(
+                os.path.join(os.path.dirname(self.drawio_path),
+                              f.drawio_file))
+
+        def _load_bg(f):
+            path = _resolve_floor_path(f)
+            if not os.path.exists(path):
+                return None
+            try:
+                bg, _, _, _, _, _ = parse_drawio(path)
+                return bg
+            except (RuntimeError, OSError):
+                return None
+
+        ref_floor = others[0]
+        ref_bg = _load_bg(ref_floor)
+        active_bg = _load_bg(active)
+        if ref_bg is None or active_bg is None:
+            messagebox.showerror(
+                "Can't drag-align",
+                "Failed to parse one of the floor .drawio files. "
+                "Verify both files open cleanly first.")
+            return
+
+        # ---- Build the dialog ----
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.title(f"Drag-align {active.id} to reference")
+        dlg.geometry("1100x780")
+
+        top = ttk.Frame(dlg); top.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ttk.Label(top, text=f"Aligning {active.id}: {active.name}",
+                  font=("Segoe UI", 11, "bold"),
+                  foreground="#7fc4ff").pack(side=tk.LEFT)
+        ttk.Label(top, text="  onto reference:").pack(side=tk.LEFT, padx=(20, 4))
+        ref_var = tk.StringVar(value=ref_floor.id)
+        ref_combo = ttk.Combobox(top, textvariable=ref_var,
+                                  values=[f.id for f in others],
+                                  state="readonly", width=10)
+        ref_combo.pack(side=tk.LEFT)
+
+        help_lbl = ttk.Label(dlg, text=
+            "Drag the colored floor with the LEFT mouse button to translate. "
+            "Mouse wheel scales it. Use Shift+wheel to zoom the preview, "
+            "right-drag to pan the preview. Sliders give precise control.",
+            font=("Segoe UI", 9), foreground="#888888",
+            wraplength=1060, justify=tk.LEFT)
+        help_lbl.pack(anchor=tk.W, padx=10, pady=(2, 4))
+
+        # Side-by-side: big canvas left, control panel right.
+        body = ttk.Frame(dlg); body.pack(fill=tk.BOTH, expand=True,
+                                          padx=10, pady=4)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(body, bg="#202020", highlightthickness=0,
+                           cursor="fleur")
+        canvas.grid(row=0, column=0, sticky="nsew")
+        panel = ttk.Frame(body)
+        panel.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+
+        # ---- Draft alignment (seeded from current) ----
+        cur = active.alignment if isinstance(active.alignment, dict) else {}
+        draft = {
+            "tx":           float(cur.get("tx", 0.0) or 0.0),
+            "ty":           float(cur.get("ty", 0.0) or 0.0),
+            "scale":        float(cur.get("scale", 1.0) or 1.0),
+            "rotation_deg": float(cur.get("rotation_deg", 0.0) or 0.0),
+        }
+
+        # ---- Preview viewport state (zoom + pan of THIS dialog's view,
+        # independent of the alignment transform). ----
+        view = {"zoom": 1.0, "ox": 0.0, "oy": 0.0,
+                "_initialized": False}
+
+        # Control variables (mirror draft)
+        scale_var = tk.DoubleVar(value=draft["scale"])
+        rot_var   = tk.DoubleVar(value=draft["rotation_deg"])
+        tx_var    = tk.DoubleVar(value=draft["tx"])
+        ty_var    = tk.DoubleVar(value=draft["ty"])
+        view_zoom_var = tk.DoubleVar(value=100.0)   # %
+
+        def _sync_vars_from_draft():
+            scale_var.set(draft["scale"])
+            rot_var.set(draft["rotation_deg"])
+            tx_var.set(draft["tx"])
+            ty_var.set(draft["ty"])
+
+        # ---- Image build helpers ----
+        # Cache for the heavy PIL ops; we throw it away on every redraw
+        # since the transform changes constantly during drag.
+        held = {"img": None}
+
+        def _ghost(img, alpha_byte):
+            """Return img as RGBA with uniform alpha applied."""
+            rgba = img.convert("RGBA")
+            r, g, b, a = rgba.split()
+            a = a.point(lambda v: alpha_byte)
+            rgba.putalpha(a)
+            return rgba
+
+        def _ensure_view_fit():
+            if view["_initialized"]:
+                return
+            cw = canvas.winfo_width() or 900
+            ch = canvas.winfo_height() or 640
+            # Fit the reference image into the canvas with margin
+            zx = cw / max(1, ref_bg.width)
+            zy = ch / max(1, ref_bg.height)
+            view["zoom"] = min(zx, zy) * 0.85
+            view["ox"] = (cw - ref_bg.width * view["zoom"]) / 2
+            view["oy"] = (ch - ref_bg.height * view["zoom"]) / 2
+            view_zoom_var.set(view["zoom"] * 100)
+            view["_initialized"] = True
+
+        def _draw():
+            _ensure_view_fit()
+            cw = canvas.winfo_width() or 900
+            ch = canvas.winfo_height() or 640
+            z = view["zoom"]
+            ox, oy = view["ox"], view["oy"]
+            # --- Render reference at view zoom ---
+            ref_w = max(1, int(ref_bg.width * z))
+            ref_h = max(1, int(ref_bg.height * z))
+            ref_scaled = ref_bg.resize((ref_w, ref_h), Image.BILINEAR)
+            ref_layer = _ghost(ref_scaled, 160)
+            # --- Render target with alignment applied, then view zoom ---
+            act_w = max(1, int(active_bg.width * draft["scale"] * z))
+            act_h = max(1, int(active_bg.height * draft["scale"] * z))
+            act_scaled = active_bg.resize((act_w, act_h), Image.BILINEAR)
+            if abs(draft["rotation_deg"]) > 0.01:
+                # rotate(-deg) so positive degrees matches the math
+                # convention (counter-clockwise on screen would look
+                # backwards otherwise).
+                act_scaled = act_scaled.rotate(
+                    -draft["rotation_deg"],
+                    resample=Image.BILINEAR, expand=True)
+            act_layer = _ghost(act_scaled, 170)
+            # Tint the target layer slightly so it's visually distinct
+            # from the reference even when both are grey buildings.
+            r, g, b, a = act_layer.split()
+            # Add a subtle orange tint by boosting R and dropping B.
+            r = r.point(lambda v: min(255, int(v * 1.05) + 30))
+            b = b.point(lambda v: max(0, int(v * 0.85) - 20))
+            act_layer = Image.merge("RGBA", (r, g, b, a))
+
+            # Final composite at canvas size, dark bg.
+            comp = Image.new("RGBA", (cw, ch), (32, 32, 32, 255))
+            comp.alpha_composite(ref_layer, (int(ox), int(oy)))
+            # Target offset = reference origin + (alignment.tx, ty) * view zoom.
+            tx_disp = int(ox + draft["tx"] * z)
+            ty_disp = int(oy + draft["ty"] * z)
+            comp.alpha_composite(act_layer, (tx_disp, ty_disp))
+
+            tk_img = ImageTk.PhotoImage(comp)
+            held["img"] = tk_img  # prevent GC
+            canvas.delete("all")
+            canvas.create_image(0, 0, anchor=tk.NW, image=tk_img)
+            # Crosshair marker at reference origin so user has a fixed
+            # visual anchor when wheeling/dragging.
+            canvas.create_line(ox - 8, oy, ox + 8, oy,
+                                fill="#ff5050", width=1)
+            canvas.create_line(ox, oy - 8, ox, oy + 8,
+                                fill="#ff5050", width=1)
+
+        # ---- Mouse interactions ----
+        drag_state = {"active": False, "last_x": 0, "last_y": 0,
+                      "kind": None}
+
+        def on_press(event):
+            drag_state["active"] = True
+            drag_state["last_x"] = event.x
+            drag_state["last_y"] = event.y
+            drag_state["kind"] = "translate"
+
+        def on_motion(event):
+            if not drag_state["active"]:
+                return
+            dx = event.x - drag_state["last_x"]
+            dy = event.y - drag_state["last_y"]
+            drag_state["last_x"] = event.x
+            drag_state["last_y"] = event.y
+            z = max(0.0001, view["zoom"])
+            if drag_state["kind"] == "translate":
+                draft["tx"] += dx / z
+                draft["ty"] += dy / z
+            elif drag_state["kind"] == "pan":
+                view["ox"] += dx
+                view["oy"] += dy
+            _sync_vars_from_draft()
+            _draw()
+
+        def on_release(_event):
+            drag_state["active"] = False
+            drag_state["kind"] = None
+
+        def on_right_press(event):
+            drag_state["active"] = True
+            drag_state["last_x"] = event.x
+            drag_state["last_y"] = event.y
+            drag_state["kind"] = "pan"
+
+        def on_wheel(event):
+            # Shift+wheel zooms the preview view; plain wheel scales
+            # the alignment around the cursor.
+            shift_held = bool(event.state & 0x0001)
+            delta = 1 if event.delta > 0 else -1
+            if shift_held:
+                # View zoom (preview only)
+                factor = 1.1 if delta > 0 else (1 / 1.1)
+                view["zoom"] *= factor
+                view["zoom"] = max(0.05, min(20.0, view["zoom"]))
+                view_zoom_var.set(view["zoom"] * 100)
+            else:
+                # Alignment scale — zoom toward the cursor on the target.
+                factor = 1.05 if delta > 0 else (1 / 1.05)
+                new_scale = draft["scale"] * factor
+                new_scale = max(0.05, min(20.0, new_scale))
+                # Keep cursor anchored on the target by adjusting tx/ty
+                # so the point under the cursor stays put in image
+                # coords. (cursor canvas → image coord = (cursor - origin
+                # - tx*z) / (scale * z) for x, similarly for y).
+                z = max(0.0001, view["zoom"])
+                cx_img = (event.x - view["ox"] - draft["tx"] * z) / (
+                    draft["scale"] * z) if draft["scale"] else 0
+                cy_img = (event.y - view["oy"] - draft["ty"] * z) / (
+                    draft["scale"] * z) if draft["scale"] else 0
+                # After scale change, want cursor over (cx_img, cy_img) again.
+                draft["scale"] = new_scale
+                new_tx_disp = event.x - view["ox"] - cx_img * new_scale * z
+                new_ty_disp = event.y - view["oy"] - cy_img * new_scale * z
+                draft["tx"] = new_tx_disp / z
+                draft["ty"] = new_ty_disp / z
+            _sync_vars_from_draft()
+            _draw()
+
+        canvas.bind("<Button-1>", on_press)
+        canvas.bind("<B1-Motion>", on_motion)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        canvas.bind("<Button-3>", on_right_press)
+        canvas.bind("<B3-Motion>", on_motion)
+        canvas.bind("<ButtonRelease-3>", on_release)
+        canvas.bind("<MouseWheel>", on_wheel)
+        canvas.bind("<Configure>",
+                    lambda _e: (view.__setitem__("_initialized", False),
+                                 _draw()))
+
+        # ---- Control panel ----
+        ttk.Label(panel, text="Alignment", font=("Segoe UI", 10, "bold"),
+                  foreground="#7fc4ff").pack(anchor=tk.W, pady=(0, 4))
+
+        def _entry_row(parent, label, var, fmt, lo, hi, step):
+            row = ttk.Frame(parent); row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=label, width=8).pack(side=tk.LEFT)
+            sb = ttk.Spinbox(row, textvariable=var, width=10,
+                              from_=lo, to=hi, increment=step, format=fmt)
+            sb.pack(side=tk.LEFT)
+            return sb
+
+        def _on_scale_var(*_):
+            try:
+                draft["scale"] = max(0.05, min(20.0, float(scale_var.get())))
+            except (tk.TclError, ValueError):
+                return
+            _draw()
+        def _on_rot_var(*_):
+            try:
+                draft["rotation_deg"] = float(rot_var.get())
+            except (tk.TclError, ValueError):
+                return
+            _draw()
+        def _on_tx_var(*_):
+            try:
+                draft["tx"] = float(tx_var.get())
+            except (tk.TclError, ValueError):
+                return
+            _draw()
+        def _on_ty_var(*_):
+            try:
+                draft["ty"] = float(ty_var.get())
+            except (tk.TclError, ValueError):
+                return
+            _draw()
+        scale_var.trace_add("write", _on_scale_var)
+        rot_var.trace_add("write",   _on_rot_var)
+        tx_var.trace_add("write",    _on_tx_var)
+        ty_var.trace_add("write",    _on_ty_var)
+
+        _entry_row(panel, "Scale",  scale_var, "%.4f", 0.05, 20.0,  0.01)
+        _entry_row(panel, "Rotate°", rot_var,  "%.2f", -180.0, 180.0, 1.0)
+        _entry_row(panel, "X off",  tx_var,   "%.1f", -10000.0, 10000.0, 1.0)
+        _entry_row(panel, "Y off",  ty_var,   "%.1f", -10000.0, 10000.0, 1.0)
+
+        ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Label(panel, text="Preview", font=("Segoe UI", 10, "bold"),
+                  foreground="#7fc4ff").pack(anchor=tk.W)
+        zoom_row = ttk.Frame(panel); zoom_row.pack(fill=tk.X, pady=2)
+        ttk.Label(zoom_row, text="View %").pack(side=tk.LEFT)
+        def _on_zoom_var(*_):
+            try:
+                z = float(view_zoom_var.get()) / 100.0
+            except (tk.TclError, ValueError):
+                return
+            view["zoom"] = max(0.05, min(20.0, z))
+            _draw()
+        ttk.Spinbox(zoom_row, textvariable=view_zoom_var, width=10,
+                    from_=5, to=2000, increment=10, format="%.0f"
+                    ).pack(side=tk.LEFT)
+        view_zoom_var.trace_add("write", _on_zoom_var)
+
+        ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+
+        def reset_draft():
+            draft.update(dict(mf_mod.IDENTITY_ALIGNMENT))
+            _sync_vars_from_draft()
+            _draw()
+        ttk.Button(panel, text="Reset to identity",
+                   command=reset_draft).pack(fill=tk.X, pady=2)
+
+        def fit_view():
+            view["_initialized"] = False
+            _draw()
+        ttk.Button(panel, text="Fit preview to reference",
+                   command=fit_view).pack(fill=tk.X, pady=2)
+
+        def _on_ref_change(_e=None):
+            nonlocal ref_floor, ref_bg
+            new_ref = self._project.get_floor(ref_var.get())
+            if new_ref is None:
+                return
+            new_bg = _load_bg(new_ref)
+            if new_bg is None:
+                messagebox.showerror("Can't load reference",
+                                      f"Failed to parse {new_ref.id}'s .drawio.")
+                return
+            ref_floor = new_ref
+            ref_bg = new_bg
+            view["_initialized"] = False   # refit
+            _draw()
+        ref_combo.bind("<<ComboboxSelected>>", _on_ref_change)
+
+        # ---- Bottom action buttons ----
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
+        def apply_now():
+            active.alignment = {
+                "tx": float(draft["tx"]),
+                "ty": float(draft["ty"]),
+                "scale": float(draft["scale"]),
+                "rotation_deg": float(draft["rotation_deg"]),
+            }
+            self._mark_dirty()
+            try:
+                mf_mod.save_project(self._project, self.project_path)
+            except OSError as e:
+                log_error("Save after drag-align failed", e)
+            # Trigger a redraw of the main canvas so the alignment
+            # takes effect immediately (no floor-switch required).
+            self._redraw()
+            # If the project has a calibrated scale, the aligned floor
+            # automatically shares it — pixels are in the reference's
+            # frame after alignment. Mention this so the user knows
+            # they don't need to re-calibrate.
+            if self.scale_factor:
+                scale_msg = (f" Wire lengths on {active.id} will use the "
+                             f"project scale ({self._format_length(1.0)} = 1 px) "
+                             f"since the aligned pixels share "
+                             f"{ref_floor.id}'s frame.")
+            else:
+                scale_msg = (" Project scale isn't calibrated yet — set it "
+                             "via Tools → Set Scale on the reference floor "
+                             "and the aligned floor inherits it.")
+            self._flash_status(
+                f"Alignment applied to {active.id}.{scale_msg}",
+                ttl_ms=7000)
+            dlg.destroy()
+        ttk.Button(btns, text="Apply", command=apply_now).pack(side=tk.RIGHT,
+                                                                  padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        # Draw on first idle once the canvas has a real size.
+        dlg.after(20, _draw)
 
     def _open_alignment_dialog(self) -> None:
         if self._project is None or len(self._project.floors) < 2:
