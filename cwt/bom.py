@@ -191,10 +191,19 @@ def rollup(
         ft = data["total_in"] / 12.0
         line_subtotal = ft * cost_per_ft
         subtotal += line_subtotal
+        # Coerce label + color to strings so the typed BomLine invariant
+        # is upheld (PDF + Treeview callers slice / pass to Tk and would
+        # crash on non-string values).
+        raw_label = ct.get("label", cid)
+        line_label = (raw_label if isinstance(raw_label, str)
+                      else (str(raw_label) if raw_label is not None else cid))
+        raw_color = ct.get("color", "#888888")
+        line_color = (raw_color if isinstance(raw_color, str)
+                      else "#888888")
         lines.append(BomLine(
             cable_id=cid,
-            label=ct.get("label", cid),
-            color=ct.get("color", "#888888"),
+            label=line_label,
+            color=line_color,
             runs=data["runs"],
             total_in=data["total_in"],
             total_ft=ft,
