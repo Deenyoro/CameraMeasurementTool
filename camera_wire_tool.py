@@ -11088,6 +11088,25 @@ class CameraWireTool:
             view["_initialized"] = True
 
         def _draw():
+            try:
+                _draw_unsafe()
+            except Exception as e:
+                # Don't let one bad frame kill the dialog — log and show
+                # the user what went wrong instead of a silent blank.
+                log_error("Drag-align dialog: redraw failed", e)
+                try:
+                    canvas.delete("all")
+                    canvas.create_text(
+                        10, 10, anchor=tk.NW,
+                        text=f"Drag-align render error:\n{e}\n\n"
+                             f"Check ~/.camera_wire_tool.log for the "
+                             f"traceback. Resizing the dialog may help.",
+                        fill="#ff8080", font=("Consolas", 10),
+                        width=(canvas.winfo_width() or 900) - 20)
+                except tk.TclError:
+                    pass
+
+        def _draw_unsafe():
             _ensure_view_fit()
             cw = canvas.winfo_width() or 900
             ch = canvas.winfo_height() or 640
@@ -11118,13 +11137,19 @@ class CameraWireTool:
             b = b.point(lambda v: max(0, int(v * 0.85) - 20))
             act_layer = Image.merge("RGBA", (r, g, b, a))
 
-            # Final composite at canvas size, dark bg.
+            # Final composite at canvas size, dark bg. Use paste() with
+            # the layer's own alpha channel as the mask — paste() clips
+            # gracefully when the layer extends past the canvas edge
+            # (or the user dragged it off-screen), whereas
+            # alpha_composite raises ValueError on negative offsets and
+            # would blow up the whole dialog the moment the user
+            # over-dragged.
             comp = Image.new("RGBA", (cw, ch), (32, 32, 32, 255))
-            comp.alpha_composite(ref_layer, (int(ox), int(oy)))
+            comp.paste(ref_layer, (int(ox), int(oy)), ref_layer)
             # Target offset = reference origin + (alignment.tx, ty) * view zoom.
             tx_disp = int(ox + draft["tx"] * z)
             ty_disp = int(oy + draft["ty"] * z)
-            comp.alpha_composite(act_layer, (tx_disp, ty_disp))
+            comp.paste(act_layer, (tx_disp, ty_disp), act_layer)
 
             tk_img = ImageTk.PhotoImage(comp)
             held["img"] = tk_img  # prevent GC
