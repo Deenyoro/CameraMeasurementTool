@@ -5214,14 +5214,26 @@ class CameraWireTool:
             self._primary_selected = dev
 
     def _device_at(self, ix, iy):
+        # Defensive over every device entry — a non-dict or one with
+        # non-numeric x/y/w/h would otherwise crash on every mouse-move
+        # hit test, taking the whole canvas down with it. Cheaper to
+        # silently skip a corrupted entry here than to harden every
+        # mouse-event call site.
         hit = None
         for d in self.devices:
-            dx, dy = self._drawio_to_img(d["x"], d["y"])
-            dw, dh = d["w"] * self.dx_scale, d["h"] * self.dy_scale
+            if not isinstance(d, dict):
+                continue
+            try:
+                x = float(d["x"]); y = float(d["y"])
+                w = float(d["w"]); h = float(d["h"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            dx, dy = self._drawio_to_img(x, y)
+            dw, dh = w * self.dx_scale, h * self.dy_scale
             margin = max(dw, dh) * C.HIT_TEST_MARGIN_RATIO
             if (dx - margin <= ix <= dx + dw + margin
                     and dy - margin <= iy <= dy + dh + margin):
-                if self._is_camera_type(d["type"]):
+                if self._is_camera_type(d.get("type")):
                     return d
                 hit = d
         return hit
