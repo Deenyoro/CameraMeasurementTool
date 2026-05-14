@@ -7505,22 +7505,36 @@ class CameraWireTool:
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=4)
         sb.pack(side=tk.LEFT, fill=tk.Y, pady=4)
 
-        # Build the candidate list — devices + symbol types + wires
+        # Build the candidate list — devices + symbol types + wires.
+        # Each row is hardened so a single corrupted device / symbol /
+        # wire can't crash the palette build (the palette is one of the
+        # main escape hatches when state goes weird, so it has to stay
+        # usable even then).
         candidates: list[tuple[str, str, callable]] = []
         for d in self.devices:
-            info = self._safe_sym(d["type"])
-            label = (f" DEV   {d['id']:6s}  {d['type']:5s}  "
-                     f"{info.get('label', d['type'])}")
-            candidates.append((label, f"{d['id']} {d['type']} {info.get('label','')}",
+            if not isinstance(d, dict):
+                continue
+            did = str(d.get("id") or "")
+            dtype = str(d.get("type") or "")
+            info = self._safe_sym(dtype)
+            sym_label = info.get("label") if isinstance(info, dict) else None
+            sym_label = str(sym_label) if sym_label else dtype
+            label = f" DEV   {did:6s}  {dtype:5s}  {sym_label}"
+            candidates.append((label, f"{did} {dtype} {sym_label}",
                                lambda d=d: self._jump_to_device(d)))
-        for code, raw_info in sorted(self.symbol_types.items()):
+        for code, raw_info in sorted(self.symbol_types.items(),
+                                       key=lambda kv: str(kv[0])):
+            code_s = str(code)
             info = raw_info if isinstance(raw_info, dict) else {}
-            n = sum(1 for d in self.devices if d["type"] == code)
+            n = sum(1 for d in self.devices
+                    if isinstance(d, dict) and d.get("type") == code)
             tag = "[RP]" if info.get("is_run_point") else (
                   "[CAM]" if info.get("is_camera") else "    ")
-            label = f" {tag:5s}  {code:5s}  symbol: {info.get('label', code)} (x{n})"
-            candidates.append((label, f"{code} {info.get('label','')} symbol",
-                               lambda c=code: self._jump_to_symbol(c)))
+            sym_label = info.get("label", code_s)
+            sym_label = str(sym_label) if sym_label is not None else code_s
+            label = f" {tag:5s}  {code_s:5s}  symbol: {sym_label} (x{n})"
+            candidates.append((label, f"{code_s} {sym_label} symbol",
+                               lambda c=code_s: self._jump_to_symbol(c)))
         devices_by_id_qj = {d["id"]: d for d in self.devices}
         for i, r in enumerate(self.wire_routes):
             if not isinstance(r, dict):
