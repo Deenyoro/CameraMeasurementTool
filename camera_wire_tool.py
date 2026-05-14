@@ -1541,7 +1541,8 @@ class CameraWireTool:
             if len(pts) < 2:
                 continue
             px_len = self._calc_wire_length(pts)
-            real_in = px_len * self.scale_factor if self.scale_factor else None
+            eff = self._effective_scale_factor()
+            real_in = px_len * eff if eff is not None else None
             entry = {
                 "points": pts,
                 "length_px": px_len,
@@ -5801,11 +5802,33 @@ class CameraWireTool:
     def _calc_wire_length(self, points) -> float:
         return sum(math.dist(points[i], points[i+1]) for i in range(len(points) - 1))
 
+    def _effective_scale_factor(self) -> float | None:
+        """Convert raw image pixels on the ACTIVE floor to inches.
+
+        When a floor has been aligned, its raw pixels live in its own
+        frame but the project's scale_factor is calibrated against the
+        REFERENCE floor's aligned pixels. So:
+            inches = raw_px × alignment.scale × scale_factor
+
+        This is the 'share scale across aligned floors' plumbing — a
+        wire on Floor 2 (raw stored coords) gets multiplied by the
+        alignment scale to land in the reference frame, then by the
+        project scale to land in inches. Returns None when scale isn't
+        calibrated yet."""
+        if not self.scale_factor:
+            return None
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        return self.scale_factor * a_scale
+
     def _recalc_all_wires(self) -> None:
+        eff = self._effective_scale_factor()
         for route in self.wire_routes:
             route["length_px"] = self._calc_wire_length(route["points"])
             route["length_in"] = (
-                route["length_px"] * self.scale_factor if self.scale_factor else None
+                route["length_px"] * eff if eff is not None else None
             )
 
     # ============================================================ Mouse handlers
@@ -6416,12 +6439,13 @@ class CameraWireTool:
         elif (self.mode == Mode.CALIBRATE and self.cal_points):
             ref_pt = self.cal_points[-1]
             ref_label = "from 1st cal point"
-        if self.scale_factor:
+        eff = self._effective_scale_factor()
+        if eff is not None:
             if ref_pt is not None:
                 dx, dy = ix - ref_pt[0], iy - ref_pt[1]
-                real_in = math.hypot(dx, dy) * self.scale_factor
+                real_in = math.hypot(dx, dy) * eff
             else:
-                real_in = math.hypot(ix, iy) * self.scale_factor
+                real_in = math.hypot(ix, iy) * eff
             self.cursor_label.config(
                 text=f"{int(ix):>5d}, {int(iy):>5d} px  •  "
                      f"{self._format_length(real_in)} {ref_label}",
@@ -6622,8 +6646,9 @@ class CameraWireTool:
             total_px = self._calc_wire_length(all_pts)
             # Floating "running total" label near the cursor — much more
             # visible than the tiny status-bar text alone.
-            running_str = (self._format_length(total_px * self.scale_factor)
-                           if self.scale_factor else f"{total_px:.0f} px")
+            eff_p = self._effective_scale_factor()
+            running_str = (self._format_length(total_px * eff_p)
+                           if eff_p is not None else f"{total_px:.0f} px")
             self.canvas.create_rectangle(
                 ex + 14, ey - 22, ex + 14 + 8 * len(running_str) + 6, ey - 4,
                 fill="#202060", outline="#7fc4ff", width=1,
@@ -6635,8 +6660,8 @@ class CameraWireTool:
                 tags="wire_preview",
             )
             shift_hint = "  (Shift = lock 0/45/90°)" if not self._shift_held else "  [SHIFT-LOCK]"
-            if self.scale_factor:
-                total_in = total_px * self.scale_factor
+            if eff_p is not None:
+                total_in = total_px * eff_p
                 self.status_label.config(
                     text=f"Wire route: {self._format_length(total_in)}  |  Right-click to finish{shift_hint}",
                 )
@@ -6651,18 +6676,19 @@ class CameraWireTool:
         px_len = self._calc_wire_length(self.current_wire_points)
         # Sanity: catch accidental fat-finger 2-click that produces a near-
         # zero wire (often happens when right-clicking too quickly).
+        eff = self._effective_scale_factor()
         too_short = (px_len < 5
-                     if not self.scale_factor
-                     else (px_len * self.scale_factor) < 1.0)  # < 1 inch real
+                     if eff is None
+                     else (px_len * eff) < 1.0)  # < 1 inch real
         if too_short:
             if not messagebox.askyesno(
                 "Very short wire",
                 f"This wire is only "
-                f"{(self._format_length(px_len * self.scale_factor) if self.scale_factor else f'{px_len:.0f}px')}"
+                f"{(self._format_length(px_len * eff) if eff is not None else f'{px_len:.0f}px')}"
                 f" — looks like an accidental click.\n\nKeep it anyway?"):
                 self._cancel_current()
                 return
-        real_in = px_len * self.scale_factor if self.scale_factor else None
+        real_in = px_len * eff if eff is not None else None
         device_id = self.selected_device["id"] if self.selected_device else None
         # Pick a cable. Source is the selected device. Try to detect the
         # destination from the last waypoint — if it lands on a device,
@@ -8341,7 +8367,8 @@ class CameraWireTool:
             if len(pts) < 2:
                 continue
             px_len = self._calc_wire_length(pts)
-            real_in = (px_len * self.scale_factor) if self.scale_factor else None
+            eff = self._effective_scale_factor()
+            real_in = (px_len * eff) if eff is not None else None
             entry = {
                 "points": pts, "length_px": px_len, "length_in": real_in,
                 "device_id": wr.get("device_id"),
@@ -10965,7 +10992,8 @@ class CameraWireTool:
             if len(pts) < 2:
                 continue
             px_len = self._calc_wire_length(pts)
-            real_in = (px_len * self.scale_factor) if self.scale_factor else None
+            eff = self._effective_scale_factor()
+            real_in = (px_len * eff) if eff is not None else None
             entry = {"points": pts, "length_px": px_len, "length_in": real_in,
                      "device_id": wr.get("device_id")}
             if wr.get("cable_type"):
