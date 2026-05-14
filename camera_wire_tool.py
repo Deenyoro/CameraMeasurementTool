@@ -1179,6 +1179,13 @@ def save_settings(settings: dict) -> None:
 
 # ============================================================ Main app
 class CameraWireTool:
+    # Survives `self.root.destroy()` + new-instance creation in
+    # _switch_floor. When the floor-anchor pick handler initiates the
+    # legitimate intra-round switch, it stashes the alignment target's
+    # floor id here so the new instance's __init__ can re-arm picking
+    # on the now-active reference floor. Cleared once consumed.
+    _pending_align_target_id: str | None = None
+
     def __init__(self, root: tk.Tk, drawio_path: str):
         self.root = root
         self.drawio_path = drawio_path
@@ -1354,6 +1361,34 @@ class CameraWireTool:
         self._refresh_mode_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(C.INITIAL_RENDER_DELAY_MS, self._initial_render)
+
+        # Resume an in-progress anchor-pick that was interrupted by the
+        # mid-round floor switch (which destroys+recreates the tool).
+        self._resume_pending_anchor_pick()
+
+    def _resume_pending_anchor_pick(self) -> None:
+        """If a previous tool instance was switching floors mid-anchor-
+        pick, the class-level pending id was set. Re-arm picking on the
+        new active floor so the user's clicks complete the alignment."""
+        pending_id = CameraWireTool._pending_align_target_id
+        CameraWireTool._pending_align_target_id = None
+        if not pending_id or self._project is None:
+            return
+        target = self._project.get_floor(pending_id)
+        active = self._project.get_floor(self._project.active_floor)
+        if (target is None or active is None or target is active
+                or not isinstance(target.anchor_points, list)
+                or len(target.anchor_points) < 2):
+            return
+        self._floor_align_target = target
+        self._floor_anchors_picking = []
+        self._floor_anchor_target = (active, target)
+        try:
+            self.status_label.config(
+                text=f"ANCHOR: click 2 reference points on {active.id}  "
+                     f"(Esc cancels)")
+        except (tk.TclError, AttributeError):
+            pass
 
     # ============================================================ project file IO
     def _load_project(self) -> None:
@@ -5411,6 +5446,14 @@ class CameraWireTool:
                 f"the SAME 2 physical points (in the same order).")
             self._floor_anchors_picking = []
             self._floor_anchor_target = (ref, active)
+            # _switch_floor destroys this tool instance and re-launches —
+            # stash the target floor id on the class so the new instance
+            # can re-arm picking on the reference floor. Without this the
+            # second-round clicks landed in MOVE mode and the alignment
+            # was never completed.
+            if self._floor_align_target is not None:
+                CameraWireTool._pending_align_target_id = (
+                    self._floor_align_target.id)
             self._switch_floor(ref.id)
             return
 

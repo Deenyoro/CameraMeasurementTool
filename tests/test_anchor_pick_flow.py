@@ -132,6 +132,64 @@ def test_second_click_on_target_switches_to_reference(monkeypatch):
     assert app._floor_align_target is target
 
 
+def test_resume_pending_anchor_pick_rearms_after_switch():
+    """The intra-round floor switch destroys+recreates the tool. The
+    new instance must re-arm picking on the now-active reference floor
+    so the user's next clicks land in the anchor-pick branch (not MOVE)."""
+    target = _make_floor("F1")
+    reference = _make_floor("F2")
+    target.anchor_points = [[10.0, 20.0], [200.0, 20.0]]
+    proj = mf.ProjectState(active_floor="F2", floors=[target, reference])
+
+    app = types.SimpleNamespace(_project=proj)
+    app.status_label = _StubStatus()
+    app._floor_anchors_picking = None
+    app._floor_align_target = None
+    app._floor_anchor_target = None
+
+    cwt.CameraWireTool._pending_align_target_id = "F1"
+    cwt.CameraWireTool._resume_pending_anchor_pick(app)
+
+    assert cwt.CameraWireTool._pending_align_target_id is None
+    assert app._floor_align_target is target
+    assert app._floor_anchors_picking == []
+    assert app._floor_anchor_target == (reference, target)
+    assert "click 2 reference points on F2" in (app.status_label.last or "")
+
+
+def test_resume_no_op_when_target_missing():
+    """Stale pending id (floor was deleted) must clear cleanly, not crash."""
+    proj = mf.ProjectState(active_floor="F1", floors=[_make_floor("F1")])
+    app = types.SimpleNamespace(_project=proj)
+    app.status_label = _StubStatus()
+    app._floor_anchors_picking = None
+    app._floor_align_target = None
+    cwt.CameraWireTool._pending_align_target_id = "F_GONE"
+    cwt.CameraWireTool._resume_pending_anchor_pick(app)
+    # No picking armed; pending cleared.
+    assert app._floor_anchors_picking is None
+    assert app._floor_align_target is None
+    assert cwt.CameraWireTool._pending_align_target_id is None
+
+
+def test_resume_no_op_when_target_has_no_anchors():
+    """Target with <2 anchors is suspicious (state truncated externally) —
+    don't auto-arm. User can re-trigger the dialog."""
+    target = _make_floor("F1")
+    target.anchor_points = []  # missing
+    reference = _make_floor("F2")
+    proj = mf.ProjectState(active_floor="F2", floors=[target, reference])
+    app = types.SimpleNamespace(_project=proj)
+    app.status_label = _StubStatus()
+    app._floor_anchors_picking = None
+    app._floor_align_target = None
+    cwt.CameraWireTool._pending_align_target_id = "F1"
+    cwt.CameraWireTool._resume_pending_anchor_pick(app)
+    assert app._floor_anchors_picking is None
+    assert app._floor_align_target is None
+    assert cwt.CameraWireTool._pending_align_target_id is None
+
+
 def test_second_click_on_reference_computes_alignment(monkeypatch):
     target = _make_floor("F1")
     reference = _make_floor("F2")
