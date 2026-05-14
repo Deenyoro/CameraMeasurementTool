@@ -11137,17 +11137,20 @@ class CameraWireTool:
 
     def _open_drag_align_dialog(self) -> None:
         """Visual drag-and-scale alignment. Shows the reference floor as
-        a ghosted underlay and the floor-being-aligned on top, both at
-        partial alpha so the user can see how well they line up.
+        a grey ghosted underlay and the floor-being-aligned as an
+        orange-tinted overlay, both at user-adjustable alpha.
 
         Mouse interactions on the preview canvas:
-          - Left drag        → translate the target floor (alignment.tx/ty)
-          - Mouse wheel      → scale the target floor around the cursor
-          - Shift+wheel      → zoom the view (not the alignment)
-          - Right drag       → pan the view (not the alignment)
-        Sliders give precise control over scale + rotation. Apply
-        writes the resulting transform to the active floor's
-        alignment field and persists the project."""
+          - Left drag         → translate the orange floor (alignment.tx/ty)
+          - Mouse wheel       → zoom the preview workspace toward cursor
+          - Shift/Ctrl+wheel  → scale the orange floor around the cursor
+          - Right drag        → pan the preview workspace
+
+        The target floor (whose alignment gets written) is the one
+        named in the 'Floor to ALIGN' combobox at the top of the
+        dialog, NOT necessarily the active floor. Apply writes the
+        draft transform to that floor's alignment, persists the
+        project, and refits the main canvas if the target is active."""
         if self._project is None or len(self._project.floors) < 2:
             self._flash_status(
                 "Drag-align needs ≥2 floors. Add another via "
