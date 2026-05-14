@@ -2433,6 +2433,9 @@ class CameraWireTool:
         self.dev_listbox.bind("<<ListboxSelect>>", self._on_dev_select)
         self.dev_listbox.bind("<Double-Button-1>", lambda _e: self._center_on_selected())
         self.dev_listbox.bind("<Button-3>", self._on_dev_listbox_rclick)
+        # The 'Center on Selected (Enter)' button label promised Enter
+        # support but the binding was never wired — keep the promise.
+        self.dev_listbox.bind("<Return>", lambda _e: self._center_on_selected())
 
         center_btn = ttk.Button(tab_dev, text="Center on Selected (Enter)",
                                   command=self._center_on_selected)
