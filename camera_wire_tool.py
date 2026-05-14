@@ -4754,7 +4754,18 @@ class CameraWireTool:
                                     fill=color, outline=outline, width=outline_width, tags=tag)
 
     def _draw_device(self, dev) -> None:
-        info = self.symbol_types.get(dev["type"])
+        # Defensive: a non-dict or coord-less device would crash on
+        # dev['type'] / dev['x'] etc. every frame — bail rather than
+        # take down the whole canvas redraw on a single bad row.
+        if not isinstance(dev, dict):
+            return
+        try:
+            dtype = dev["type"]
+            dx_ = float(dev["x"]); dy_ = float(dev["y"])
+            dw_ = float(dev["w"]); dh_ = float(dev["h"])
+        except (KeyError, TypeError, ValueError):
+            return
+        info = self.symbol_types.get(dtype)
         if info is None:
             return
         # Corrupted (non-dict) catalog entry — normalize so the device
@@ -4762,9 +4773,9 @@ class CameraWireTool:
         # would TypeError on string subscript per frame and freeze the
         # canvas.
         if not isinstance(info, dict):
-            info = self._safe_sym(dev["type"])
-        ix, iy = self._drawio_to_img(dev["x"], dev["y"])
-        iw, ih = dev["w"] * self.dx_scale, dev["h"] * self.dy_scale
+            info = self._safe_sym(dtype)
+        ix, iy = self._drawio_to_img(dx_, dy_)
+        iw, ih = dw_ * self.dx_scale, dh_ * self.dy_scale
         cx, cy = self._img_to_canvas(ix, iy)
         cw = iw * self.zoom
         ch = ih * self.zoom
@@ -4780,25 +4791,26 @@ class CameraWireTool:
         center_y = cy + ch / 2
         r = max(cw, ch) / 2
 
-        is_selected = any(d["id"] == dev["id"] for d in self.selected_devices)
+        did = dev.get("id", "")
+        is_selected = any(d.get("id") == did for d in self.selected_devices
+                          if isinstance(d, dict))
         is_run_point = bool(info.get("is_run_point"))
         # Subtle blue ring when this device's wire is the selected wire —
         # makes the wire→device association obvious without forcing a full
         # device-selection.
         sel_wire = self._selected_wire()
         is_wire_owner = (sel_wire is not None
-                          and sel_wire.get("device_id") == dev["id"]
+                          and sel_wire.get("device_id") == did
                           and not is_selected)
         outline_color = "#FF3030" if is_selected else "#0000FF"
         outline_width = 3 if is_selected else 2
-        tag = f'dev_{dev["id"]}'
+        tag = f'dev_{did}'
 
         if is_wire_owner:
             # Subtle blue halo around the wire's source device
-            ix, iy = self._drawio_to_img(dev["x"], dev["y"])
             cx_outer, cy_outer = self._img_to_canvas(ix, iy)
-            iw_outer = dev["w"] * self.dx_scale * self.zoom
-            ih_outer = dev["h"] * self.dy_scale * self.zoom
+            iw_outer = dw_ * self.dx_scale * self.zoom
+            ih_outer = dh_ * self.dy_scale * self.zoom
             cxc = cx_outer + iw_outer / 2
             cyc = cy_outer + ih_outer / 2
             ro = max(iw_outer, ih_outer) * 0.85
@@ -4829,7 +4841,7 @@ class CameraWireTool:
 
         font_size = max(C.DEVICE_LABEL_FONT_MIN,
                         min(C.DEVICE_LABEL_FONT_MAX, int(8 * self.zoom * self.dx_scale)))
-        self.canvas.create_text(center_x, center_y, text=dev["type"],
+        self.canvas.create_text(center_x, center_y, text=dtype,
                                 font=("Arial", font_size, "bold"),
                                 fill="#000000", tags=tag)
 
@@ -4838,7 +4850,7 @@ class CameraWireTool:
             id_fs = max(C.DEVICE_ID_FONT_MIN,
                         min(C.DEVICE_ID_FONT_MAX, int(7 * self.zoom * self.dx_scale)))
             self.canvas.create_text(
-                center_x, cy - 4, text=dev["id"],
+                center_x, cy - 4, text=did,
                 font=("Consolas", id_fs), fill="#FFFFFF" if not is_selected else "#FF3030",
                 anchor=tk.S, tags=tag,
             )
