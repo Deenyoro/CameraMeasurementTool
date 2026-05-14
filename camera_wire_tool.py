@@ -282,8 +282,18 @@ def parse_drawio(filepath: str):
     if model is None:
         raise RuntimeError("No <mxGraphModel> element found in .drawio file")
 
-    page_w = int(model.get("pageWidth", "3024"))
-    page_h = int(model.get("pageHeight", "2160"))
+    # Drawio's pageWidth/pageHeight are integer XML attributes. Hand-
+    # edited files have been known to use floats or units (e.g. '3024.0'
+    # or '3024px'), so coerce defensively rather than letting int()
+    # raise from a non-numeric token. Fall back to the standard A4
+    # landscape default that drawio itself uses.
+    def _safe_int(value, default):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+    page_w = _safe_int(model.get("pageWidth", "3024"), 3024)
+    page_h = _safe_int(model.get("pageHeight", "2160"), 2160)
 
     cells = model.findall(".//mxCell")
 
