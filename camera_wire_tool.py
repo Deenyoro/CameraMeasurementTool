@@ -383,6 +383,18 @@ def parse_drawio(filepath: str):
     return bg_image, page_w, page_h, devices, symbol_types, legend_box_info
 
 
+# ============================================================ Mouse wheel
+class _MouseWheelEvent:
+    """Tiny stand-in for a tk Event with just the fields _on_mousewheel
+    reads. Used to adapt X11's <Button-4>/<Button-5> into the same code
+    path Windows' <MouseWheel> uses."""
+    __slots__ = ("x", "y", "delta")
+    def __init__(self, x: int, y: int, delta: int):
+        self.x = x
+        self.y = y
+        self.delta = delta
+
+
 # ============================================================ Tooltip helper
 class Tooltip:
     """Lightweight hover tooltip for any tk widget."""
@@ -1461,6 +1473,15 @@ class CameraWireTool:
         self.canvas.bind("<Motion>", self._on_motion)
         # NOTE: right-click is handled by _on_right_click_with_menu below.
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        # X11/Linux delivers mouse-wheel as Button-4 (up) / Button-5
+        # (down) instead of <MouseWheel>. Synthesize a delta so the
+        # Windows handler works unchanged.
+        self.canvas.bind("<Button-4>",
+                          lambda e: self._on_mousewheel(
+                              _MouseWheelEvent(e.x, e.y, +120)))
+        self.canvas.bind("<Button-5>",
+                          lambda e: self._on_mousewheel(
+                              _MouseWheelEvent(e.x, e.y, -120)))
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_move)
         self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
