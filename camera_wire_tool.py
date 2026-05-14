@@ -12338,8 +12338,10 @@ class CameraWireTool:
     def _draw_fov_cones(self) -> None:
         """Render DORI cones for any cameras with `fov` configured.
 
-        Uses inches_per_pixel = 1/scale_factor to convert DORI radii (inches)
-        into image-pixel coords. Falls back to 0.5 if no scale set.
+        Uses inches_per_pixel = 1/effective_scale_factor to convert DORI
+        radii (inches) into RAW image-pixel coords. The cone polygon is
+        in raw image space; _img_to_canvas applies the floor's alignment
+        when painting it to canvas. Falls back to 0.5 if no scale set.
         """
         # Skip rendering entirely at very low zoom — cones become unreadable
         # noise and dominate render time. User can zoom in to see them.
@@ -12348,7 +12350,13 @@ class CameraWireTool:
             return
         # Reset handle cache; it gets repopulated as we draw cones.
         self._fov_handles = {}
-        ipp = (1.0 / self.scale_factor) if self.scale_factor else 0.5
+        # Effective scale: project scale × current floor alignment scale.
+        # Without this, FOV cones on aligned floors were drawn at the
+        # WRONG physical size (they used the reference-floor pixel
+        # density, ignoring that this floor's raw pixels cover a
+        # different inches-per-pixel).
+        eff = self._effective_scale_factor()
+        ipp = (1.0 / eff) if eff else 0.5
         # 'Only selected' filter: when active and there's a single primary
         # selection that's a camera, render only that one's cone.
         only_selected = self._show_only_selected_fov.get()
