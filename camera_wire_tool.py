@@ -1363,6 +1363,12 @@ class CameraWireTool:
         # anchors have been picked. Set in _align_floor_dialog →
         # pick_anchors; cleared on Esc or successful compute.
         self._floor_align_target: mf_mod.FloorState | None = None
+        # Ghost-overlay state for cross-floor comparison: when set,
+        # this floor's bg image is rendered (with alignment) as a 35%
+        # underlay under the active floor's bg. Toggled / cycled via
+        # the Floor: menu.
+        self._ghost_floor_id: str | None = None
+        self._ghost_bg_cache: dict = {}
 
         # BOM tab inputs — defaults overridden by persisted user prefs
         prefs = load_settings()
@@ -4611,12 +4617,91 @@ class CameraWireTool:
         self._settle_id = self.root.after(
             C.SETTLE_REDRAW_MS, self._settle_redraw)
 
+    def _draw_ghost_overlay(self) -> None:
+        """Render the configured ghost-floor's bg image as a 35%-alpha
+        underlay so the user can compare cross-floor positions on the
+        main canvas. Cheap: the bg is cached on first parse, and we
+        crop to viewport + cap to canvas size before resizing."""
+        bg, ghost_align = self._ghost_overlay_bg()
+        if bg is None or ghost_align is None:
+            return
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        # The ghost floor is in its own raw image space; aligned canvas
+        # position uses GHOST'S alignment, not the active floor's. So
+        # composite directly: aligned_pixel = apply_alignment(raw_pixel,
+        # ghost_align), then canvas_pixel = aligned * zoom + offset.
+        a_scale = float(ghost_align.get("scale", 1.0) or 1.0)
+        # Inverse-transform the canvas viewport corners to the ghost's
+        # raw image space so we can crop to just the visible piece.
+        active_align = self._current_alignment()
+        def _canvas_to_ghost_raw(cx, cy):
+            ax = (cx - self.offset_x) / self.zoom
+            ay = (cy - self.offset_y) / self.zoom
+            return mf_mod.apply_alignment(
+                (ax, ay), mf_mod.inverse_alignment(ghost_align))
+        corners = [_canvas_to_ghost_raw(0, 0),
+                    _canvas_to_ghost_raw(cw, 0),
+                    _canvas_to_ghost_raw(0, ch),
+                    _canvas_to_ghost_raw(cw, ch)]
+        xs = [c[0] for c in corners]; ys = [c[1] for c in corners]
+        gx0 = max(0, int(math.floor(min(xs))))
+        gy0 = max(0, int(math.floor(min(ys))))
+        gx1 = min(bg.width, int(math.ceil(max(xs))))
+        gy1 = min(bg.height, int(math.ceil(max(ys))))
+        if gx1 <= gx0 or gy1 <= gy0:
+            return
+        try:
+            cropped = bg.crop((gx0, gy0, gx1, gy1))
+        except Exception:
+            return
+        eff = self.zoom * a_scale
+        dst_w = max(1, int((gx1 - gx0) * eff))
+        dst_h = max(1, int((gy1 - gy0) * eff))
+        # Cap so we don't burn time resizing to 8000+ pixels of canvas.
+        dst_w = min(dst_w, cw + 200)
+        dst_h = min(dst_h, ch + 200)
+        try:
+            resized = cropped.resize((dst_w, dst_h), Image.BILINEAR)
+            # Apply 35% alpha
+            rgba = resized.convert("RGBA")
+            r, g, b, a = rgba.split()
+            a = a.point(lambda v: int(v * 0.35))
+            # Tint cyan-ish so it visually contrasts with the active floor.
+            b = b.point(lambda v: min(255, v + 30))
+            rgba = Image.merge("RGBA", (r, g, b, a))
+        except Exception:
+            return
+        # Place the cropped piece at its aligned-canvas position.
+        gax, gay = mf_mod.apply_alignment((gx0, gy0), ghost_align)
+        place_x = gax * self.zoom + self.offset_x
+        place_y = gay * self.zoom + self.offset_y
+        try:
+            tk_img = ImageTk.PhotoImage(rgba)
+        except Exception:
+            return
+        self._ghost_tk_ref = tk_img  # keep alive past this call
+        self.canvas.create_image(place_x, place_y, anchor=tk.NW,
+                                  image=tk_img, tags=("ghost", "img"))
+        # Tag label so the user remembers the overlay is on.
+        floor = self._project.get_floor(self._ghost_floor_id)
+        if floor:
+            self.canvas.create_text(
+                8, ch - 22, anchor=tk.SW,
+                text=f"👻 ghost: {floor.id} {floor.name}",
+                fill="#9fe0ff", font=("Segoe UI", 9, "bold"),
+                tags="ghost")
+
     def _redraw(self) -> None:
         self.canvas.delete("all")
         tk_img, px, py = self._get_viewport_image()
         if tk_img is not None:
             self.canvas.create_image(px, py, anchor=tk.NW, image=tk_img, tags="img")
             self._tk_ref = tk_img
+
+        # Optional ghost-overlay of another floor — drawn AFTER the
+        # main bg but BEFORE wires/devices so it sits between them.
+        self._draw_ghost_overlay()
 
         # Optional alignment grid
         if self._show_grid.get():
@@ -10578,6 +10663,14 @@ class CameraWireTool:
         m.add_command(label="⇄  Align by anchor points…",
                       command=self._open_alignment_dialog,
                       state=align_state)
+        m.add_separator()
+        m.add_command(label="↺  Clear alignment on active floor",
+                      command=self._clear_active_floor_alignment,
+                      state=(tk.NORMAL if n_floors >= 1 else tk.DISABLED))
+        m.add_command(label="👻  Toggle ghost overlay (show other floor)",
+                      command=self._toggle_ghost_overlay,
+                      state=align_state)
+        m.add_separator()
         m.add_command(label="⚙  Manage floors…",
                       command=self._open_floor_manager,
                       state=manage_state)
@@ -10896,13 +10989,123 @@ class CameraWireTool:
         self._refresh_device_list()
         self._refresh_wire_list()
         self._refresh_bom_tab()
-        self._fit_image()
+        # If the new floor has a non-identity alignment, the user has
+        # already aligned it onto a shared frame — preserve the current
+        # zoom/offset so they keep looking at the same physical
+        # location across floor switches. Only auto-fit when the floor
+        # is at identity (i.e. standalone, no shared frame to preserve).
+        def _is_identity(al):
+            if not isinstance(al, dict):
+                return True
+            return (abs(float(al.get("tx", 0) or 0)) < 0.5
+                    and abs(float(al.get("ty", 0) or 0)) < 0.5
+                    and abs(float(al.get("scale", 1) or 1) - 1.0) < 1e-4
+                    and abs(float(al.get("rotation_deg", 0) or 0)) < 0.01)
+        if _is_identity(target.alignment):
+            self._fit_image()
         self._redraw()
         self._flash_status(
             f"Switched to {floor_id} — {target.name}. "
             f"Doesn't line up with the previous floor? Use Floors → "
             f"Align Floor to Reference to map them onto a shared frame.",
             ttl_ms=6000)
+
+    def _clear_active_floor_alignment(self) -> None:
+        """Reset the active floor's alignment to identity. Quick escape
+        hatch when the user applied a bad transform and just wants the
+        floor back to normal. Refits the view immediately."""
+        if self._project is None:
+            return
+        active = self._project.get_floor(self._project.active_floor)
+        if active is None:
+            return
+        cur = active.alignment if isinstance(active.alignment, dict) else {}
+        if (abs(float(cur.get("tx", 0) or 0)) < 0.5
+                and abs(float(cur.get("ty", 0) or 0)) < 0.5
+                and abs(float(cur.get("scale", 1) or 1) - 1.0) < 1e-4
+                and abs(float(cur.get("rotation_deg", 0) or 0)) < 0.01):
+            self._flash_status(
+                f"{active.id} is already at identity alignment.",
+                ttl_ms=2500)
+            return
+        if not messagebox.askyesno(
+            "Clear alignment?",
+            f"Reset {active.id}'s alignment to identity?\n\n"
+            f"This undoes any drag-align or anchor-align you've applied "
+            f"to this floor. Wires and devices on this floor stay where "
+            f"they are."):
+            return
+        active.alignment = dict(mf_mod.IDENTITY_ALIGNMENT)
+        self._mark_dirty()
+        try:
+            mf_mod.save_project(self._project, self.project_path)
+        except OSError as e:
+            log_error("Save after clear-alignment failed", e)
+        self._fit_image()
+        self._redraw()
+        self._flash_status(
+            f"{active.id} alignment cleared.", ttl_ms=3000)
+
+    def _toggle_ghost_overlay(self) -> None:
+        """Cycle the ghost-overlay floor: off → first-other → next →
+        … → off. Lets the user see another floor faintly behind the
+        active one for cross-floor comparison. Aligned automatically
+        via that floor's alignment, so already-aligned floors land
+        in their right place."""
+        if self._project is None or len(self._project.floors) < 2:
+            self._flash_status("Need ≥2 floors for ghost overlay.",
+                                ttl_ms=3000)
+            return
+        ids = [f.id for f in self._project.floors
+               if f.id != self._project.active_floor]
+        if not ids:
+            self._ghost_floor_id = None
+            return
+        if self._ghost_floor_id is None:
+            self._ghost_floor_id = ids[0]
+        else:
+            try:
+                idx = ids.index(self._ghost_floor_id)
+            except ValueError:
+                idx = -1
+            nxt = idx + 1
+            self._ghost_floor_id = ids[nxt] if nxt < len(ids) else None
+        self._redraw()
+        if self._ghost_floor_id:
+            f = self._project.get_floor(self._ghost_floor_id)
+            self._flash_status(
+                f"Ghost overlay: {self._ghost_floor_id} "
+                f"({f.name if f else '?'}). Toggle again to cycle / hide.",
+                ttl_ms=4000)
+        else:
+            self._flash_status("Ghost overlay: off.", ttl_ms=2500)
+
+    def _ghost_overlay_bg(self) -> tuple:
+        """Return (bg_image, alignment_dict) for the current ghost
+        floor, or (None, None) if none. Caches the parsed bg keyed by
+        floor id so repeated redraws don't re-parse the .drawio."""
+        if not self._ghost_floor_id or self._project is None:
+            return None, None
+        floor = self._project.get_floor(self._ghost_floor_id)
+        if floor is None or floor.id == self._project.active_floor:
+            return None, None
+        if floor.id not in self._ghost_bg_cache:
+            path = (floor.drawio_file if os.path.isabs(floor.drawio_file)
+                    else os.path.normpath(os.path.join(
+                        os.path.dirname(self.project_path),
+                        floor.drawio_file)))
+            if not os.path.exists(path):
+                return None, None
+            try:
+                bg, _, _, _, _, _ = parse_drawio(path)
+            except (RuntimeError, OSError):
+                return None, None
+            if bg is None:
+                return None, None
+            self._ghost_bg_cache[floor.id] = bg
+        align = (floor.alignment if isinstance(floor.alignment, dict)
+                 else dict(mf_mod.IDENTITY_ALIGNMENT))
+        return self._ghost_bg_cache[floor.id], align
 
     def _open_drag_align_dialog(self) -> None:
         """Visual drag-and-scale alignment. Shows the reference floor as
