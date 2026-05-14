@@ -10838,22 +10838,28 @@ class CameraWireTool:
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.title("Manage floors"); dlg.geometry("560x360")
-        ttk.Label(dlg, text="Double-click a row to switch to that floor.",
+        dlg.title("Manage floors"); dlg.geometry("620x400")
+        ttk.Label(dlg, text="Double-click a row to switch to that floor. "
+                              "Use the Delete button below to remove one.",
                   foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
                   ).pack(anchor=tk.W, padx=10, pady=(8, 2))
         cols = ("id", "name", "elevation", "drawio")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
         for c, w, h in (("id", 60, "ID"), ("name", 140, "Name"),
-                         ("elevation", 90, "Elev. (ft)"), ("drawio", 220, "Drawio")):
+                         ("elevation", 90, "Elev. (ft)"), ("drawio", 240, "Drawio")):
             tree.heading(c, text=h); tree.column(c, width=w)
-        active_id = self._project.active_floor
-        for f in self._project.floors:
-            marker = "● " if f.id == active_id else "  "
-            tree.insert("", tk.END, iid=f.id,
-                        values=(f"{marker}{f.id}", f.name,
-                                f"{f.elevation_ft:.1f}",
-                                f.drawio_file))
+
+        def reload_rows():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            active = self._project.active_floor
+            for f in self._project.floors:
+                marker = "● " if f.id == active else "  "
+                tree.insert("", tk.END, iid=f.id,
+                            values=(f"{marker}{f.id}", f.name,
+                                    f"{f.elevation_ft:.1f}",
+                                    f.drawio_file))
+        reload_rows()
         tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
 
         def on_double_click(_event=None):
@@ -10861,14 +10867,96 @@ class CameraWireTool:
             if not sel:
                 return
             target_id = sel[0]
-            if target_id == active_id:
+            if target_id == self._project.active_floor:
                 return  # already on this floor
             dlg.destroy()
             self._switch_floor(target_id)
         tree.bind("<Double-Button-1>", on_double_click)
         tree.bind("<Return>", on_double_click)
 
-        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=6)
+        def delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Pick a floor",
+                                     "Click a row first, then Delete.")
+                return
+            target_id = sel[0]
+            target = self._project.get_floor(target_id)
+            if target is None:
+                return
+            # Refuse on the only floor — the app needs at least one to
+            # have anything to render.
+            if len(self._project.floors) <= 1:
+                messagebox.showwarning(
+                    "Can't delete the only floor",
+                    "A project needs at least one floor. Add another "
+                    "first, then delete this one.")
+                return
+            # Refuse on the active floor — _switch_floor destroys this
+            # tool instance and re-launches, which would race with the
+            # in-place deletion AND _save_project would (re-)attach the
+            # currently-rendered wire_routes/annotations to the wrong
+            # floor on shutdown.
+            if target_id == self._project.active_floor:
+                messagebox.showwarning(
+                    "Switch first",
+                    f"{target_id} is the active floor. Double-click "
+                    f"another row to switch off it first, then come "
+                    f"back here to delete.")
+                return
+            # Summarize what's about to vanish so the user doesn't
+            # silently lose a floor's worth of wires.
+            n_wires = (len(target.wire_routes)
+                       if isinstance(target.wire_routes, list) else 0)
+            n_anns = (len(target.annotations)
+                      if isinstance(target.annotations, list) else 0)
+            n_risers = sum(
+                1 for r in (self._project.risers or [])
+                if isinstance(r, dict)
+                and (r.get("from", {}).get("floor") == target_id
+                     or r.get("to", {}).get("floor") == target_id))
+            summary_lines = [f"Floor: {target.id} — {target.name}"]
+            if n_wires:
+                summary_lines.append(
+                    f"  · {self._plural(n_wires, 'wire route')}")
+            if n_anns:
+                summary_lines.append(
+                    f"  · {self._plural(n_anns, 'annotation')}")
+            if n_risers:
+                summary_lines.append(
+                    f"  · {self._plural(n_risers, 'cross-floor riser')}")
+            summary = "\n".join(summary_lines)
+            if not messagebox.askyesno(
+                "Delete floor?",
+                f"This permanently removes:\n\n{summary}\n\n"
+                f"The .drawio file on disk is NOT deleted.\n\n"
+                f"Proceed?"):
+                return
+            # Remove the floor + any risers that referenced it.
+            self._project.floors = [
+                f for f in self._project.floors if f.id != target_id]
+            if self._project.risers:
+                self._project.risers = [
+                    r for r in self._project.risers
+                    if not (isinstance(r, dict)
+                            and (r.get("from", {}).get("floor") == target_id
+                                 or r.get("to", {}).get("floor") == target_id))]
+            # Persist so a crash right after deletion can't resurrect it.
+            self._mark_dirty()
+            try:
+                mf_mod.save_project(self._project, self.project_path)
+            except OSError as e:
+                log_error("Save after floor delete failed", e)
+            reload_rows()
+            self._update_title()
+            self._flash_status(
+                f"Floor {target_id} deleted.", ttl_ms=3500)
+
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
+        ttk.Button(btns, text="🗑  Delete selected floor",
+                   command=delete_selected).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
 
     # ============================================================ Export
     def _warn_if_no_scale(self, doc_type: str) -> bool:
