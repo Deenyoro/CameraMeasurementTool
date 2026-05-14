@@ -2668,6 +2668,10 @@ class CameraWireTool:
         # Double-click cable row → jump straight to the most useful action
         # (highlight all wires using that cable). No second click needed.
         self._bom_tree.bind("<Double-Button-1>", self._on_bom_cable_dclick)
+        Tooltip(self._bom_tree,
+                "Click column headers to sort. Double-click a row to "
+                "highlight every wire that uses that cable. Right-click "
+                "for more actions (edit cable, etc.).")
 
         # Devices-by-symbol Treeview — count + cable + wire totals per type
         ttk.Label(tab_bom, text="By device type",
@@ -2712,6 +2716,10 @@ class CameraWireTool:
         self._bom_devices_tree.bind("<Double-Button-1>",
                                      self._on_bom_devices_dclick)
         sb_dev.pack(side=tk.RIGHT, fill=tk.Y)
+        Tooltip(self._bom_devices_tree,
+                "Click column headers to sort. Double-click a row to "
+                "select every device of that type on the map. Right-"
+                "click for more actions (zoom-to-fit, edit symbol).")
 
         # Totals — laid out as 4 pills + 1 prominent grand-total
         totals_frame = ttk.Frame(tab_bom)
