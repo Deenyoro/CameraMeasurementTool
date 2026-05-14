@@ -1641,6 +1641,12 @@ class CameraWireTool:
         b("<bracketright>", _canvas_only(lambda: self._cycle_device(1)))
         b("<braceleft>", _canvas_only(lambda: self._cycle_wire(-1)))   # Shift+[
         b("<braceright>", _canvas_only(lambda: self._cycle_wire(1)))   # Shift+]
+        # PgUp / PgDn — cycle floors in multi-floor projects.
+        # The plan promised this as the primary multi-floor navigation
+        # shortcut; nothing was wired up. Canvas-only so PgUp/PgDn inside
+        # a side-panel listbox still scrolls the list, not the floor.
+        b("<Prior>",  _canvas_only(lambda: self._cycle_floor(-1)))
+        b("<Next>",   _canvas_only(lambda: self._cycle_floor(1)))
         # Single-key mode shortcuts (only when canvas-focused, never inside Entry)
         b("<KeyPress-m>", self._kbd_mode_move)
         b("<KeyPress-M>", self._kbd_mode_move)
@@ -8333,6 +8339,7 @@ class CameraWireTool:
                 ("Shift+[ / ]",  "Cycle through wires"),
                 ("R",            "Rotate selected camera's FOV by 15°"),
                 ("Shift+R",      "Rotate by 45° (Alt = counter-clockwise)"),
+                ("PgUp / PgDn",  "Previous / next floor (multi-floor projects)"),
             ]),
             ("File", [
                 ("Ctrl+O",         "Open .drawio…"),
@@ -10201,6 +10208,20 @@ class CameraWireTool:
         ttk.Button(btns, text="Cancel",
                    command=dlg.destroy).pack(side=tk.LEFT, padx=4)
         dlg.bind("<Return>", lambda _e: add())
+
+    def _cycle_floor(self, direction: int) -> None:
+        """PgUp/PgDn handler — move to the next (+1) or previous (-1)
+        floor in the project's order. Silent no-op when there are <2
+        floors or no project — same convention as device/wire cycling."""
+        if self._project is None or len(self._project.floors) < 2:
+            return
+        ids = [f.id for f in self._project.floors]
+        try:
+            idx = ids.index(self._project.active_floor)
+        except ValueError:
+            return
+        nxt = ids[(idx + direction) % len(ids)]
+        self._switch_floor(nxt)
 
     def _switch_floor(self, floor_id: str) -> None:
         if self._project is None:
