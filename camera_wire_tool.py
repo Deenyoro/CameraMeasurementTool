@@ -1263,6 +1263,10 @@ class CameraWireTool:
         # populates self._project (ProjectState) and tracks floors there.
         self._project: mf_mod.ProjectState | None = None
         self._floor_anchors_picking: list[tuple[float, float]] | None = None
+        # The floor whose `alignment` will be filled in when both floors'
+        # anchors have been picked. Set in _align_floor_dialog →
+        # pick_anchors; cleared on Esc or successful compute.
+        self._floor_align_target: mf_mod.FloorState | None = None
 
         # BOM tab inputs — defaults overridden by persisted user prefs
         prefs = load_settings()
@@ -5373,17 +5377,40 @@ class CameraWireTool:
                     text=f"ANCHOR: click point #{n+1}/2 on {active.id}  "
                          f"(Esc cancels)")
                 return
-            # 2 picked on this floor; remember and switch to the reference floor
+            # 2 picked on this floor; commit to its anchor_points.
             active.anchor_points = [list(p) for p in self._floor_anchors_picking]
             self._floor_anchors_picking = None
+            # If the other floor already has 2 anchors, this round is
+            # complete — compute the alignment and stop. Without this
+            # branch the picker used to ping-pong forever and the
+            # transform was never actually computed.
+            other_anchors = getattr(ref, "anchor_points", None)
+            if (isinstance(other_anchors, list) and len(other_anchors) >= 2
+                    and self._floor_align_target is not None):
+                target = self._floor_align_target
+                reference = ref if target is active else active
+                ref_pts = [tuple(p) for p in reference.anchor_points[:2]]
+                tgt_pts = [tuple(p) for p in target.anchor_points[:2]]
+                # compute_alignment(A, B) maps B → A; we want target drawn
+                # in reference's frame, so reference is A, target is B.
+                target.alignment = mf_mod.compute_alignment(ref_pts, tgt_pts)
+                self._floor_align_target = None
+                self._mark_dirty()
+                # Return to the target floor so the user sees the result.
+                self._switch_floor(target.id)
+                self._redraw_canvas()
+                self._flash_status(
+                    f"Alignment computed: {target.id} now aligned to "
+                    f"{reference.id}.",
+                    ttl_ms=3500)
+                return
+            # First floor done; switch to the other to collect its anchors.
             messagebox.showinfo(
                 "Switch floors",
                 f"Anchors stored for {active.id}. Click OK, then on {ref.id} click "
                 f"the SAME 2 physical points (in the same order).")
-            # Begin picking on the reference floor
             self._floor_anchors_picking = []
             self._floor_anchor_target = (ref, active)
-            # Switch to ref floor
             self._switch_floor(ref.id)
             return
 
@@ -6181,6 +6208,7 @@ class CameraWireTool:
         self._wire_snap = None
         self.cal_points = []
         self._floor_anchors_picking = None
+        self._floor_align_target = None
         # Clear annotation-placement state so Esc/cancel doesn't leave a
         # pending '__annotation__' sentinel lingering.
         if self._place_type == "__annotation__":
@@ -10294,9 +10322,16 @@ class CameraWireTool:
                 f"On {active.id}, click two reference points on the map. Then on "
                 f"{ref.id} (you'll be prompted to switch), click the SAME two "
                 f"physical points. The system computes the alignment transform.")
-            # Capture mode for current floor
+            # Capture mode for current floor. Remember which floor is the
+            # alignment target so the click handler can compute & store the
+            # transform once both floors' anchors have been picked.
             self._floor_anchors_picking = []
             self._floor_anchor_target = (active, ref)
+            self._floor_align_target = active
+            # Clear any leftover anchors on the target so a previous
+            # half-finished round can't poison this one.
+            active.anchor_points = []
+            ref.anchor_points = []
             self.status_label.config(
                 text=f"ANCHOR: click 2 reference points on {active.id}  "
                      f"(Esc cancels)")
