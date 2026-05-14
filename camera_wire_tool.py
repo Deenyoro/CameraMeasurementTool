@@ -2617,7 +2617,11 @@ class CameraWireTool:
         tax_entry.pack(side=tk.LEFT, padx=(2, 8))
         Tooltip(tax_entry, "Sales tax rate (decimal, e.g. 0.08 for 8%)")
         ttk.Label(adj, text="Currency:").pack(side=tk.LEFT)
-        ttk.Entry(adj, textvariable=self._bom_currency_var, width=4).pack(side=tk.LEFT, padx=2)
+        cur_entry = ttk.Entry(adj, textvariable=self._bom_currency_var, width=4)
+        cur_entry.pack(side=tk.LEFT, padx=2)
+        Tooltip(cur_entry,
+                "Symbol prepended to every cost in the BOM + exports "
+                "($ / € / £ / ¥ / kr / etc.). Persisted to Preferences.")
         # (No explicit refresh button — the BOM auto-refreshes on every state
         # change via _post_command_refresh; the variables also trigger a
         # refresh when their values change.)
