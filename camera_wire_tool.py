@@ -2493,6 +2493,10 @@ class CameraWireTool:
         self.wire_listbox.bind("<<ListboxSelect>>", self._on_wire_select)
         self.wire_listbox.bind("<Button-3>", self._on_wire_listbox_rclick)
         self.wire_listbox.bind("<Double-Button-1>", lambda _e: self._reassign_selected_wire())
+        # Return key mirrors double-click for keyboard-only users.
+        # Same convention as sym_listbox (Return → Edit) and the new
+        # dev_listbox binding (Return → Center).
+        self.wire_listbox.bind("<Return>", lambda _e: self._reassign_selected_wire())
 
         wbtns = ttk.Frame(tab_wire)
         wbtns.pack(fill=tk.X, padx=6, pady=4)
