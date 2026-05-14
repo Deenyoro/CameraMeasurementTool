@@ -9285,6 +9285,11 @@ class CameraWireTool:
         m.add_separator()
         m.add_command(label="🎯  Center on map",
                        command=self._center_on_selected)
+        # Mirrors the empty-canvas right-click 'Fit to selection' entry;
+        # useful when the user has a multi-selection and wants to see
+        # all of them at once.
+        m.add_command(label="🔍  Zoom to fit selection (Z)",
+                       command=self._kbd_zoom_to_selection)
         if info.get("is_camera"):
             m.add_command(label="📷  Edit FOV / DORI…",
                            command=lambda d=device: self._open_fov_dialog(d))
