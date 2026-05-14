@@ -8877,6 +8877,15 @@ class CameraWireTool:
                                  "point (instead of unrelated history undo)"),
                 ("Escape",       "Cancel the in-progress wire"),
             ]),
+            ("Multi-floor", [
+                ("PgUp / PgDn",  "Previous / next floor"),
+                ("(toolbar)",    "Floor: button → Drag-align (visual), "
+                                 "Align by anchor points, Clear alignment, "
+                                 "Toggle ghost overlay, Manage floors"),
+                ("(drag-align)", "Left drag: move target.  Wheel: zoom "
+                                 "workspace.  Shift/Ctrl + wheel: scale "
+                                 "target.  Right drag: pan workspace."),
+            ]),
             ("Search & jump", [
                 ("Ctrl+F",       "Focus search on active tab"),
                 ("Ctrl+G",       "Quick jump (find any device/symbol/wire)"),
