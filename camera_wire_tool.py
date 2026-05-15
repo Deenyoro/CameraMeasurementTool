@@ -2731,7 +2731,12 @@ class CameraWireTool:
         self.scale_label.pack(side=tk.LEFT, padx=10, pady=2)
         Tooltip(self.scale_label,
                 "Without a scale, wire lengths show in pixels.\n"
-                "Click here, then click two points of a known dimension on the plan.")
+                "Click here, then click two points of a known dimension on "
+                "the plan.\n\n"
+                "Multi-floor: this shows the EFFECTIVE rate on the active "
+                "floor (project scale × alignment.scale). Aligned floors "
+                "share the calibration — set it once on the reference "
+                "floor and every aligned floor inherits it.")
 
         # Zoom percentage indicator — quietly tucked next to scale, useful
         # for orientation. Updates every redraw.
