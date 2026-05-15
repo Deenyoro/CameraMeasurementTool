@@ -12148,6 +12148,38 @@ class CameraWireTool:
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
         def apply_now():
             target = state["target_floor"]
+            # 'Did you pick the right direction?' guard — a drastic
+            # transform on the active floor is almost always the
+            # 'I picked the wrong target' mistake (the user originally
+            # hit this and ended up with Floor 1 shrunk to 53%). Warn
+            # and offer to swap. Only fires when the target was at
+            # identity before (so the user isn't iterating on an
+            # already-aligned floor) AND the change would resize or
+            # rotate dramatically.
+            cur_t = (target.alignment
+                     if isinstance(target.alignment, dict) else {})
+            cur_t_identity = (
+                abs(float(cur_t.get("tx", 0) or 0)) < 0.5
+                and abs(float(cur_t.get("ty", 0) or 0)) < 0.5
+                and abs(float(cur_t.get("scale", 1) or 1) - 1.0) < 1e-4
+                and abs(float(cur_t.get("rotation_deg", 0) or 0)) < 0.01)
+            drastic = (draft["scale"] < 0.6 or draft["scale"] > 1.7
+                       or abs(draft["rotation_deg"]) > 20)
+            if cur_t_identity and drastic:
+                ref_name = (ref_floor.name if hasattr(ref_floor, "name")
+                            else ref_floor.id)
+                if not messagebox.askyesno(
+                    "Confirm direction",
+                    f"You're about to TRANSFORM {target.id} ({target.name})\n"
+                    f"  scale: {draft['scale']:.3f}x\n"
+                    f"  rotate: {draft['rotation_deg']:+.1f}°\n"
+                    f"  offset: ({draft['tx']:+.0f}, {draft['ty']:+.0f}) px\n\n"
+                    f"That's a big change. {target.id} is the floor that "
+                    f"gets reshaped to overlay {ref_floor.id} ({ref_name}). "
+                    f"If you actually want {ref_floor.id} reshaped instead, "
+                    f"hit Cancel + use the Swap button at the top, then Apply.\n\n"
+                    f"Proceed with applying this to {target.id}?"):
+                    return
             target.alignment = {
                 "tx": float(draft["tx"]),
                 "ty": float(draft["ty"]),
