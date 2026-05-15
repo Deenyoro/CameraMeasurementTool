@@ -25,6 +25,7 @@ def _make_app(scale_factor=1.0):
         wire_routes=[],
         dx_scale=2.0, dy_scale=2.0,   # drawio→image-pixel multiplier
         scale_factor=scale_factor,
+        _project=None,
     )
     # Provide a length calculator
     def _calc(pts):
@@ -34,6 +35,11 @@ def _make_app(scale_factor=1.0):
                                  pts[i+1][1] - pts[i][1])
         return total
     app._calc_wire_length = _calc
+    # Bind the real _effective_scale_factor so the follow function's
+    # length_in update goes through the alignment-aware path (no-op
+    # for these tests because _project=None → identity alignment).
+    app._effective_scale_factor = lambda: (
+        cwt.CameraWireTool._effective_scale_factor(app))
     return app
 
 

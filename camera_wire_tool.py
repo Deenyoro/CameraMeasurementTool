@@ -530,8 +530,13 @@ def _follow_wires_with_device(app, device_id: str,
         if changed:
             wr["points"] = pts
             wr["length_px"] = app._calc_wire_length(pts)
-            sf = app.scale_factor
-            wr["length_in"] = (wr["length_px"] * sf) if sf else None
+            # Use effective scale (project × alignment.scale) so a wire
+            # endpoint dragged on an aligned floor reports the right
+            # inches — same convention as _recalc_all_wires. Without
+            # this, dragging a device on a 1.5x-aligned floor produced
+            # a length_in that was 1/1.5x its true value.
+            eff = app._effective_scale_factor()
+            wr["length_in"] = (wr["length_px"] * eff) if eff is not None else None
 
 
 class MoveDeviceCmd(Command):
