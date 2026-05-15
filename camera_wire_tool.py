@@ -3472,8 +3472,12 @@ class CameraWireTool:
         """Variant of _wire_snap_target used while dragging an existing
         waypoint: skips snapping to the route's own neighbouring points
         (which would 'lock' the dragged point onto its current adjacents).
-        """
-        thresh = max(8.0, 14.0 / max(self.zoom, 0.01))
+        Same alignment-aware threshold as the non-drag variant."""
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        thresh = max(8.0, 14.0 / max(self.zoom * a_scale, 0.01))
         best = None; best_d = float("inf"); best_kind = None
         # Device centers
         for d in self.devices:
@@ -3519,8 +3523,19 @@ class CameraWireTool:
 
         Returns (sx, sy, kind) — `kind` ∈ {device, endpoint, self, ortho},
         or None if no snap.
+
+        Threshold is expressed in raw-image pixels, but the user's mental
+        model is canvas pixels. On aligned floors, alignment.scale stretches
+        raw pixels on canvas, so the raw-pixel snap radius shrinks when
+        alignment.scale > 1 and grows when < 1. Divide through to keep the
+        canvas-pixel feel constant across floors.
         """
-        thresh = max(8.0, 14.0 / max(self.zoom, 0.01))
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        eff_z = max(self.zoom * a_scale, 0.01)
+        thresh = max(8.0, 14.0 / eff_z)
         best = None; best_d = float("inf"); best_kind = None
 
         # 1) device centers (in image-pixel coords)
