@@ -4,11 +4,14 @@ Camera Wire Estimation Tool
 Loads a .drawio building schematic with security device icons, lets you:
 - Calibrate real-world scale (imperial or metric)
 - Drag device icons, lasso-select, ctrl-click multi-select
-- Draw multi-point wire routes with snap-to-orthogonal (Shift)
+- Draw multi-point wire routes with snap-to-orthogonal (Shift) and
+  insert / delete waypoints via right-click on a wire
 - Edit symbol types — changes propagate to every instance + the legend
 - Place new symbols, set per-symbol cable types, map annotations
 - Per-camera FOV / DORI overlays (IEC 62676-4)
-- Multi-floor projects with anchor-point alignment
+- Multi-floor projects with anchor-point AND drag-align (visual)
+  alignment, plus a ghost-overlay underlay for cross-floor comparison.
+  Aligned floors share the project calibration scale automatically.
 - BOM with cost/waste/tax, CSV + multi-page PDF export
 - Save back to .drawio plus a v2 .wiremap.json project file
 
