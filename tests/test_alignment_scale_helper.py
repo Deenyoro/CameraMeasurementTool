@@ -80,3 +80,19 @@ def test_corrupted_alignment_returns_1():
     for bad in (None, "junk", 42, [1, 2, 3]):
         app = _app(bad)
         assert cwt.CameraWireTool._alignment_scale(app) == 1.0, f"bad={bad!r}"
+
+
+def test_explicit_dict_param_reads_from_that_dict():
+    """Pass an explicit alignment dict to bypass the active floor — used
+    by the ghost-overlay rendering, which needs the GHOST floor's
+    alignment.scale, not the active floor's."""
+    app = _app({"scale": 1.0})   # active = identity
+    other = {"scale": 1.7, "tx": 0, "ty": 0, "rotation_deg": 0}
+    assert cwt.CameraWireTool._alignment_scale(app, other) == 1.7
+
+
+def test_explicit_corrupted_dict_returns_1():
+    app = _app({"scale": 2.0})
+    assert cwt.CameraWireTool._alignment_scale(app, None) == 1.0
+    assert cwt.CameraWireTool._alignment_scale(app, "junk") == 1.0
+    assert cwt.CameraWireTool._alignment_scale(app, {"scale": "bad"}) == 1.0

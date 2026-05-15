@@ -4787,7 +4787,9 @@ class CameraWireTool:
         # position uses GHOST'S alignment, not the active floor's. So
         # composite directly: aligned_pixel = apply_alignment(raw_pixel,
         # ghost_align), then canvas_pixel = aligned * zoom + offset.
-        a_scale = float(ghost_align.get("scale", 1.0) or 1.0)
+        # Use the helper with an explicit alignment dict so a
+        # corrupted ghost_align doesn't crash on .get / float coerce.
+        a_scale = self._alignment_scale(ghost_align)
         # Inverse-transform the canvas viewport corners to the ghost's
         # raw image space so we can crop to just the visible piece.
         active_align = self._current_alignment()
@@ -5993,12 +5995,19 @@ class CameraWireTool:
     def _calc_wire_length(self, points) -> float:
         return sum(math.dist(points[i], points[i+1]) for i in range(len(points) - 1))
 
-    def _alignment_scale(self) -> float:
-        """The current floor's alignment.scale, safely coerced.
-        Centralised so every call site doesn't have to repeat the
-        try/except + .get(...) + 'or 1.0' incantation."""
+    _ALIGN_DEFAULT = object()   # sentinel for 'use active floor'
+
+    def _alignment_scale(self, alignment=_ALIGN_DEFAULT) -> float:
+        """Return alignment.scale safely coerced. With no arg, reads the
+        current floor's alignment; pass an explicit dict (e.g. the
+        ghost-overlay floor's alignment) to read a different floor's
+        value through the same defensive path. Explicit None / non-dict
+        falls back to 1.0 — the caller already handled the 'no
+        alignment' branch elsewhere."""
+        if alignment is CameraWireTool._ALIGN_DEFAULT:
+            alignment = self._current_alignment()
         try:
-            return float(self._current_alignment().get("scale", 1.0) or 1.0)
+            return float(alignment.get("scale", 1.0) or 1.0)
         except (AttributeError, TypeError, ValueError):
             return 1.0
 

@@ -38,8 +38,10 @@ def _make_app(scale_factor=1.0):
     # Bind the real _effective_scale_factor so the follow function's
     # length_in update goes through the alignment-aware path (no-op
     # for these tests because _project=None → identity alignment).
-    app._alignment_scale = lambda: (
-        cwt.CameraWireTool._alignment_scale(app))
+    app._current_alignment = lambda: (
+        cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda *a, **k: (
+        cwt.CameraWireTool._alignment_scale(app, *a, **k))
     app._effective_scale_factor = lambda: (
         cwt.CameraWireTool._effective_scale_factor(app))
     return app
