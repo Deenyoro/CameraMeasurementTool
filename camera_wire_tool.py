@@ -8576,7 +8576,12 @@ class CameraWireTool:
             if (cx < -margin or cy < -margin
                     or cx > canvas_w + margin or cy > canvas_h + margin):
                 continue
-            fs = max(8, int(ann.get("font_size", 16) * self.zoom * self.dx_scale))
+            # Font size also tracks alignment scale so annotations stay
+            # proportional to the bg / devices on aligned floors. Min
+            # clamped at 8px so the text remains readable when zoomed out.
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+            fs = max(8, int(ann.get("font_size", 16)
+                             * self.zoom * self.dx_scale * a_scale))
             color = ann.get("color", "#FFD060") or "#FFD060"
             t_id = self.canvas.create_text(
                 cx, cy, text=text, fill=color,
