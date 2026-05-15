@@ -5840,7 +5840,22 @@ class CameraWireTool:
                     "Invalid distance",
                     "Distance must be positive (greater than zero).")
                 return
-            new_scale = total_in / px_dist
+            # px_dist is in RAW image pixels on the active floor. The
+            # project's scale_factor is supposed to be inches per
+            # REFERENCE-frame pixel (= raw pixel on whatever floor is
+            # the alignment anchor). On an aligned floor, raw pixels and
+            # reference pixels differ by alignment.scale — so divide
+            # the raw-pixel rate by alignment.scale to land in
+            # inches/reference-pixel. Without this, calibrating on a
+            # 1.5x-aligned floor stored a value 1.5x too big and every
+            # other floor's wire lengths read 1.5x too long.
+            raw_scale = total_in / px_dist
+            try:
+                a_scale = float(
+                    self._current_alignment().get("scale", 1.0) or 1.0)
+            except (AttributeError, TypeError, ValueError):
+                a_scale = 1.0
+            new_scale = raw_scale / a_scale if a_scale else raw_scale
             # Skip the round-trip if the user happened to recalibrate to
             # the same scale (rare but possible — and it's wasted history).
             if (self.scale_factor is not None
