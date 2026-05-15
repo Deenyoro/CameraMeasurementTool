@@ -6773,10 +6773,16 @@ class CameraWireTool:
     def _on_mousewheel(self, event) -> None:
         factor = C.ZOOM_FACTOR if event.delta > 0 else 1 / C.ZOOM_FACTOR
         new_zoom = max(C.ZOOM_MIN, min(self.zoom * factor, C.ZOOM_MAX))
-        ix, iy = self._canvas_to_img(event.x, event.y)
+        # Keep the point under the cursor fixed across the zoom — work
+        # in ALIGNED-image space so alignment doesn't shift the
+        # anchor point. (Previously: _canvas_to_img returns raw image
+        # coords, but the offset math expected aligned coords, so on
+        # aligned floors the wheel zoom drifted away from the cursor.)
+        ax = (event.x - self.offset_x) / self.zoom
+        ay = (event.y - self.offset_y) / self.zoom
         self.zoom = new_zoom
-        self.offset_x = event.x - ix * self.zoom
-        self.offset_y = event.y - iy * self.zoom
+        self.offset_x = event.x - ax * self.zoom
+        self.offset_y = event.y - ay * self.zoom
         self._clamp_pan()
         self._schedule_redraw()
 
@@ -6785,10 +6791,15 @@ class CameraWireTool:
         ch = self.canvas.winfo_height() or 600
         factor = C.ZOOM_FACTOR if direction > 0 else 1 / C.ZOOM_FACTOR
         new_zoom = max(C.ZOOM_MIN, min(self.zoom * factor, C.ZOOM_MAX))
-        ix, iy = self._canvas_to_img(cw / 2, ch / 2)
+        # Keep the point currently at the canvas centre fixed across
+        # the zoom change. Compute in ALIGNED-image space (the space
+        # offset_x/y + zoom directly map to) so alignment doesn't
+        # offset the centre.
+        ax = (cw / 2 - self.offset_x) / self.zoom
+        ay = (ch / 2 - self.offset_y) / self.zoom
         self.zoom = new_zoom
-        self.offset_x = cw / 2 - ix * self.zoom
-        self.offset_y = ch / 2 - iy * self.zoom
+        self.offset_x = cw / 2 - ax * self.zoom
+        self.offset_y = ch / 2 - ay * self.zoom
         self._clamp_pan()
         self._redraw()
 
