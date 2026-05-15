@@ -5007,9 +5007,14 @@ class CameraWireTool:
         # Cache legend bounds in image coords so _on_left_press can hit-test
         # the click against this rectangle to start a drag.
         self._legend_img_bbox = (bx, by, bx + bw, by + needed_h)
+        # Compute BOTH corners through _img_to_canvas so the rectangle
+        # width / height pick up the current floor's alignment (a
+        # 1.5x-scaled floor's legend should also render 1.5x wider so
+        # it stays in the same physical spot relative to the bg).
         cx, cy = self._img_to_canvas(bx, by)
-        cw = bw * self.zoom
-        ch = needed_h * self.zoom
+        cx2, cy2 = self._img_to_canvas(bx + bw, by + needed_h)
+        cw = cx2 - cx
+        ch = cy2 - cy
 
         self.canvas.create_rectangle(cx, cy, cx + cw, cy + ch,
                                      fill="white", outline="#0000FF", width=2, tags="legend")
@@ -5035,9 +5040,11 @@ class CameraWireTool:
             ix, iy = self._drawio_to_img(icon_dx, icon_dy)
             iw = 22 * self.dx_scale
             ih = 22 * self.dy_scale
+            # Two-corner conversion so icon width tracks alignment too.
             icx, icy = self._img_to_canvas(ix, iy)
-            icw = iw * self.zoom
-            ich = ih * self.zoom
+            icx2, icy2 = self._img_to_canvas(ix + iw, iy + ih)
+            icw = icx2 - icx
+            ich = icy2 - icy
             center_x = icx + icw / 2
             center_y = icy + ich / 2
             r = max(icw, ich) / 2
