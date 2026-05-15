@@ -4938,8 +4938,13 @@ class CameraWireTool:
         iy = click_y * (self.img_h / thumb_h)
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        self.offset_x = cw / 2 - ix * self.zoom
-        self.offset_y = ch / 2 - iy * self.zoom
+        # Convert raw image coords through alignment for the centre math
+        # so a click on the minimap puts the right physical point at
+        # the canvas centre even on aligned floors.
+        ax, ay = mf_mod.apply_alignment(
+            (ix, iy), self._current_alignment())
+        self.offset_x = cw / 2 - ax * self.zoom
+        self.offset_y = ch / 2 - ay * self.zoom
         self._redraw()
 
     def _draw_mode_banner(self) -> None:
@@ -7030,8 +7035,10 @@ class CameraWireTool:
             mid = r["points"][len(r["points"]) // 2]
             cw = self.canvas.winfo_width() or 800
             ch = self.canvas.winfo_height() or 600
-            self.offset_x = cw / 2 - mid[0] * self.zoom
-            self.offset_y = ch / 2 - mid[1] * self.zoom
+            ax, ay = mf_mod.apply_alignment(
+                (mid[0], mid[1]), self._current_alignment())
+            self.offset_x = cw / 2 - ax * self.zoom
+            self.offset_y = ch / 2 - ay * self.zoom
         self._redraw()
         self._flash_status(
             f"Wire {nxt_pos + 1}/{len(pool)} selected"
@@ -7077,19 +7084,31 @@ class CameraWireTool:
 
     def _zoom_to_image_bbox(self, ix0, iy0, ix1, iy1, pad: float = 60) -> None:
         """Set zoom + offset so the given image-coord rectangle fills most
-        of the visible canvas, with a margin of `pad` canvas-pixels."""
+        of the visible canvas, with a margin of `pad` canvas-pixels.
+        Alignment-aware: the bbox is in RAW image space; we transform
+        through apply_alignment to get the aligned bbox (which is what
+        zoom + offset_x/y actually map from)."""
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        bw = max(1.0, ix1 - ix0)
-        bh = max(1.0, iy1 - iy0)
+        # Transform the 4 corners through alignment so the bbox we fit
+        # is in the same space as offset_x/y + zoom (aligned, not raw).
+        align = self._current_alignment()
+        corners = [mf_mod.apply_alignment((ix0, iy0), align),
+                    mf_mod.apply_alignment((ix1, iy0), align),
+                    mf_mod.apply_alignment((ix0, iy1), align),
+                    mf_mod.apply_alignment((ix1, iy1), align)]
+        ax0 = min(c[0] for c in corners); ay0 = min(c[1] for c in corners)
+        ax1 = max(c[0] for c in corners); ay1 = max(c[1] for c in corners)
+        bw = max(1.0, ax1 - ax0)
+        bh = max(1.0, ay1 - ay0)
         zx = max(0.0, cw - 2 * pad) / bw
         zy = max(0.0, ch - 2 * pad) / bh
         self.zoom = max(C.ZOOM_MIN,
                          min(self._ZOOM_TO_BBOX_CAP, min(zx, zy)))
-        cx_img = (ix0 + ix1) / 2
-        cy_img = (iy0 + iy1) / 2
-        self.offset_x = cw / 2 - cx_img * self.zoom
-        self.offset_y = ch / 2 - cy_img * self.zoom
+        cx_aligned = (ax0 + ax1) / 2
+        cy_aligned = (ay0 + ay1) / 2
+        self.offset_x = cw / 2 - cx_aligned * self.zoom
+        self.offset_y = ch / 2 - cy_aligned * self.zoom
         self._redraw()
 
     def _center_on_selected(self) -> None:
@@ -7116,8 +7135,13 @@ class CameraWireTool:
         cy_img = sum(
             (d["y"] + d["h"] / 2) * self.dy_scale for d in targets
         ) / len(targets)
-        self.offset_x = cw / 2 - cx_img * self.zoom
-        self.offset_y = ch / 2 - cy_img * self.zoom
+        # Convert from RAW image space to ALIGNED so the centring math
+        # matches what _img_to_canvas does at render time. Without this
+        # the selection landed off-centre on aligned floors.
+        ax, ay = mf_mod.apply_alignment(
+            (cx_img, cy_img), self._current_alignment())
+        self.offset_x = cw / 2 - ax * self.zoom
+        self.offset_y = ch / 2 - ay * self.zoom
         self._redraw()
 
     # ============================================================ List management
@@ -8175,8 +8199,10 @@ class CameraWireTool:
                 mid = pts[len(pts) // 2]
                 cw = self.canvas.winfo_width() or 800
                 ch = self.canvas.winfo_height() or 600
-                self.offset_x = cw / 2 - mid[0] * self.zoom
-                self.offset_y = ch / 2 - mid[1] * self.zoom
+                ax, ay = mf_mod.apply_alignment(
+                    (mid[0], mid[1]), self._current_alignment())
+                self.offset_x = cw / 2 - ax * self.zoom
+                self.offset_y = ch / 2 - ay * self.zoom
         self._redraw()
         self.status_label.config(text=f"Jumped to wire #{route_index+1}.")
 
@@ -9075,13 +9101,17 @@ class CameraWireTool:
             return
 
     def _center_on_device(self, dev: dict) -> None:
-        """Pan the view so `dev` ends up in the canvas center, no zoom."""
+        """Pan the view so `dev` ends up in the canvas center, no zoom.
+        Alignment-aware: convert the device's raw image position through
+        apply_alignment first so the centre lands at the right canvas pixel."""
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
         cx_img = (dev["x"] + dev["w"] / 2) * self.dx_scale
         cy_img = (dev["y"] + dev["h"] / 2) * self.dy_scale
-        self.offset_x = cw / 2 - cx_img * self.zoom
-        self.offset_y = ch / 2 - cy_img * self.zoom
+        ax, ay = mf_mod.apply_alignment(
+            (cx_img, cy_img), self._current_alignment())
+        self.offset_x = cw / 2 - ax * self.zoom
+        self.offset_y = ch / 2 - ay * self.zoom
         self._redraw()
 
     def _on_right_click_with_menu(self, event) -> None:
