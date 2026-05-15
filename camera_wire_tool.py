@@ -12120,6 +12120,30 @@ class CameraWireTool:
         ttk.Button(panel, text="Fit width + center",
                    command=fit_width).pack(fill=tk.X, pady=2)
 
+        def fit_height():
+            """Same as fit_width but matching heights. Useful when the
+            floors share width but differ in height — picking width as
+            the fit axis would over-stretch vertically."""
+            rh = max(1, held["ref_raw"].height)
+            ah = max(1, held["act_raw"].height)
+            draft["scale"] = rh / ah
+            center_on_ref()
+        ttk.Button(panel, text="Fit height + center",
+                   command=fit_height).pack(fill=tk.X, pady=2)
+
+        def fit_both():
+            """Fit so target's bbox fits ENTIRELY inside reference's —
+            picks the smaller of the two scale ratios so neither axis
+            spills past the reference."""
+            rw = max(1, held["ref_raw"].width)
+            ah = max(1, held["act_raw"].height)
+            rh = max(1, held["ref_raw"].height)
+            aw = max(1, held["act_raw"].width)
+            draft["scale"] = min(rw / aw, rh / ah)
+            center_on_ref()
+        ttk.Button(panel, text="Fit inside + center",
+                   command=fit_both).pack(fill=tk.X, pady=2)
+
         def fit_view():
             view["_initialized"] = False
             _schedule_redraw(interactive=False)
