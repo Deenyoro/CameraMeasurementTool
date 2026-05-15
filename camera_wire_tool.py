@@ -12357,11 +12357,37 @@ class CameraWireTool:
                               "Use the Delete button below to remove one.",
                   foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
                   ).pack(anchor=tk.W, padx=10, pady=(8, 2))
-        cols = ("id", "name", "elevation", "drawio")
+        cols = ("id", "name", "elevation", "align", "drawio")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
         for c, w, h in (("id", 60, "ID"), ("name", 140, "Name"),
-                         ("elevation", 90, "Elev. (ft)"), ("drawio", 240, "Drawio")):
+                         ("elevation", 80, "Elev. (ft)"),
+                         ("align", 90, "Aligned"),
+                         ("drawio", 220, "Drawio")):
             tree.heading(c, text=h); tree.column(c, width=w)
+
+        def _align_summary(al):
+            """Compact 'identity' or 'scale 1.5x, +50px' description for
+            the at-a-glance alignment column."""
+            if not isinstance(al, dict):
+                return "—"
+            try:
+                s = float(al.get("scale", 1.0) or 1.0)
+                r = float(al.get("rotation_deg", 0.0) or 0.0)
+                tx = float(al.get("tx", 0.0) or 0.0)
+                ty = float(al.get("ty", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return "—"
+            if (abs(s - 1.0) < 1e-4 and abs(r) < 0.01
+                    and abs(tx) < 0.5 and abs(ty) < 0.5):
+                return "identity"
+            parts = []
+            if abs(s - 1.0) > 1e-4:
+                parts.append(f"{s:.2f}x")
+            if abs(r) > 0.01:
+                parts.append(f"{r:+.0f}°")
+            if abs(tx) > 0.5 or abs(ty) > 0.5:
+                parts.append(f"({tx:+.0f}, {ty:+.0f})")
+            return ", ".join(parts) if parts else "identity"
 
         def reload_rows():
             for iid in tree.get_children():
@@ -12372,6 +12398,7 @@ class CameraWireTool:
                 tree.insert("", tk.END, iid=f.id,
                             values=(f"{marker}{f.id}", f.name,
                                     f"{f.elevation_ft:.1f}",
+                                    _align_summary(f.alignment),
                                     f.drawio_file))
         reload_rows()
         tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
