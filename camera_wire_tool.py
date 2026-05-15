@@ -5592,31 +5592,6 @@ class CameraWireTool:
             return None
         return (route, best_i)
 
-    def _any_waypoint_at(self, ix: float, iy: float):
-        """Like _waypoint_at, but searches every wire — not just the
-        currently selected one. Used so a single click on a visible
-        waypoint can BOTH select the wire AND arm the drag, instead of
-        forcing two clicks (one to select, one to grab the handle).
-        Returns (route, point_index) for the nearest hit, or None."""
-        thresh = max(6.0, 10.0 / max(self.zoom, 0.01))
-        best = None
-        best_d = float("inf")
-        for route in self.wire_routes:
-            if not isinstance(route, dict):
-                continue
-            pts = route.get("points")
-            if not isinstance(pts, list) or len(pts) < 2:
-                continue
-            for i in range(len(pts)):
-                try:
-                    px, py = float(pts[i][0]), float(pts[i][1])
-                except (TypeError, ValueError, IndexError):
-                    continue
-                d = math.hypot(ix - px, iy - py)
-                if d <= thresh and d < best_d:
-                    best_d = d
-                    best = (route, i)
-        return best
 
     def _wire_at(self, ix: float, iy: float) -> int | None:
         """Return the wire index whose line passes near (ix, iy). Used to
