@@ -5956,7 +5956,11 @@ class CameraWireTool:
                 self._mark_dirty()
                 # Return to the target floor so the user sees the result.
                 self._switch_floor(target.id)
-                self._redraw_canvas()
+                # _switch_floor already redraws, but force-fit so the
+                # newly-aligned floor lands properly framed in the
+                # viewport (alignment-aware _fit_image).
+                self._fit_image()
+                self._redraw()
                 self._flash_status(
                     f"Alignment computed: {target.id} now aligned to "
                     f"{reference.id}.",

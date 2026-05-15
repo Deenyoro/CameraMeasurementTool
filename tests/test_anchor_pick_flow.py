@@ -75,7 +75,10 @@ def _stub_app(target, reference, picking_phase=0, points=None):
     app._redrawn = False
     def redraw():
         app._redrawn = True
-    app._redraw_canvas = redraw
+    app._redraw = redraw
+    app._redraw_canvas = redraw   # legacy alias, kept for older tests
+
+    app._fit_image = lambda: None
 
     app._flashed = None
     def flash(msg, ttl_ms=None):
