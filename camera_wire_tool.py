@@ -10838,6 +10838,16 @@ class CameraWireTool:
         m.add_command(label="Align by anchor points…",
                       command=self._open_alignment_dialog,
                       state=align_state)
+        m.add_separator()
+        # Parity with the toolbar Floor: menu — both should expose the
+        # same operations so the user can find them either way.
+        m.add_command(label="Clear alignment on active floor",
+                      command=self._clear_active_floor_alignment,
+                      state=(tk.NORMAL if n_floors >= 1 else tk.DISABLED))
+        m.add_command(label="Toggle ghost overlay (other floor)",
+                      command=self._toggle_ghost_overlay,
+                      state=align_state)
+        m.add_separator()
         m.add_command(label="Manage Floors…",
                       command=self._open_floor_manager,
                       state=manage_state)
