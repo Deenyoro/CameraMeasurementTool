@@ -1490,12 +1490,71 @@ class CameraWireTool:
             pass
 
     # ============================================================ project file IO
+    def _find_owning_project_file(self) -> str | None:
+        """If this drawio is a member of a sibling .wiremap.json project
+        (which is the case for Floor 2..N of a multi-floor project), find
+        and return that project file's path. Without this, opening
+        Floor2.drawio directly created a new Floor2.wiremap.json instead
+        of opening the Floor1.wiremap.json that already lists Floor 2 —
+        the user's other floors silently disappeared on every direct
+        re-open of a non-primary floor."""
+        d = os.path.dirname(self.drawio_path)
+        if not d or not os.path.isdir(d):
+            return None
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            return None
+        # Skip the default candidate (we already check that one).
+        default = os.path.basename(self.project_path)
+        my_basename = os.path.basename(self.drawio_path)
+        for name in entries:
+            if not name.endswith(".wiremap.json") or name == default:
+                continue
+            candidate = os.path.join(d, name)
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            for f in data.get("floors", []) or []:
+                if not isinstance(f, dict):
+                    continue
+                df = f.get("drawio_file")
+                if not isinstance(df, str):
+                    continue
+                # Compare basenames (project file stores relative paths).
+                if (os.path.basename(df) == my_basename
+                        or os.path.normpath(df) == self.drawio_path):
+                    return candidate
+        return None
+
     def _load_project(self) -> None:
         """Load via multifloor.load_project (handles v1 → v2 migration).
 
         v1 wiremap.json files (single floor, flat wire_routes list) are
         auto-wrapped into a v2 ProjectState with one floor 'F1'.
-        """
+
+        Multi-floor lookup: if the default project file doesn't exist
+        next to this drawio, scan the directory for ANY .wiremap.json
+        that lists this drawio as one of its floors — and adopt that
+        project. Lets the user open Floor 2 directly without losing the
+        Floor 1 / project bundle that owns it."""
+        # Default candidate is splitext(drawio_path) + .wiremap.json.
+        # If that doesn't exist, look for a sibling project file whose
+        # floors list contains us.
+        if not os.path.exists(self.project_path):
+            owner = self._find_owning_project_file()
+            if owner is not None:
+                self.project_path = owner
+                # Active floor should become this drawio once loaded.
+                self._adopt_as_active_after_load = True
+            else:
+                self._adopt_as_active_after_load = False
+        else:
+            self._adopt_as_active_after_load = False
         try:
             self._project = mf_mod.load_project(self.project_path, self.drawio_path)
         except Exception as e:
@@ -1520,6 +1579,17 @@ class CameraWireTool:
             self.cable_types = {**self.cable_types, **proj.cable_types}
         if proj.next_device_id:
             self._next_device_id = max(self._next_device_id, proj.next_device_id)
+
+        # If we adopted a sibling project file, override active_floor to
+        # the floor matching THIS drawio so the user lands on what they
+        # actually clicked instead of the project's last-saved active.
+        if getattr(self, "_adopt_as_active_after_load", False):
+            my_basename = os.path.basename(self.drawio_path)
+            for f in proj.floors:
+                if (isinstance(f.drawio_file, str)
+                        and os.path.basename(f.drawio_file) == my_basename):
+                    proj.active_floor = f.id
+                    break
 
         # Active floor's wire routes → self.wire_routes (recalc lengths now)
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
