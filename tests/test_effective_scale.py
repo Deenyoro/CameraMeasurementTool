@@ -28,6 +28,7 @@ def _app(scale_factor=None, active_alignment=None):
         proj = mf.ProjectState(active_floor="F1", floors=[floor])
     app = types.SimpleNamespace(scale_factor=scale_factor, _project=proj)
     app._current_alignment = lambda: cwt.CameraWireTool._current_alignment(app)
+    app._alignment_scale = lambda: cwt.CameraWireTool._alignment_scale(app)
     return app
 
 
@@ -64,6 +65,7 @@ def test_handles_non_dict_alignment():
     proj = mf.ProjectState(active_floor="F1", floors=[floor])
     app = types.SimpleNamespace(scale_factor=0.5, _project=proj)
     app._current_alignment = lambda: cwt.CameraWireTool._current_alignment(app)
+    app._alignment_scale = lambda: cwt.CameraWireTool._alignment_scale(app)
     eff = cwt.CameraWireTool._effective_scale_factor(app)
     assert abs(eff - 0.5) < 1e-9
 

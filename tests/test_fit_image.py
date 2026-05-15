@@ -44,6 +44,8 @@ def _app(img_w=1000, img_h=800, alignment=None,
         app._project = None
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     return app
 
 

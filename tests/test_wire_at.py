@@ -14,9 +14,16 @@ import camera_wire_tool as cwt
 
 
 def _stub(routes):
-    app = types.SimpleNamespace(wire_routes=routes, zoom=1.0)
+    app = types.SimpleNamespace(wire_routes=routes, zoom=1.0,
+                                  _project=None)
     app._point_to_segment_dist = staticmethod(
         cwt.CameraWireTool._point_to_segment_dist)
+    # Bind alignment helpers — _wire_at calls _alignment_scale to compute
+    # its threshold. Default fallback is identity (no _project).
+    app._current_alignment = lambda: (
+        cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     return app
 
 
@@ -81,6 +88,8 @@ def test_threshold_shrinks_with_higher_alignment_scale(monkeypatch):
     app._project = mf.ProjectState(active_floor="F1", floors=[floor])
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     # 4 raw px ≈ 8 canvas px away from the wire — at zoom 1, alignment 2,
     # the threshold is max(4, 6/(1*2)) = 4 raw px. So a click 4 raw px
     # away should be on the edge (or just inside) and hit, but 6 raw px
@@ -104,6 +113,8 @@ def test_threshold_grows_with_lower_alignment_scale():
     app._project = mf.ProjectState(active_floor="F1", floors=[floor])
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     # At zoom 1, alignment 0.5, threshold = max(4, 6/(0.5)) = 12 raw px.
     # A click 10 raw px from the wire should hit; 14 should miss.
     assert cwt.CameraWireTool._wire_at(app, 50, 10) == 0

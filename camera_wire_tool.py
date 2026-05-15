@@ -2275,11 +2275,7 @@ class CameraWireTool:
         pts = route.get("points")
         if not isinstance(pts, list) or len(pts) < 2:
             return None
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        eff_z = max(self.zoom * a_scale, 0.01)
+        eff_z = max(self.zoom * self._alignment_scale(), 0.01)
         end_thresh = max(8.0, 16.0 / eff_z)
         mid_thresh = max(6.0, 12.0 / eff_z)
         last = len(pts) - 1
@@ -3553,11 +3549,7 @@ class CameraWireTool:
         waypoint: skips snapping to the route's own neighbouring points
         (which would 'lock' the dragged point onto its current adjacents).
         Same alignment-aware threshold as the non-drag variant."""
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        thresh = max(8.0, 14.0 / max(self.zoom * a_scale, 0.01))
+        thresh = max(8.0, 14.0 / max(self.zoom * self._alignment_scale(), 0.01))
         best = None; best_d = float("inf"); best_kind = None
         # Device centers
         for d in self.devices:
@@ -3610,11 +3602,7 @@ class CameraWireTool:
         alignment.scale > 1 and grows when < 1. Divide through to keep the
         canvas-pixel feel constant across floors.
         """
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        eff_z = max(self.zoom * a_scale, 0.01)
+        eff_z = max(self.zoom * self._alignment_scale(), 0.01)
         thresh = max(8.0, 14.0 / eff_z)
         best = None; best_d = float("inf"); best_kind = None
 
@@ -4958,12 +4946,8 @@ class CameraWireTool:
             # = raw_px * zoom * alignment.scale, but eff already folds
             # alignment in via inches→raw, so multiply by alignment to
             # recover the canvas-px feel).
-            try:
-                a_scale = float(
-                    self._current_alignment().get("scale", 1.0) or 1.0)
-            except (AttributeError, TypeError, ValueError):
-                a_scale = 1.0
-            draw_minor = (small_px * self.zoom * a_scale) >= 20
+            draw_minor = (small_px * self.zoom
+                          * self._alignment_scale()) >= 20
         else:
             step_px = 200; small_px = 50
             draw_minor = self.zoom > 0.4
@@ -5696,11 +5680,7 @@ class CameraWireTool:
         # Interior points: 12-canvas-px radius (drawn as 10px circles).
         # Divide by zoom × alignment.scale so the felt-grab radius stays
         # constant in CANVAS pixels across aligned floors.
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        eff_z = max(self.zoom * a_scale, 0.01)
+        eff_z = max(self.zoom * self._alignment_scale(), 0.01)
         end_thresh = max(8.0, 16.0 / eff_z)
         mid_thresh = max(6.0, 12.0 / eff_z)
         last = len(pts) - 1
@@ -5733,11 +5713,7 @@ class CameraWireTool:
         except (AttributeError, tk.TclError):
             pass
         # Alignment-aware threshold — see _waypoint_at for the rationale.
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        thresh = max(4.0, 6.0 / max(self.zoom * a_scale, 0.01))
+        thresh = max(4.0, 6.0 / max(self.zoom * self._alignment_scale(), 0.01))
         best_idx = None
         best_dist = float("inf")
         for idx, route in enumerate(self.wire_routes):
@@ -5949,11 +5925,7 @@ class CameraWireTool:
             # 1.5x-aligned floor stored a value 1.5x too big and every
             # other floor's wire lengths read 1.5x too long.
             raw_scale = total_in / px_dist
-            try:
-                a_scale = float(
-                    self._current_alignment().get("scale", 1.0) or 1.0)
-            except (AttributeError, TypeError, ValueError):
-                a_scale = 1.0
+            a_scale = self._alignment_scale()
             new_scale = raw_scale / a_scale if a_scale else raw_scale
             # Skip the round-trip if the user happened to recalibrate to
             # the same scale (rare but possible — and it's wasted history).
@@ -6021,6 +5993,15 @@ class CameraWireTool:
     def _calc_wire_length(self, points) -> float:
         return sum(math.dist(points[i], points[i+1]) for i in range(len(points) - 1))
 
+    def _alignment_scale(self) -> float:
+        """The current floor's alignment.scale, safely coerced.
+        Centralised so every call site doesn't have to repeat the
+        try/except + .get(...) + 'or 1.0' incantation."""
+        try:
+            return float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            return 1.0
+
     def _effective_scale_factor(self) -> float | None:
         """Convert raw image pixels on the ACTIVE floor to inches.
 
@@ -6036,11 +6017,7 @@ class CameraWireTool:
         calibrated yet."""
         if not self.scale_factor:
             return None
-        try:
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
-        except (AttributeError, TypeError, ValueError):
-            a_scale = 1.0
-        return self.scale_factor * a_scale
+        return self.scale_factor * self._alignment_scale()
 
     def _recalc_all_wires(self) -> None:
         eff = self._effective_scale_factor()
@@ -6230,13 +6207,8 @@ class CameraWireTool:
                         # user clicked the wire-line intentionally and
                         # we know the wire is the target, so be generous.
                         # Alignment-aware: scale by zoom × alignment.scale.
-                        try:
-                            a_scale = float(self._current_alignment().get(
-                                "scale", 1.0) or 1.0)
-                        except (AttributeError, TypeError, ValueError):
-                            a_scale = 1.0
-                        thresh = max(10.0,
-                                     14.0 / max(self.zoom * a_scale, 0.01))
+                        thresh = max(10.0, 14.0 / max(
+                            self.zoom * self._alignment_scale(), 0.01))
                         best_i = None; best_d = float("inf")
                         for i in range(len(pts)):
                             try:
@@ -8823,9 +8795,9 @@ class CameraWireTool:
             # Font size also tracks alignment scale so annotations stay
             # proportional to the bg / devices on aligned floors. Min
             # clamped at 8px so the text remains readable when zoomed out.
-            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
             fs = max(8, int(ann.get("font_size", 16)
-                             * self.zoom * self.dx_scale * a_scale))
+                             * self.zoom * self.dx_scale
+                             * self._alignment_scale()))
             color = ann.get("color", "#FFD060") or "#FFD060"
             t_id = self.canvas.create_text(
                 cx, cy, text=text, fill=color,

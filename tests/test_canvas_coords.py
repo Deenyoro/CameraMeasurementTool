@@ -28,6 +28,8 @@ def _app(alignment=None, zoom=1.0, offset_x=0.0, offset_y=0.0):
                                   offset_x=offset_x, offset_y=offset_y)
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     return app
 
 
@@ -111,6 +113,8 @@ def test_corrupted_alignment_falls_back_to_identity():
                                   offset_x=0, offset_y=0)
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     cx, cy = _img_to_canvas(app, 50, 50)
     assert abs(cx - 50) < 1e-9
     assert abs(cy - 50) < 1e-9

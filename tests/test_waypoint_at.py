@@ -33,6 +33,8 @@ def _stub(route, zoom=1.0, alignment=None, wires_visible=True):
         app._project = None
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     return app
 
 
@@ -88,6 +90,8 @@ def test_returns_none_when_no_wire_selected():
     app._project = None
     app._current_alignment = lambda: (
         cwt.CameraWireTool._current_alignment(app))
+    app._alignment_scale = lambda: (
+        cwt.CameraWireTool._alignment_scale(app))
     assert cwt.CameraWireTool._waypoint_at(app, 50, 50) is None
 
 
