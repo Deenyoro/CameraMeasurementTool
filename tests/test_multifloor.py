@@ -426,3 +426,46 @@ def test_save_project_round_trip(tmp_path):
     assert data["project_name"] == "Test"
     assert data["scale_factor"] == 0.6
     assert data["next_device_id"] == 42
+
+
+def test_save_project_tolerates_corrupted_alignment(tmp_path):
+    """A non-dict alignment (None, string, int) shouldn't crash the
+    save — coerce to identity instead. Save survives so the user
+    doesn't lose wires + devices because of a corrupted alignment field
+    they didn't even know about."""
+    f1 = mf.FloorState(id="F1", name="Ground", elevation_ft=0.0,
+                        drawio_file="F1.drawio")
+    f1.alignment = "garbage"   # corrupted
+    proj = mf.ProjectState(floors=[f1])
+    target = tmp_path / "corrupt_align.wiremap.json"
+    mf.save_project(proj, str(target))   # must not raise
+    assert target.exists()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["floors"][0]["alignment"] == dict(mf.IDENTITY_ALIGNMENT)
+
+
+def test_save_project_tolerates_corrupted_anchor_points(tmp_path):
+    """Hand-edited project file with a stray non-pair in anchor_points
+    shouldn't crash the save. The bad point gets dropped; valid ones
+    survive."""
+    f1 = mf.FloorState(id="F1", name="Ground", elevation_ft=0.0,
+                        drawio_file="F1.drawio")
+    f1.anchor_points = [[10, 20], "junk", [None, None], [30, 40]]
+    proj = mf.ProjectState(floors=[f1])
+    target = tmp_path / "bad_anchors.wiremap.json"
+    mf.save_project(proj, str(target))
+    data = json.loads(target.read_text(encoding="utf-8"))
+    # Two well-formed pairs survive.
+    assert data["floors"][0]["anchor_points"] == [[10.0, 20.0], [30.0, 40.0]]
+
+
+def test_save_project_tolerates_non_list_anchor_points(tmp_path):
+    """A non-list anchor_points (e.g. None) should become empty list."""
+    f1 = mf.FloorState(id="F1", name="Ground", elevation_ft=0.0,
+                        drawio_file="F1.drawio")
+    f1.anchor_points = None
+    proj = mf.ProjectState(floors=[f1])
+    target = tmp_path / "null_anchors.wiremap.json"
+    mf.save_project(proj, str(target))
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["floors"][0]["anchor_points"] == []

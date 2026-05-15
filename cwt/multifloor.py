@@ -362,6 +362,26 @@ def _serialize_wire(wr: dict) -> dict | None:
 
 def save_project(project: ProjectState, project_path: str) -> None:
     """Write a v2 project file."""
+    def _safe_alignment(al):
+        """A corrupted floor.alignment (None / string / int) would crash
+        dict(al) on save. Coerce to identity to keep the save going —
+        the user's wires + devices are more important than preserving
+        a junk alignment value."""
+        if isinstance(al, dict):
+            return dict(al)
+        return dict(IDENTITY_ALIGNMENT)
+    def _safe_anchors(pts):
+        """Same defensive shape for anchor_points — a non-list or
+        non-iterable entry shouldn't take the save down."""
+        if not isinstance(pts, list):
+            return []
+        out = []
+        for p in pts:
+            try:
+                out.append([float(p[0]), float(p[1])])
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out
     data = {
         "version": 2,
         "project_name": project.project_name,
@@ -372,8 +392,8 @@ def save_project(project: ProjectState, project_path: str) -> None:
                 "name": f.name,
                 "elevation_ft": f.elevation_ft,
                 "drawio_file": f.drawio_file,
-                "alignment": dict(f.alignment),
-                "anchor_points": [list(p) for p in f.anchor_points],
+                "alignment": _safe_alignment(f.alignment),
+                "anchor_points": _safe_anchors(f.anchor_points),
             }
             for f in project.floors
         ],
