@@ -4853,12 +4853,21 @@ class CameraWireTool:
     def _draw_grid_overlay(self) -> None:
         """Faint orthogonal grid for visual alignment when placing or
         moving devices. Spacing is calibrated to the real-world unit so
-        every line represents a clean foot/inch (or meter) interval."""
+        every line represents a clean foot/inch (or meter) interval.
+
+        Alignment-aware: grid math operates on the current floor's RAW
+        image pixels (since the loop iterates ix in raw space, via
+        _canvas_to_img). The project's scale_factor is in
+        inches/REF-pixel — for aligned floors we divide by
+        alignment.scale to land in inches/RAW-pixel before computing
+        the step in raw pixels. Otherwise the '5 ft' major grid spacing
+        is wrong by alignment.scale on aligned floors."""
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
         # Choose a real-world spacing that yields ~30-90 canvas-pixels
         # apart. If no scale set, fall back to image-pixel grid at 50px.
-        if self.scale_factor:
+        eff = self._effective_scale_factor()
+        if eff:
             unit = self.unit_var.get()
             if unit in ("meters", "cm", "m-cm"):
                 step_in = self._IN_PER_M  # 1 m
@@ -4868,10 +4877,18 @@ class CameraWireTool:
                 step_in = 12 * 5   # 5 ft
                 small_in = 12      # 1 ft
                 label = "5'"
-            step_px = step_in / self.scale_factor      # image-pixels per major
-            small_px = small_in / self.scale_factor
-            # If too dense, drop the minor grid
-            draw_minor = (small_px * self.zoom) >= 20
+            step_px = step_in / eff       # raw image-pixels per major
+            small_px = small_in / eff
+            # If too dense, drop the minor grid (canvas-pixel spacing
+            # = raw_px * zoom * alignment.scale, but eff already folds
+            # alignment in via inches→raw, so multiply by alignment to
+            # recover the canvas-px feel).
+            try:
+                a_scale = float(
+                    self._current_alignment().get("scale", 1.0) or 1.0)
+            except (AttributeError, TypeError, ValueError):
+                a_scale = 1.0
+            draw_minor = (small_px * self.zoom * a_scale) >= 20
         else:
             step_px = 200; small_px = 50
             draw_minor = self.zoom > 0.4
@@ -6339,13 +6356,16 @@ class CameraWireTool:
             new_iy = iy - self.drag_offset[1]
             new_dx, new_dy = self._img_to_drawio(new_ix, new_iy)
             # Snap to alignment grid (when shown). Snap on the device's
-            # CENTER, not its top-left, so drops feel correct.
-            if self._show_grid.get() and self.scale_factor:
-                # Same step as _draw_grid_overlay: 5 ft / 1 m major grid
+            # CENTER, not its top-left, so drops feel correct. Use the
+            # effective scale (project × current floor alignment.scale)
+            # so the grid step matches what _draw_grid_overlay actually
+            # paints on this floor.
+            eff_grid = self._effective_scale_factor()
+            if self._show_grid.get() and eff_grid:
                 unit = self.unit_var.get()
                 step_in = (self._IN_PER_M if unit in ("meters", "cm", "m-cm")
                            else 12 * 5)   # 1 m or 5 ft
-                step_px = step_in / self.scale_factor      # image pixels per step
+                step_px = step_in / eff_grid     # raw image pixels per step
                 step_d = step_px / self.dx_scale            # drawio units per step
                 w_d = self.dragging_device["w"]
                 h_d = self.dragging_device["h"]
