@@ -11354,6 +11354,12 @@ class CameraWireTool:
         except OSError as e:
             log_error("Save after clear-alignment failed", e)
         self._fit_image()
+        # alignment.scale just dropped back to 1.0 → wire lengths need
+        # recomputing so the BOM / wire-list reflect the new effective
+        # scale immediately rather than after the next mutation.
+        self._recalc_all_wires()
+        self._refresh_wire_list()
+        self._refresh_bom_tab()
         self._redraw()
         self._flash_status(
             f"{active.id} alignment cleared.", ttl_ms=3000)
@@ -12115,8 +12121,16 @@ class CameraWireTool:
             # alignment takes effect immediately even without a floor
             # switch. _fit_image now accounts for alignment so the
             # aligned floor lands centered + sized to the viewport.
+            # If the target is currently active, alignment.scale just
+            # changed — recompute length_in across wires + refresh the
+            # BOM / wire list so the displayed totals match the new
+            # effective scale (otherwise the user'd see stale numbers
+            # until the next interaction).
             if target.id == self._project.active_floor:
                 self._fit_image()
+                self._recalc_all_wires()
+                self._refresh_wire_list()
+                self._refresh_bom_tab()
             self._redraw()
             # If the project has a calibrated scale, the aligned floor
             # automatically shares it — pixels are in the reference's
