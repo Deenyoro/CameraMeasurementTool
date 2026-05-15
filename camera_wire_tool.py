@@ -12248,16 +12248,27 @@ class CameraWireTool:
         dlg.title(f"Align floor {active.id} to reference")
         dlg.geometry("520x320")
 
+        # Anchor flow always aligns the ACTIVE floor onto a reference.
+        # Make the direction explicit so users don't get the same
+        # 'wrong target' confusion they had with the drag-align dialog.
         ttk.Label(dlg, text=
-            f"Pick a reference floor and click 2 anchor points (e.g. NW and NE\n"
-            f"corners of the building) on each. The transform that maps this floor's\n"
-            f"anchors to the reference's anchors becomes its alignment.",
-            justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=8)
+            f"This will TRANSFORM {active.id} ({active.name}) onto another "
+            f"floor's frame.\n"
+            f"(If you actually want a different floor transformed, "
+            f"switch to it first, then re-open this dialog.)\n\n"
+            f"Pick a reference floor and click 2 anchor points (e.g. NW "
+            f"and NE corners) on each. The transform that maps "
+            f"{active.id}'s anchors to the reference's becomes "
+            f"{active.id}'s alignment.",
+            justify=tk.LEFT, foreground="#d0d0d0").pack(
+                anchor=tk.W, padx=10, pady=8)
 
         ref_var = tk.StringVar(value=self._project.floors[0].id
                                if self._project.floors[0].id != active.id
                                else self._project.floors[1].id)
-        ttk.Label(dlg, text="Reference floor:").pack(anchor=tk.W, padx=10)
+        ttk.Label(dlg,
+                  text="Reference floor (stays fixed):").pack(
+                      anchor=tk.W, padx=10)
         ttk.Combobox(dlg, textvariable=ref_var,
                      values=[f.id for f in self._project.floors if f.id != active.id],
                      state="readonly", width=20).pack(anchor=tk.W, padx=10, pady=2)
