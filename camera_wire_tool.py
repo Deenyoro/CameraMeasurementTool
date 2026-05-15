@@ -5221,8 +5221,17 @@ class CameraWireTool:
             ys = [p[1] for p in pts]
             canvas_w = self.canvas.winfo_width() or 800
             canvas_h = self.canvas.winfo_height() or 600
-            cx0, cy0 = self._img_to_canvas(min(xs), min(ys))
-            cx1, cy1 = self._img_to_canvas(max(xs), max(ys))
+            # Transform all 4 corners — when alignment has rotation, the
+            # raw bbox doesn't map to an axis-aligned canvas bbox, and
+            # using just two corners could mistakenly cull rotated wires
+            # that are still partly visible.
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+            corners = [self._img_to_canvas(x0, y0),
+                        self._img_to_canvas(x1, y0),
+                        self._img_to_canvas(x0, y1),
+                        self._img_to_canvas(x1, y1)]
+            cx0 = min(c[0] for c in corners); cy0 = min(c[1] for c in corners)
+            cx1 = max(c[0] for c in corners); cy1 = max(c[1] for c in corners)
             margin = 30
             if (cx1 < -margin or cy1 < -margin
                     or cx0 > canvas_w + margin or cy0 > canvas_h + margin):
@@ -12503,10 +12512,20 @@ class CameraWireTool:
         # Viewport culling — skip cones whose camera is far outside the
         # visible canvas region. Cones extend FROM the camera, so we still
         # render any camera that could project a cone into the view.
+        # When alignment has rotation, the inverse-transformed canvas
+        # corners aren't necessarily axis-aligned in raw image space —
+        # walk all four corners and take min/max so we don't accidentally
+        # cull visible cameras because ix1 < ix0 after rotation.
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        ix0, iy0 = self._canvas_to_img(0, 0)
-        ix1, iy1 = self._canvas_to_img(cw, ch)
+        corners_raw = [self._canvas_to_img(0, 0),
+                        self._canvas_to_img(cw, 0),
+                        self._canvas_to_img(0, ch),
+                        self._canvas_to_img(cw, ch)]
+        ix0 = min(c[0] for c in corners_raw)
+        iy0 = min(c[1] for c in corners_raw)
+        ix1 = max(c[0] for c in corners_raw)
+        iy1 = max(c[1] for c in corners_raw)
         slack = max((ix1 - ix0), (iy1 - iy0))
         for d in self.devices:
             if not self._is_camera_type(d["type"]):
