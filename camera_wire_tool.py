@@ -5115,9 +5115,15 @@ class CameraWireTool:
             info = self._safe_sym(dtype)
         ix, iy = self._drawio_to_img(dx_, dy_)
         iw, ih = dw_ * self.dx_scale, dh_ * self.dy_scale
+        # Two-corner convert so the device's on-canvas WIDTH tracks
+        # alignment too — without this the icon sat at the right
+        # position but rendered un-scaled (small on a 2x-aligned floor,
+        # giant on a 0.5x-aligned one), and its 'r' radius for circular
+        # shapes drove FOV / shape rendering to the wrong size.
         cx, cy = self._img_to_canvas(ix, iy)
-        cw = iw * self.zoom
-        ch = ih * self.zoom
+        cx2, cy2 = self._img_to_canvas(ix + iw, iy + ih)
+        cw = cx2 - cx
+        ch = cy2 - cy
         # Viewport culling — skip devices entirely off-screen. Big perf win
         # at high zoom on plans with hundreds of devices.
         canvas_w = self.canvas.winfo_width() or 800
@@ -5146,13 +5152,12 @@ class CameraWireTool:
         tag = f'dev_{did}'
 
         if is_wire_owner:
-            # Subtle blue halo around the wire's source device
-            cx_outer, cy_outer = self._img_to_canvas(ix, iy)
-            iw_outer = dw_ * self.dx_scale * self.zoom
-            ih_outer = dh_ * self.dy_scale * self.zoom
-            cxc = cx_outer + iw_outer / 2
-            cyc = cy_outer + ih_outer / 2
-            ro = max(iw_outer, ih_outer) * 0.85
+            # Subtle blue halo around the wire's source device. Use the
+            # already-computed cw/ch (alignment-aware) so the halo
+            # matches the device size on any aligned floor.
+            cxc = cx + cw / 2
+            cyc = cy + ch / 2
+            ro = max(cw, ch) * 0.85
             self.canvas.create_oval(
                 cxc - ro, cyc - ro, cxc + ro, cyc + ro,
                 outline="#7FCDFF", width=2, dash=(3, 3),
