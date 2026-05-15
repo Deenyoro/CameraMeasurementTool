@@ -11163,8 +11163,15 @@ class CameraWireTool:
         self._flash_status(
             f"Switched to {floor_id} — {target.name}.{hint}",
             ttl_ms=6000)
-
-    def _clear_active_floor_alignment(self) -> None:
+        # Anchor-pick continuation: if the user was mid-anchor-pick on
+        # a different floor (via the legacy 'Align by anchor points'
+        # flow) and that flow triggered THIS switch to collect anchors
+        # on the new floor, re-arm picking now. With the old
+        # destroy-and-recreate switch this happened automatically in
+        # __init__; with the in-place switch we have to call it
+        # explicitly because __init__ doesn't re-run. No-op when no
+        # pending pick is set on the class.
+        self._resume_pending_anchor_pick()
         """Reset the active floor's alignment to identity. Quick escape
         hatch when the user applied a bad transform and just wants the
         floor back to normal. Refits the view immediately."""
