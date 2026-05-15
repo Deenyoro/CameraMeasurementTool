@@ -6312,7 +6312,19 @@ class CameraWireTool:
                 return
             # Angle in our coords: 0° = up (-y), increasing clockwise
             angle_rad = math.atan2(dx, -dy)
-            az = (math.degrees(angle_rad) + 360) % 360
+            canvas_az = (math.degrees(angle_rad) + 360) % 360
+            # If the current floor has alignment.rotation_deg != 0, the
+            # cone gets visually rotated by that when rendered. The user
+            # is dragging in CANVAS space, but cone.azimuth_deg is stored
+            # in the floor's RAW image space — subtract the alignment
+            # rotation so the cone ends up pointing where the cursor
+            # actually is on screen, not 30° (or whatever) off.
+            try:
+                a_rot = float(self._current_alignment().get(
+                    "rotation_deg", 0.0) or 0.0)
+            except (AttributeError, TypeError, ValueError):
+                a_rot = 0.0
+            az = (canvas_az - a_rot + 360) % 360
             # Snap to 5° increments unless Shift held (free)
             if not (event.state & 0x0001):
                 az = round(az / 5) * 5
