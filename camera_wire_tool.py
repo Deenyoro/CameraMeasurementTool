@@ -6642,10 +6642,18 @@ class CameraWireTool:
                     {d["id"]: d for d in self.devices},
                     self.symbol_types, self.cable_types)
                 cable = effective + ("" if explicit else " (auto)")
-                length = (self._format_length(wire_under.get("length_in") or 0)
-                          if wire_under.get("length_in") is not None
-                          else f"{wire_under['length_px']:.0f}px")
-                segs = len(wire_under["points"]) - 1
+                # length_px / points may be missing on a transient
+                # malformed in-memory route — coerce defensively.
+                if wire_under.get("length_in") is not None:
+                    length = self._format_length(wire_under.get("length_in") or 0)
+                else:
+                    try:
+                        length = f"{float(wire_under.get('length_px') or 0):.0f}px"
+                    except (TypeError, ValueError):
+                        length = "--"
+                pts = wire_under.get("points")
+                segs = (len(pts) - 1
+                        if isinstance(pts, list) and pts else 0)
                 lines = [f"  Wire → {did}  ",
                          f"  {length}, {segs} segments  ",
                          f"  Cable: {cable}  "]
