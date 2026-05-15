@@ -6811,20 +6811,47 @@ class CameraWireTool:
 
     def _clamp_pan(self) -> None:
         """Stop the user from panning the floor plan entirely off-screen.
-        At least ~10% of the canvas dimension must still show map area."""
+        At least ~10% of the canvas dimension must still show map area.
+
+        Alignment-aware: an aligned floor occupies a different on-canvas
+        rectangle than its raw img_w × img_h. Without the alignment fold-in
+        the user could pan a 1.5x-scaled floor off the right side even
+        though half the image was still rendered there, because the clamp
+        was operating on the smaller raw bounds."""
         cw = self.canvas.winfo_width() or 800
         ch = self.canvas.winfo_height() or 600
-        img_pw = self.img_w * self.zoom    # rendered width in canvas pixels
-        img_ph = self.img_h * self.zoom
+        # Compute the aligned bounding box of the bg image in 'aligned
+        # image' space (which is what offset_x/y + zoom transform from).
+        align = self._current_alignment() if hasattr(self, "_project") else None
+        if isinstance(align, dict):
+            corners = [
+                mf_mod.apply_alignment((0.0, 0.0), align),
+                mf_mod.apply_alignment((self.img_w, 0.0), align),
+                mf_mod.apply_alignment((0.0, self.img_h), align),
+                mf_mod.apply_alignment((self.img_w, self.img_h), align),
+            ]
+            ax0 = min(c[0] for c in corners)
+            ay0 = min(c[1] for c in corners)
+            ax1 = max(c[0] for c in corners)
+            ay1 = max(c[1] for c in corners)
+        else:
+            ax0 = ay0 = 0.0
+            ax1, ay1 = float(self.img_w), float(self.img_h)
+        # The aligned bbox's top-left lands at offset_x + ax0*zoom on canvas,
+        # bottom-right at offset_x + ax1*zoom. Keep at least margin_x of
+        # the image visible.
+        img_pw = (ax1 - ax0) * self.zoom
+        img_ph = (ay1 - ay0) * self.zoom
         margin_x = 0.10 * cw
         margin_y = 0.10 * ch
-        # offset_x is the canvas-x where the image's (0,0) lands.
-        # We want:  margin_x  ≤  offset_x + img_pw   (right edge ≥ margin_x)
-        # And:      offset_x  ≤  cw - margin_x       (left edge ≤ canvas - margin)
-        self.offset_x = max(margin_x - img_pw,
-                             min(cw - margin_x, self.offset_x))
-        self.offset_y = max(margin_y - img_ph,
-                             min(ch - margin_y, self.offset_y))
+        # right edge = offset_x + ax1*zoom ≥ margin_x  ⇒  offset_x ≥ margin_x - ax1*zoom
+        # left edge  = offset_x + ax0*zoom ≤ cw - margin_x ⇒ offset_x ≤ cw - margin_x - ax0*zoom
+        self.offset_x = max(margin_x - ax1 * self.zoom,
+                             min(cw - margin_x - ax0 * self.zoom,
+                                 self.offset_x))
+        self.offset_y = max(margin_y - ay1 * self.zoom,
+                             min(ch - margin_y - ay0 * self.zoom,
+                                 self.offset_y))
 
     # ------------------------------------------------------------ Ctrl+click multi-select
     def _on_ctrl_press(self, event):
