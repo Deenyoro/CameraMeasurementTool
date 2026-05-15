@@ -2205,8 +2205,13 @@ class CameraWireTool:
         pts = route.get("points")
         if not isinstance(pts, list) or len(pts) < 2:
             return None
-        end_thresh = max(8.0, 16.0 / max(self.zoom, 0.01))
-        mid_thresh = max(6.0, 12.0 / max(self.zoom, 0.01))
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        eff_z = max(self.zoom * a_scale, 0.01)
+        end_thresh = max(8.0, 16.0 / eff_z)
+        mid_thresh = max(6.0, 12.0 / eff_z)
         last = len(pts) - 1
         best_i = None; best_d = float("inf")
         for i in range(len(pts)):
@@ -5590,8 +5595,15 @@ class CameraWireTool:
         # Endpoints: 16-canvas-px radius (the handle itself is 14px wide,
         # so this is a small forgiveness zone around the visible square).
         # Interior points: 12-canvas-px radius (drawn as 10px circles).
-        end_thresh = max(8.0, 16.0 / max(self.zoom, 0.01))
-        mid_thresh = max(6.0, 12.0 / max(self.zoom, 0.01))
+        # Divide by zoom × alignment.scale so the felt-grab radius stays
+        # constant in CANVAS pixels across aligned floors.
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        eff_z = max(self.zoom * a_scale, 0.01)
+        end_thresh = max(8.0, 16.0 / eff_z)
+        mid_thresh = max(6.0, 12.0 / eff_z)
         last = len(pts) - 1
         best_i = None; best_d = float("inf")
         for i in range(len(pts)):
@@ -5621,7 +5633,12 @@ class CameraWireTool:
                 return None
         except (AttributeError, tk.TclError):
             pass
-        thresh = max(4.0, 6.0 / max(self.zoom, 0.01))
+        # Alignment-aware threshold — see _waypoint_at for the rationale.
+        try:
+            a_scale = float(self._current_alignment().get("scale", 1.0) or 1.0)
+        except (AttributeError, TypeError, ValueError):
+            a_scale = 1.0
+        thresh = max(4.0, 6.0 / max(self.zoom * a_scale, 0.01))
         best_idx = None
         best_dist = float("inf")
         for idx, route in enumerate(self.wire_routes):
@@ -6098,7 +6115,14 @@ class CameraWireTool:
                         # Wider grab radius here than _waypoint_at — the
                         # user clicked the wire-line intentionally and
                         # we know the wire is the target, so be generous.
-                        thresh = max(10.0, 14.0 / max(self.zoom, 0.01))
+                        # Alignment-aware: scale by zoom × alignment.scale.
+                        try:
+                            a_scale = float(self._current_alignment().get(
+                                "scale", 1.0) or 1.0)
+                        except (AttributeError, TypeError, ValueError):
+                            a_scale = 1.0
+                        thresh = max(10.0,
+                                     14.0 / max(self.zoom * a_scale, 0.01))
                         best_i = None; best_d = float("inf")
                         for i in range(len(pts)):
                             try:
