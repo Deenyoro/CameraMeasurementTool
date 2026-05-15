@@ -11386,6 +11386,11 @@ class CameraWireTool:
             if t == r:
                 return
             target_var.set(r); ref_var.set(t)
+            # StringVar.set doesn't fire <<ComboboxSelected>>, so the
+            # canvas would stay rendering the pre-swap pair until the
+            # user touched a different control. Trigger the pair-change
+            # handler manually so swap takes effect immediately.
+            _on_pair_change()
         ttk.Button(top, text="⇄  Swap",
                    command=swap_target_ref).pack(side=tk.LEFT, padx=10)
 
