@@ -6405,6 +6405,10 @@ class CameraWireTool:
             else:
                 self.dragging_device["x"] = new_dx
                 self.dragging_device["y"] = new_dy
+            # Auto-pan when the drag is near the canvas edge — parity
+            # with waypoint drag. Lets the user drop a device past the
+            # visible viewport without releasing the mouse to pan first.
+            self._maybe_autopan(event)
             self._schedule_redraw()
 
     def _on_left_release(self, event) -> None:
