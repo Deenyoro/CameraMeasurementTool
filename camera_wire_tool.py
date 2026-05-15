@@ -1468,6 +1468,68 @@ class CameraWireTool:
         # mid-round floor switch (which destroys+recreates the tool).
         self._resume_pending_anchor_pick()
 
+        # One-shot startup nudge if the active floor has a drastic
+        # alignment that the user might not realize is causing
+        # 'symbols off the page' / 'ultra small bg'. Deferred so it
+        # appears AFTER the first render, when the user has visual
+        # context for the warning.
+        self.root.after(800, self._maybe_warn_drastic_alignment)
+
+    def _maybe_warn_drastic_alignment(self) -> None:
+        """Surface a one-time prompt at startup if the active floor's
+        alignment looks unusual enough to be an accidental wrong-target
+        apply. Triggered by scale outside [0.6, 1.7] or rotation > 20°.
+        Offers the one-click Clear path so the user doesn't have to
+        hunt through the Floors menu."""
+        if self._project is None:
+            return
+        active = self._project.get_floor(self._project.active_floor)
+        if active is None:
+            return
+        al = active.alignment if isinstance(active.alignment, dict) else {}
+        try:
+            s = float(al.get("scale", 1.0) or 1.0)
+            r = float(al.get("rotation_deg", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        if 0.6 <= s <= 1.7 and abs(r) <= 20:
+            return   # within normal range, no warning
+        try:
+            tx = float(al.get("tx", 0) or 0); ty = float(al.get("ty", 0) or 0)
+        except (TypeError, ValueError):
+            tx = ty = 0
+        ans = messagebox.askyesnocancel(
+            "Unusual alignment detected",
+            f"Floor {active.id} ({active.name}) loaded with a non-identity\n"
+            f"alignment:\n"
+            f"  scale: {s:.3f}x\n"
+            f"  rotation: {r:+.1f}°\n"
+            f"  offset: ({tx:+.0f}, {ty:+.0f}) px\n\n"
+            f"This is what causes the 'symbols off the page / shrunken\n"
+            f"floor plan' look. If you meant to align THIS floor onto\n"
+            f"another floor's frame, keep it as is.\n\n"
+            f"YES — reset {active.id} to identity (recommended if {active.id}\n"
+            f"        is your reference / main floor)\n"
+            f"NO  — keep the current alignment\n"
+            f"Cancel — don't ask again this session")
+        if ans is True:
+            active.alignment = dict(mf_mod.IDENTITY_ALIGNMENT)
+            self._mark_dirty()
+            try:
+                mf_mod.save_project(self._project, self.project_path)
+            except OSError as e:
+                log_error("Save after warn-drastic-clear failed", e)
+            self._fit_image()
+            self._recalc_all_wires()
+            self._refresh_wire_list()
+            self._refresh_bom_tab()
+            if hasattr(self, "scale_label"):
+                self.scale_label.config(text=self._scale_label_text())
+            self._redraw()
+            self._flash_status(
+                f"{active.id} alignment cleared. The floor now renders at "
+                f"its natural size.", ttl_ms=4500)
+
     def _resume_pending_anchor_pick(self) -> None:
         """If a previous tool instance was switching floors mid-anchor-
         pick, the class-level pending id was set. Re-arm picking on the
