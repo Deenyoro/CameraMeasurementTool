@@ -1262,11 +1262,13 @@ def save_settings(settings: dict) -> None:
 
 # ============================================================ Main app
 class CameraWireTool:
-    # Survives `self.root.destroy()` + new-instance creation in
-    # _switch_floor. When the floor-anchor pick handler initiates the
-    # legitimate intra-round switch, it stashes the alignment target's
-    # floor id here so the new instance's __init__ can re-arm picking
-    # on the now-active reference floor. Cleared once consumed.
+    # The anchor-pick handler stashes the alignment target's floor id
+    # here just before triggering an inter-round floor switch.
+    # _switch_floor's tail (and __init__ as a fallback) consumes it via
+    # _resume_pending_anchor_pick to re-arm picking on the new active
+    # (reference) floor. Class-level so the value also survives the
+    # legacy destroy-and-recreate path that used to back floor switches.
+    # Cleared once consumed.
     _pending_align_target_id: str | None = None
 
     def __init__(self, root: tk.Tk, drawio_path: str):
@@ -5913,11 +5915,11 @@ class CameraWireTool:
                 f"the SAME 2 physical points (in the same order).")
             self._floor_anchors_picking = []
             self._floor_anchor_target = (ref, active)
-            # _switch_floor destroys this tool instance and re-launches —
-            # stash the target floor id on the class so the new instance
-            # can re-arm picking on the reference floor. Without this the
-            # second-round clicks landed in MOVE mode and the alignment
-            # was never completed.
+            # _switch_floor resets transient picking state (in case the
+            # switch was user-initiated and the pick should be cancelled).
+            # Stash the target floor id on the class so _switch_floor's
+            # tail call to _resume_pending_anchor_pick can re-arm picking
+            # on the reference floor.
             if self._floor_align_target is not None:
                 CameraWireTool._pending_align_target_id = (
                     self._floor_align_target.id)
