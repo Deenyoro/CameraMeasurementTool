@@ -5495,11 +5495,18 @@ class CameraWireTool:
     _IN_PER_CM = 1.0 / 2.54
 
     def _scale_label_text(self) -> str:
-        """Render the scale label string in whichever unit is active."""
+        """Render the scale label string in whichever unit is active.
+
+        Uses the EFFECTIVE scale (project × current floor alignment.scale)
+        so the toolbar label tells the user the inches-per-raw-pixel that
+        actually applies to wire-drawing on the active floor — not the
+        project's reference-pixel rate. On identity-aligned floors the
+        two are the same; on aligned floors they differ by alignment.scale.
+        """
         if self.scale_factor is None:
             return "⚠ Scale not set — click to calibrate"
+        sf = self._effective_scale_factor() or self.scale_factor
         unit = self.unit_var.get()
-        sf = self.scale_factor   # inches per pixel
         if unit in ("meters", "cm", "m-cm"):
             cm_per_px = sf / self._IN_PER_CM
             if cm_per_px < 1:
@@ -11293,6 +11300,10 @@ class CameraWireTool:
         self._refresh_device_list()
         self._refresh_wire_list()
         self._refresh_bom_tab()
+        # The toolbar scale label shows the active floor's effective
+        # inches-per-raw-pixel rate, so update it on every floor swap.
+        if hasattr(self, "scale_label"):
+            self.scale_label.config(text=self._scale_label_text())
         # If the new floor has a non-identity alignment, the user has
         # already aligned it onto a shared frame — preserve the current
         # zoom/offset so they keep looking at the same physical
@@ -11368,6 +11379,8 @@ class CameraWireTool:
         self._recalc_all_wires()
         self._refresh_wire_list()
         self._refresh_bom_tab()
+        if hasattr(self, "scale_label"):
+            self.scale_label.config(text=self._scale_label_text())
         self._redraw()
         self._flash_status(
             f"{active.id} alignment cleared.", ttl_ms=3000)
@@ -12139,6 +12152,10 @@ class CameraWireTool:
                 self._recalc_all_wires()
                 self._refresh_wire_list()
                 self._refresh_bom_tab()
+                # effective scale just changed → scale label needs to
+                # display the new inches-per-raw-pixel rate.
+                if hasattr(self, "scale_label"):
+                    self.scale_label.config(text=self._scale_label_text())
             self._redraw()
             # If the project has a calibrated scale, the aligned floor
             # automatically shares it — pixels are in the reference's
