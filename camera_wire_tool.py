@@ -11899,6 +11899,27 @@ class CameraWireTool:
 
         _entry_row(panel, "Scale",  scale_var, "%.4f", 0.05, 20.0,  0.01)
         _entry_row(panel, "Rotate°", rot_var,  "%.2f", -180.0, 180.0, 1.0)
+        # Quick-rotation buttons — common case is 90°/180° offsets
+        # between floors, which is awkward to type into the spinbox.
+        rot_btns = ttk.Frame(panel); rot_btns.pack(fill=tk.X, pady=2)
+        def _bump_rot(delta):
+            try:
+                cur = float(rot_var.get())
+            except (tk.TclError, ValueError):
+                cur = 0.0
+            new = ((cur + delta + 180) % 360) - 180   # keep in [-180, 180]
+            rot_var.set(round(new, 2))
+        for label, delta in (("↺90", -90), ("↺5", -5),
+                              ("0°", "reset"),
+                              ("↻5", 5), ("↻90", 90)):
+            if delta == "reset":
+                ttk.Button(rot_btns, text=label, width=4,
+                           command=lambda: rot_var.set(0.0)
+                           ).pack(side=tk.LEFT, padx=1)
+            else:
+                ttk.Button(rot_btns, text=label, width=4,
+                           command=lambda d=delta: _bump_rot(d)
+                           ).pack(side=tk.LEFT, padx=1)
         _entry_row(panel, "X off",  tx_var,   "%.1f", -10000.0, 10000.0, 1.0)
         _entry_row(panel, "Y off",  ty_var,   "%.1f", -10000.0, 10000.0, 1.0)
 
