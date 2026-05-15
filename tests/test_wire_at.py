@@ -65,3 +65,46 @@ def test_skips_route_with_single_point():
 def test_empty_routes_returns_none():
     app = _stub([])
     assert cwt.CameraWireTool._wire_at(app, 0, 0) is None
+
+
+def test_threshold_shrinks_with_higher_alignment_scale(monkeypatch):
+    """At alignment.scale = 2.0, each raw pixel is 2 canvas pixels wide,
+    so the 6-canvas-px grab radius is only ~3 raw pixels — a click at
+    raw y=5 should miss a horizontal wire at y=0."""
+    from cwt import multifloor as mf
+    routes = [{"points": [(0, 0), (100, 0)]}]
+    app = _stub(routes)
+    floor = mf.FloorState(id="F1", name="F1", elevation_ft=0.0,
+                           drawio_file="F1.drawio",
+                           alignment={"tx": 0, "ty": 0,
+                                       "scale": 2.0, "rotation_deg": 0})
+    app._project = mf.ProjectState(active_floor="F1", floors=[floor])
+    app._current_alignment = lambda: (
+        cwt.CameraWireTool._current_alignment(app))
+    # 4 raw px ≈ 8 canvas px away from the wire — at zoom 1, alignment 2,
+    # the threshold is max(4, 6/(1*2)) = 4 raw px. So a click 4 raw px
+    # away should be on the edge (or just inside) and hit, but 6 raw px
+    # should miss.
+    assert cwt.CameraWireTool._wire_at(app, 50, 6) is None
+    # A direct hit still works.
+    assert cwt.CameraWireTool._wire_at(app, 50, 0) == 0
+
+
+def test_threshold_grows_with_lower_alignment_scale():
+    """At alignment.scale = 0.5, each raw pixel is half a canvas pixel,
+    so the grab radius needs to extend further in raw space to stay at
+    6 canvas pixels."""
+    from cwt import multifloor as mf
+    routes = [{"points": [(0, 0), (100, 0)]}]
+    app = _stub(routes)
+    floor = mf.FloorState(id="F1", name="F1", elevation_ft=0.0,
+                           drawio_file="F1.drawio",
+                           alignment={"tx": 0, "ty": 0,
+                                       "scale": 0.5, "rotation_deg": 0})
+    app._project = mf.ProjectState(active_floor="F1", floors=[floor])
+    app._current_alignment = lambda: (
+        cwt.CameraWireTool._current_alignment(app))
+    # At zoom 1, alignment 0.5, threshold = max(4, 6/(0.5)) = 12 raw px.
+    # A click 10 raw px from the wire should hit; 14 should miss.
+    assert cwt.CameraWireTool._wire_at(app, 50, 10) == 0
+    assert cwt.CameraWireTool._wire_at(app, 50, 14) is None
