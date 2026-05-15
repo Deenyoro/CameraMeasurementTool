@@ -6341,8 +6341,12 @@ class CameraWireTool:
             pts[pidx] = (ix, iy)
             route["points"] = pts
             route["length_px"] = self._calc_wire_length(pts)
-            sf = self.scale_factor
-            route["length_in"] = (route["length_px"] * sf) if sf else None
+            # Use effective scale so length_in stays correct on aligned
+            # floors (raw image pixels × eff = inches in the reference
+            # frame). With plain self.scale_factor, dragging a waypoint
+            # on a 1.5x-aligned floor reported a length 1.5x too small.
+            eff = self._effective_scale_factor()
+            route["length_in"] = (route["length_px"] * eff) if eff is not None else None
 
             # Auto-pan when the drag is near the canvas edge so the user
             # can drag a waypoint anywhere without releasing.
