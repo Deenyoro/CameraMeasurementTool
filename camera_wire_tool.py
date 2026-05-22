@@ -1383,6 +1383,10 @@ class CameraWireTool:
         # Cache of other floors' devices for the cross-floor device list.
         # Keyed by floor id → list of device dicts from parse_drawio.
         self._other_floor_devs: dict[str, list[dict]] = {}
+        # Tracks which device-list groups are collapsed (by group key).
+        # Group keys: "type:<code>" for symbol-type groups,
+        # "floor:<id>" for other-floor sections.
+        self._dev_collapsed: set[str] = set()
 
         # BOM tab inputs — defaults overridden by persisted user prefs
         prefs = load_settings()
@@ -2908,6 +2912,7 @@ class CameraWireTool:
         sb1.pack(side=tk.RIGHT, fill=tk.Y)
         self.dev_listbox.bind("<<ListboxSelect>>", self._on_dev_select)
         self.dev_listbox.bind("<Double-Button-1>", self._on_dev_dblclick)
+        self.dev_listbox.bind("<Button-1>", self._toggle_dev_group)
         self.dev_listbox.bind("<Button-3>", self._on_dev_listbox_rclick)
         # The 'Center on Selected (Enter)' button label promised Enter
         # support but the binding was never wired — keep the promise.
@@ -3996,6 +4001,23 @@ class CameraWireTool:
         self._other_floor_devs[floor.id] = devs
         return devs
 
+    def _toggle_dev_group(self, event) -> None:
+        """Click on a group header toggles collapse/expand."""
+        idx = self.dev_listbox.nearest(event.y)
+        if idx < 0 or not hasattr(self, "_dev_listbox_rows"):
+            return
+        if idx >= len(self._dev_listbox_rows):
+            return
+        row = self._dev_listbox_rows[idx]
+        if not isinstance(row, str):
+            return  # not a group header
+        # Toggle collapsed state and rebuild the list
+        if row in self._dev_collapsed:
+            self._dev_collapsed.discard(row)
+        else:
+            self._dev_collapsed.add(row)
+        self._refresh_device_list()
+
     def _refresh_device_list(self) -> None:
         self.dev_listbox.delete(0, tk.END)
         # Sort by type (alphabetically), then by id within each group.
@@ -4030,10 +4052,13 @@ class CameraWireTool:
 
         # _filtered_devices stays as a flat list of devices; the listbox
         # rows are a mix of group headers and devices, so we also keep a
-        # parallel `_dev_listbox_rows` that maps row-index → device-or-None.
-        # For other-floor devices, entries are (floor_id, device_dict) tuples.
+        # parallel `_dev_listbox_rows` that maps row-index → data:
+        #   str         — group header key (clickable to collapse/expand)
+        #   dict        — current-floor device
+        #   (fid, dict) — other-floor device
+        #   None        — non-interactive header (active floor label)
         self._filtered_devices: list[dict] = []
-        self._dev_listbox_rows: list[dict | tuple | None] = []
+        self._dev_listbox_rows: list[dict | tuple | str | None] = []
 
         # Group by symbol type
         by_type: dict[str, list[dict]] = {}
@@ -4059,13 +4084,13 @@ class CameraWireTool:
             by_type.setdefault(d["type"], []).append(d)
             self._filtered_devices.append(d)
 
-        # ── Active floor devices (expanded) ──
+        # ── Active floor devices ──
         active_fid = (self._project.active_floor
                       if self._project else None)
         if self._project and len(self._project.floors) > 1 and active_fid:
             active_f = self._project.get_floor(active_fid)
-            floor_label = (f"▼ {active_fid} — {active_f.name}"
-                           if active_f else f"▼ {active_fid}")
+            floor_label = (f"{active_fid} — {active_f.name}"
+                           if active_f else active_fid)
             active_hdr = (f"━━ {floor_label}  "
                           f"({self._plural(len(self._filtered_devices), 'device')}) ━━")
             self.dev_listbox.insert(tk.END, active_hdr)
@@ -4076,8 +4101,6 @@ class CameraWireTool:
                                          selectforeground="#4fc48a")
 
         # Sort categories: cameras → devices → run points (alpha within).
-        # _safe_sym is the class-level helper that does the same coerce
-        # this used to do via a local lambda; one source of truth now.
         for t_code in sorted(by_type.keys(),
                               key=lambda c: (
                                   0 if self._safe_sym(c).get("is_camera")
@@ -4085,35 +4108,36 @@ class CameraWireTool:
                                   else 1, c)):
             sym = self._safe_sym(t_code)
             sym_label = sym.get("label", t_code)
-            # Coerce label to str — a corrupted None / int would TypeError
-            # on the [:24] slice below.
             if not isinstance(sym_label, str):
                 sym_label = str(sym_label) if sym_label is not None else t_code
             count = len(by_type[t_code])
-            # Pluralize the category word — 'run point' / 'run points' etc.
             cat_singular = ("camera" if sym.get("is_camera")
                             else "run point" if sym.get("is_run_point")
                             else "device")
             cat_word = self._plural(count, cat_singular).split(" ", 1)[1]
-            header = (f"── {t_code}  {sym_label[:24]:24s}  "
-                      f"({count} {cat_word}) ──")
+            group_key = f"type:{t_code}"
+            collapsed = group_key in self._dev_collapsed
+            arrow = "▶" if collapsed else "▼"
+            header = (f"{arrow} {t_code}  {sym_label[:24]:24s}  "
+                      f"({count} {cat_word})")
             self.dev_listbox.insert(tk.END, header)
-            self._dev_listbox_rows.append(None)
+            self._dev_listbox_rows.append(group_key)
             self.dev_listbox.itemconfig(self.dev_listbox.size() - 1,
                                          foreground="#7fc4ff",
                                          selectbackground="#222244",
                                          selectforeground="#7fc4ff")
-            for d in by_type[t_code]:
-                wire_info = wire_by_device.get(d["id"])
-                wire_str = (
-                    f'  [{wire_info["runs"]}w: '
-                    f'{self._format_length(wire_info["total_in"])}]'
-                    if wire_info else ""
-                )
-                self.dev_listbox.insert(
-                    tk.END, f'  {d["id"]:6s} {d["type"]:5s}{wire_str}',
-                )
-                self._dev_listbox_rows.append(d)
+            if not collapsed:
+                for d in by_type[t_code]:
+                    wire_info = wire_by_device.get(d["id"])
+                    wire_str = (
+                        f'  [{wire_info["runs"]}w: '
+                        f'{self._format_length(wire_info["total_in"])}]'
+                        if wire_info else ""
+                    )
+                    self.dev_listbox.insert(
+                        tk.END, f'  {d["id"]:6s} {d["type"]:5s}{wire_str}',
+                    )
+                    self._dev_listbox_rows.append(d)
 
         if not self._filtered_devices and not (self._project and len(self._project.floors) > 1):
             placeholder = ("(no devices yet — Symbols tab → pick a type → "
@@ -4123,7 +4147,7 @@ class CameraWireTool:
             self._dev_listbox_rows.append(None)
             self.dev_listbox.itemconfig(self.dev_listbox.size() - 1, foreground="#888888")
 
-        # ── Other floors' devices (collapsed, listed for navigation) ──
+        # ── Other floors' devices (collapsible) ──
         if self._project and len(self._project.floors) > 1:
             for floor in self._project.floors:
                 if floor.id == active_fid:
@@ -4139,34 +4163,33 @@ class CameraWireTool:
                     filtered_other.append(d)
                 if not filtered_other and query:
                     continue  # skip floor entirely if search hides all its devices
-                # Floor header (dimmed, not selectable for canvas ops)
-                floor_hdr = (f"━━ ▶ {floor.id} — {floor.name}  "
+                group_key = f"floor:{floor.id}"
+                collapsed = group_key in self._dev_collapsed
+                arrow = "▶" if collapsed else "▼"
+                floor_hdr = (f"━━ {arrow} {floor.id} — {floor.name}  "
                              f"({self._plural(len(other_devs), 'device')}) ━━")
                 self.dev_listbox.insert(tk.END, floor_hdr)
-                self._dev_listbox_rows.append(None)
+                self._dev_listbox_rows.append(group_key)
                 self.dev_listbox.itemconfig(self.dev_listbox.size() - 1,
                                              foreground="#887744",
                                              selectbackground="#2a2210",
                                              selectforeground="#887744")
-                # List devices from this floor (dimmed, double-click to navigate)
-                for d in filtered_other:
-                    self.dev_listbox.insert(
-                        tk.END, f'    {d["id"]:6s} {d["type"]:5s}')
-                    self._dev_listbox_rows.append((floor.id, d))
-                    self.dev_listbox.itemconfig(
-                        self.dev_listbox.size() - 1,
-                        foreground="#666655")
+                if not collapsed:
+                    for d in filtered_other:
+                        self.dev_listbox.insert(
+                            tk.END, f'    {d["id"]:6s} {d["type"]:5s}')
+                        self._dev_listbox_rows.append((floor.id, d))
+                        self.dev_listbox.itemconfig(
+                            self.dev_listbox.size() - 1,
+                            foreground="#666655")
 
-        # Footer totals — surfaces the same numbers the toolbar shows
-        # but scoped to the current filter so the user can see what the
-        # search just narrowed them down to.
+        # Footer totals
         if hasattr(self, "_dev_total_label"):
             n_total = len(self.devices)
             n_filtered = len(self._filtered_devices)
             n_cam_filtered = sum(
                 1 for d in self._filtered_devices
                 if self._is_camera_type(d["type"]))
-            # Count other-floor devices for total across project
             n_other = 0
             if self._project and len(self._project.floors) > 1:
                 for floor in self._project.floors:
@@ -10479,7 +10502,7 @@ class CameraWireTool:
         if idx >= len(self._dev_listbox_rows):
             return
         device = self._dev_listbox_rows[idx]
-        if device is None:
+        if device is None or isinstance(device, str):
             # Group header → offer "Select all in group"
             self._show_dev_group_menu(event, idx)
             return
