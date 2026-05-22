@@ -211,6 +211,8 @@ def route_between(
     ctx: RoutingContext,
     start_img: tuple[float, float],
     goal_img: tuple[float, float],
+    *,
+    block_walls: bool = False,
 ) -> list[tuple[float, float]] | None:
     """Find an A* route between two image-pixel points.
 
@@ -220,13 +222,37 @@ def route_between(
     """
     s = ctx.img_to_cell(*start_img)
     g = ctx.img_to_cell(*goal_img)
-    cells = astar(ctx, s, g)
+    cells = astar(ctx, s, g, block_walls=block_walls)
     if cells is None:
         return None
     cells = simplify_collinear(cells)
     waypoints = [start_img] + [ctx.cell_to_img(cx, cy) for cx, cy in cells] + [goal_img]
     # Drop duplicate start/end if they coincide with first/last cell center
     return _dedup_close(waypoints, eps=1.0)
+
+
+def _erode_pixels(walls: np.ndarray) -> np.ndarray:
+    """Remove isolated wall pixels (noise from dimension callouts, dots).
+
+    A wall cell survives only if at least one 8-neighbor is also a wall.
+    This strips 1×1 dark blobs while preserving contiguous walls/lines.
+    """
+    out = walls.copy()
+    h, w = walls.shape
+    neighbor_count = np.zeros_like(walls, dtype=int)
+    for dy, dx in [(-1, -1), (-1, 0), (-1, 1),
+                   (0, -1),           (0, 1),
+                   (1, -1),  (1, 0),  (1, 1)]:
+        shifted = np.zeros_like(walls)
+        sr = slice(max(0, dy), h + min(0, dy) or None)
+        sc = slice(max(0, dx), w + min(0, dx) or None)
+        tr = slice(max(0, -dy), h + min(0, -dy) or None)
+        tc = slice(max(0, -dx), w + min(0, -dx) or None)
+        shifted[tr, tc] = walls[sr, sc]
+        neighbor_count += shifted
+    # Kill cells with zero wall neighbors
+    out[neighbor_count == 0] = False
+    return out
 
 
 def _dedup_close(pts, eps=1.0):

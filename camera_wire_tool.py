@@ -11093,6 +11093,21 @@ class CameraWireTool:
                     drawio_file=os.path.basename(self.drawio_path),
                 )],
             )
+        # Guard against adding the same .drawio file twice — both floors
+        # would reference the same file and corrupt each other on switch.
+        norm_new = os.path.normcase(os.path.abspath(path))
+        proj_dir = os.path.dirname(self.project_path)
+        for f in self._project.floors:
+            existing_path = (f.drawio_file if os.path.isabs(f.drawio_file)
+                             else os.path.normpath(
+                                 os.path.join(proj_dir, f.drawio_file)))
+            if os.path.normcase(os.path.abspath(existing_path)) == norm_new:
+                messagebox.showwarning(
+                    "Already added",
+                    f"That .drawio is already in this project as "
+                    f"floor {f.id} ({f.name}).\n\n"
+                    f"No floor was added.")
+                return
         existing_ids = {f.id for f in self._project.floors}
         n = 2
         while f"F{n}" in existing_ids:
@@ -11140,6 +11155,11 @@ class CameraWireTool:
             )
             self._project.floors.append(new_floor)
             self._mark_dirty()
+            # Persist immediately so the new floor survives a crash.
+            try:
+                mf_mod.save_project(self._project, self.project_path)
+            except OSError as e:
+                log_error("Save after floor add failed", e)
             self._refresh_floor_menu()
             dlg.destroy()
             n_total = len(self._project.floors)
@@ -11411,6 +11431,8 @@ class CameraWireTool:
         # explicitly because __init__ doesn't re-run. No-op when no
         # pending pick is set on the class.
         self._resume_pending_anchor_pick()
+
+    def _clear_active_floor_alignment(self) -> None:
         """Reset the active floor's alignment to identity. Quick escape
         hatch when the user applied a bad transform and just wants the
         floor back to normal. Refits the view immediately."""
@@ -12602,6 +12624,10 @@ class CameraWireTool:
                     if not (isinstance(r, dict)
                             and (r.get("from", {}).get("floor") == target_id
                                  or r.get("to", {}).get("floor") == target_id))]
+            # Invalidate ghost overlay if it pointed at the deleted floor.
+            if self._ghost_floor_id == target_id:
+                self._ghost_floor_id = None
+            self._ghost_bg_cache.pop(target_id, None)
             # Persist so a crash right after deletion can't resurrect it.
             self._mark_dirty()
             try:
@@ -12609,6 +12635,7 @@ class CameraWireTool:
             except OSError as e:
                 log_error("Save after floor delete failed", e)
             reload_rows()
+            self._redraw()
             self._update_title()
             self._flash_status(
                 f"Floor {target_id} deleted.", ttl_ms=3500)

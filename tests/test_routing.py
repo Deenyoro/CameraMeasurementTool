@@ -26,13 +26,13 @@ def test_astar_open_grid():
 
 
 def test_astar_strict_blocks_full_wall():
-    """Default mode (block_walls=True): a complete wall far from start/goal blocks A*."""
+    """Strict mode (block_walls=True): a complete wall far from start/goal blocks A*."""
     grid = np.zeros((20, 20), dtype=bool)
     grid[:, 10] = True   # vertical wall, far from both endpoints
     ctx = make_ctx(grid)
     # Start at (0,0), goal at (19,0). Tunnel radius=2 around each is too
     # small to reach the wall (10 cells away), so A* must fail.
-    path = routing.astar(ctx, (0, 0), (19, 0))
+    path = routing.astar(ctx, (0, 0), (19, 0), block_walls=True)
     assert path is None
 
 
@@ -41,7 +41,7 @@ def test_astar_strict_with_corridor():
     grid = np.zeros((20, 20), dtype=bool)
     grid[:18, 10] = True   # wall with a corridor at rows 18-19
     ctx = make_ctx(grid)
-    path = routing.astar(ctx, (0, 0), (19, 0))
+    path = routing.astar(ctx, (0, 0), (19, 0), block_walls=True)
     assert path is not None
     ys = [c[1] for c in path]
     assert max(ys) >= 17    # forced through the corridor
@@ -67,12 +67,12 @@ def test_astar_soft_finds_path_through_thin_wall():
     assert path[-1] == (15, 5)
 
 
-def test_route_between_default_strict_no_path():
-    """route_between defaults to strict — fully blocked = None."""
+def test_route_between_strict_no_path():
+    """route_between with block_walls=True — fully blocked = None."""
     grid = np.zeros((30, 30), dtype=bool)
     grid[:, 15] = True
     ctx = make_ctx(grid)
-    path = routing.route_between(ctx, (50, 50), (250, 50))
+    path = routing.route_between(ctx, (50, 50), (250, 50), block_walls=True)
     assert path is None
 
 
