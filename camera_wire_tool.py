@@ -295,8 +295,8 @@ def parse_drawio(filepath: str):
             return int(float(value))
         except (TypeError, ValueError):
             return default
-    page_w = _safe_int(model.get("pageWidth", "3024"), 3024)
-    page_h = _safe_int(model.get("pageHeight", "2160"), 2160)
+    page_w = _safe_int(model.get("pageWidth", "3024"), 3024) or 3024
+    page_h = _safe_int(model.get("pageHeight", "2160"), 2160) or 2160
 
     cells = model.findall(".//mxCell")
 
@@ -5690,6 +5690,8 @@ class CameraWireTool:
     def _format_length(self, inches) -> str:
         if inches is None:
             return "--"
+        if inches < 0:
+            return "--"
         unit = self.unit_var.get()
         if unit == "inches":
             return f'{inches:.2f}"'
@@ -9000,7 +9002,11 @@ class CameraWireTool:
         ent.grid(row=0, column=1, sticky=tk.W, padx=4)
         ent.select_range(0, tk.END); ent.focus_set()
         ttk.Label(form, text="Size:", width=8).grid(row=1, column=0, sticky=tk.E, pady=4)
-        size_var = tk.IntVar(value=int(ann.get("font_size", 18)))
+        try:
+            _fs = int(ann.get("font_size", 18))
+        except (TypeError, ValueError):
+            _fs = 18
+        size_var = tk.IntVar(value=_fs)
         ttk.Spinbox(form, textvariable=size_var, from_=8, to=72, width=6,
                     increment=2,
                     ).grid(row=1, column=1, sticky=tk.W, padx=4)
