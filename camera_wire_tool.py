@@ -4010,13 +4010,14 @@ class CameraWireTool:
             return
         row = self._dev_listbox_rows[idx]
         if not isinstance(row, str):
-            return  # not a group header
+            return  # not a group header — let normal click handling proceed
         # Toggle collapsed state and rebuild the list
         if row in self._dev_collapsed:
             self._dev_collapsed.discard(row)
         else:
             self._dev_collapsed.add(row)
         self._refresh_device_list()
+        return "break"  # prevent <<ListboxSelect>> from firing on stale indices
 
     def _refresh_device_list(self) -> None:
         self.dev_listbox.delete(0, tk.END)
@@ -7463,7 +7464,7 @@ class CameraWireTool:
         if (sel_idx and hasattr(self, "_dev_listbox_rows")
                 and sel_idx[0] < len(self._dev_listbox_rows)):
             row = self._dev_listbox_rows[sel_idx[0]]
-            if row is not None:   # not a group header
+            if isinstance(row, dict):   # skip headers and cross-floor entries
                 self.selected_device = row
         # If multiple devices are selected, center on the group's bbox
         # midpoint so all are at least in view — was just the primary
@@ -7685,6 +7686,8 @@ class CameraWireTool:
         if idx >= len(self._dev_listbox_rows):
             return
         row = self._dev_listbox_rows[idx]
+        if row is None or isinstance(row, str):
+            return  # header row — ignore double-click
         if isinstance(row, tuple) and len(row) == 2:
             # Cross-floor device: (floor_id, device_dict)
             floor_id, dev = row
