@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 import xml.etree.ElementTree as ET
@@ -2719,6 +2720,9 @@ class CameraWireTool:
                               command=self._show_revisions_dialog)
         file_menu.add_command(label="📦  Export project bundle (.zsmt)…",
                               command=self._export_bundle)
+        if _HAS_EXPORT:
+            file_menu.add_command(label="🗎  Export to PDF (map + report)…",
+                                  command=self._open_export_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close,
                               accelerator="Ctrl+Q")
@@ -3754,12 +3758,19 @@ class CameraWireTool:
         csv_btn.pack(side=tk.LEFT, padx=4)
         Tooltip(csv_btn, "Export this BOM table as a single CSV file.")
         if _HAS_EXPORT:
-            pdf_btn = ttk.Button(bom_btns, text="Export PDF",
-                                  command=self._export_pdf)
+            pdf_btn = ttk.Button(bom_btns, text="Export PDF…",
+                                  command=self._open_export_dialog)
             pdf_btn.pack(side=tk.LEFT, padx=4)
             Tooltip(pdf_btn,
-                    "Export a multi-page PDF report: cover, project "
-                    "stats, BOM table, per-device listing.")
+                    "Export the floor-plan map (choose which devices/wires "
+                    "to show) plus a one-page summary: BOM, camera models, "
+                    "and total wire footage.")
+            det_btn = ttk.Button(bom_btns, text="Detailed report",
+                                 command=self._export_pdf)
+            det_btn.pack(side=tk.LEFT, padx=4)
+            Tooltip(det_btn,
+                    "Export the older multi-page tables report: cover, "
+                    "stats, full BOM, risers, per-device listing.")
 
         # Refresh on every input change AND persist the new value so the
         # next session opens with the same preferences. Also refresh the
@@ -6343,7 +6354,11 @@ class CameraWireTool:
         box = self.legend_box
         bx, by = self._drawio_to_img(box["x"], box["y"])
         bw = box["w"] * self.dx_scale
-        sorted_codes = sorted(self.symbol_types.keys())
+        # Only list device types that are actually shown on the map — a type
+        # hidden via the visibility presets (or unchecked for a PDF export)
+        # shouldn't clutter the legend with a key for something not drawn.
+        sorted_codes = [c for c in sorted(self.symbol_types.keys())
+                        if c not in self._hidden_types]
         n_types = len(sorted_codes)
         needed_h = (n_types * C.LEGEND_ROW_H + 50) * self.dy_scale
         # Cache legend bounds in image coords so _on_left_press can hit-test
@@ -15066,6 +15081,315 @@ class CameraWireTool:
         except OSError as e:
             messagebox.showerror("Export failed", str(e))
 
+    def _capture_canvas_image(self):
+        """Return a PIL.Image of just the canvas (the map as currently drawn),
+        or None on failure. Hides the mini-map overlay + hover chrome for a
+        clean grab and restores them afterward. Callers set the desired
+        visibility / zoom and the capture reflects whatever is on the canvas."""
+        self.canvas.delete("hover_info")
+        # The mini-map is a separate widget placed over the canvas's top-right
+        # corner, so it lands inside the capture rectangle. Unmap it for the
+        # grab (clearing its photo isn't enough — the stale widget still
+        # paints) and re-place it afterward.
+        minimap_mapped = False
+        try:
+            minimap_mapped = bool(self.minimap.winfo_ismapped())
+        except (AttributeError, tk.TclError):
+            pass
+        try:
+            if minimap_mapped:
+                self.minimap.place_forget()
+            self._redraw()
+            self.root.update_idletasks()
+            import ctypes  # noqa: F401  (Windows-only capture path)
+            hwnd = ctypes.windll.user32.GetParent(self.canvas.winfo_id())
+            rect_root = self._win_rect(hwnd)
+            cx = self.canvas.winfo_rootx()
+            cy = self.canvas.winfo_rooty()
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            full = self._capture_root_window()
+            if full is None:
+                return None
+            root_x, root_y = rect_root[0], rect_root[1]
+            return full.crop((cx - root_x, cy - root_y,
+                              cx - root_x + cw, cy - root_y + ch))
+        except Exception as e:
+            log_error("Canvas capture failed", e)
+            return None
+        finally:
+            if minimap_mapped:
+                try:
+                    self.minimap.place(relx=1.0, rely=0.0, anchor="ne",
+                                       x=-10, y=10)
+                except tk.TclError:
+                    pass
+            self._redraw()
+
+    def _render_map_image(self):
+        """Render the whole map OFF-SCREEN onto a copy of the full-resolution
+        floor-plan image, independent of the on-screen viewport — so the
+        export is as detailed as the source drawing (symbols stay readable
+        when zoomed). Honors the current visibility flags (_hidden_types,
+        _show_wires, _show_fov, _show_legend, _show_drops, _show_device_ids).
+        Returns a PIL.Image (RGB) or None if there's no background image."""
+        if self.bg_image is None:
+            return None
+        from PIL import Image, ImageDraw, ImageFont, ImageColor
+
+        base = self.bg_image.convert("RGBA")
+        W, H = base.size
+        line_w = max(2, round(W / 1400))
+
+        _font_cache: dict[tuple, object] = {}
+
+        def font(size, bold=False):
+            size = max(6, int(size))
+            key = (size, bold)
+            if key in _font_cache:
+                return _font_cache[key]
+            names = (["arialbd.ttf", "Arialbd.ttf"] if bold
+                     else ["arial.ttf", "Arial.ttf"])
+            names += (["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf"])
+            f = None
+            for nm in names:
+                try:
+                    f = ImageFont.truetype(nm, size)
+                    break
+                except OSError:
+                    continue
+            if f is None:
+                f = ImageFont.load_default()
+            _font_cache[key] = f
+            return f
+
+        def rgb(col):
+            try:
+                return ImageColor.getrgb(col)[:3]
+            except (ValueError, AttributeError):
+                return (255, 255, 0)
+
+        def rgba(col, a=255):
+            return rgb(col) + (a,)
+
+        def pil_shape(dr, shape, color, cx, cy, r, bx, by, bw, bh,
+                      rot, outline, ow):
+            fill = rgb(color); oc = rgb(outline)
+            cosr = math.cos(math.radians(rot)); sinr = math.sin(math.radians(rot))
+
+            def R(px, py):
+                ddx, ddy = px - cx, py - cy
+                return (cx + ddx * cosr - ddy * sinr,
+                        cy + ddx * sinr + ddy * cosr)
+            if shape in ("rect", "roundrect"):
+                base_pts = [(bx, by), (bx + bw, by), (bx + bw, by + bh),
+                            (bx, by + bh)]
+                dr.polygon([R(*p) for p in base_pts] if rot else base_pts,
+                           fill=fill, outline=oc, width=ow)
+            elif shape == "hexagon":
+                pts = []
+                for a in range(0, 360, 60):
+                    rad = math.radians(a - 30 + rot)
+                    pts.append((cx + r * math.cos(rad), cy + r * math.sin(rad)))
+                dr.polygon(pts, fill=fill, outline=oc, width=ow)
+            elif shape == "step":
+                base_pts = [(bx, by), (bx + bw * 0.7, by), (bx + bw, by + bh * 0.5),
+                            (bx + bw * 0.7, by + bh), (bx, by + bh)]
+                dr.polygon([R(*p) for p in base_pts] if rot else base_pts,
+                           fill=fill, outline=oc, width=ow)
+            elif shape == "halfrect":
+                # Match Tk create_arc(start=-rot, extent=180): angles measured
+                # CCW from +x with screen-y down → point = (cos, -sin). PIL's
+                # pieslice uses the opposite convention, which mirrored the
+                # 180° camera semicircles (and flipped the rotated ones).
+                pts = [(cx, cy)]
+                steps = 28
+                for k in range(steps + 1):
+                    ang = math.radians(-rot + 180.0 * k / steps)
+                    pts.append((cx + r * math.cos(ang), cy - r * math.sin(ang)))
+                dr.polygon(pts, fill=fill, outline=oc, width=ow)
+            else:  # ellipse / unknown — circle
+                dr.ellipse([cx - r, cy - r, cx + r, cy + r],
+                           fill=fill, outline=oc, width=ow)
+
+        # ---- FOV cones first (semi-transparent, UNDER everything else).
+        if self._show_fov.get():
+            eff = self._effective_scale_factor()
+            ipp = (1.0 / eff) if eff else 0.5
+            alpha_map = {"gray12": 40, "gray25": 70, "gray50": 120}
+            fov_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            fd = ImageDraw.Draw(fov_layer)
+            # Collect each cone's outline so we can stroke crisp edges AFTER
+            # compositing the translucent fills — otherwise overlapping fills
+            # bury the edges and you just get a vague colored wash with no
+            # discernible cones coming out of each camera.
+            cone_outlines: list[tuple] = []
+            for d in self.devices:
+                if not isinstance(d, dict) or not self._is_camera_type(d.get("type")):
+                    continue
+                if d["type"] in self._hidden_types or d["type"] in self._fov_hidden_types:
+                    continue
+                if self._hidden_by_unwired_filter(d):
+                    continue
+                f = d.get("fov")
+                if not isinstance(f, dict):
+                    f = self._model_fov_for_device(d) or default_fov_for_type(d["type"])
+                elif not f.get("show", True):
+                    continue
+                apex_ix, apex_iy = self._drawio_to_img(
+                    d["x"] + d["w"] / 2, d["y"] + d["h"] / 2)
+                channels = self._device_channels(d, f)
+                n_ch = len(channels)
+                defaults = [off for (_sf, off) in channels]
+                chan_az = [self._channel_azimuth(d, i, defaults[i], n_ch)
+                           for i in range(n_ch)]
+                color_type = self._fov_color_for_type(d["type"])
+                a = alpha_map.get(
+                    self._fov_opacity_by_type.get(d["type"], self._fov_opacity), 70)
+                for i, (sf, _off) in enumerate(channels):
+                    cone = fov_mod.compute_fov(sf)
+                    try:
+                        h_override = float(sf.get("h_fov_deg") or 0)
+                    except (TypeError, ValueError):
+                        h_override = 0.0
+                    cone = dataclass_replace(
+                        cone,
+                        aov_h_deg=(min(360.0, h_override) if h_override > 0
+                                   else cone.aov_h_deg),
+                        azimuth_deg=chan_az[i])
+                    n_seg = max(24, int(cone.aov_h_deg / 6))
+                    # Outermost visible ring only carries the stroked edge
+                    # (D is the largest); inner DORI rings just fill.
+                    for ring in ("D", "O", "R", "I"):
+                        if ring != "D" and not self._show_dori.get():
+                            continue
+                        radius_in = cone.distances_in[ring]
+                        if radius_in <= 0:
+                            continue
+                        poly = fov_mod.cone_polygon(
+                            cone, center_x=apex_ix, center_y=apex_iy,
+                            radius_in=radius_in, inches_per_pixel=ipp,
+                            azimuth_deg=cone.azimuth_deg, n_segments=n_seg)
+                        if len(poly) < 3:
+                            continue
+                        col = (fov_mod.DORI_COLORS[ring]
+                               if self._fov_color_mode == "dori" else color_type)
+                        pts2 = [(x, y) for x, y in poly]
+                        fd.polygon(pts2, fill=rgba(col, a))
+                        if ring == "D":
+                            cone_outlines.append((pts2, col))
+            base = Image.alpha_composite(base, fov_layer)
+            # Stroke the cone edges on top of the composited fills.
+            od2 = ImageDraw.Draw(base, "RGBA")
+            olw = max(2, round(W / 1700))
+            for pts2, col in cone_outlines:
+                od2.line(pts2 + [pts2[0]], fill=rgba(col, 230), width=olw,
+                         joint="curve")
+
+        draw = ImageDraw.Draw(base, "RGBA")
+
+        # ---- Wires.
+        if self._show_wires.get():
+            devices_by_id = {dd["id"]: dd for dd in self.devices
+                             if isinstance(dd, dict) and "id" in dd}
+            wlw = max(2, round(W / 900))
+            for route in self.wire_routes:
+                if not isinstance(route, dict):
+                    continue
+                pts = route.get("points")
+                if not isinstance(pts, list) or len(pts) < 2:
+                    continue
+                cable = bom_mod.cable_for_route(
+                    route, devices_by_id, self.symbol_types, self.cable_types,
+                    project_default=self._proj_default_cable())
+                col = "#00BFFF"
+                ct = self.cable_types.get(cable)
+                if isinstance(ct, dict):
+                    col = ct.get("color", col)
+                try:
+                    draw.line([(float(p[0]), float(p[1])) for p in pts],
+                              fill=rgb(col), width=wlw, joint="curve")
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+        # ---- Legend (under devices), only the shown types.
+        if self._show_legend.get() and self.legend_box:
+            box = self.legend_box
+            bx, by = self._drawio_to_img(box["x"], box["y"])
+            bw = box["w"] * self.dx_scale
+            codes = [c for c in sorted(self.symbol_types.keys())
+                     if c not in self._hidden_types]
+            row_px = C.LEGEND_ROW_H * self.dy_scale
+            needed_h = (len(codes) * C.LEGEND_ROW_H + 50) * self.dy_scale
+            draw.rectangle([bx, by, bx + bw, by + needed_h],
+                           fill=(255, 255, 255), outline=(0, 0, 255),
+                           width=max(2, round(W / 1500)))
+            draw.text((bx + bw / 2, by + 8 * self.dy_scale),
+                      box.get("title", "Symbols"), fill=(0, 0, 0),
+                      font=font(int(row_px * 0.7), bold=True), anchor="ma")
+            for i, code in enumerate(codes):
+                info = self._safe_sym(code)
+                icx, icy = self._drawio_to_img(
+                    box["x"] + 20, box["y"] + 38 + i * C.LEGEND_ROW_H)
+                iwi = 22 * self.dx_scale; ihi = 22 * self.dy_scale
+                ccx, ccy = icx + iwi / 2, icy + ihi / 2
+                pil_shape(draw, info["shape"], info["color"], ccx, ccy,
+                          max(iwi, ihi) / 2, icx, icy, iwi, ihi, 0,
+                          "#0000FF", max(1, round(W / 2500)))
+                draw.text((ccx, ccy), code, fill=(0, 0, 0),
+                          font=font(int(iwi * 0.5), bold=True), anchor="mm")
+                tcx, tcy = self._drawio_to_img(
+                    box["x"] + 55, box["y"] + 38 + i * C.LEGEND_ROW_H)
+                count = sum(1 for dd in self.devices
+                            if isinstance(dd, dict) and dd.get("type") == code)
+                draw.text((tcx, tcy + ihi / 2), f'{info["label"]}  ({count})',
+                          fill=(0, 0, 0), font=font(int(row_px * 0.5)), anchor="lm")
+
+        # ---- Devices (on top of legend), shape + type code (+ optional id).
+        ow = max(2, round(W / 1500))
+        for d in self.devices:
+            if not isinstance(d, dict):
+                continue
+            try:
+                dtype = d["type"]
+                dx_ = float(d["x"]); dy_ = float(d["y"])
+                dw_ = float(d["w"]); dh_ = float(d["h"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if dtype in self._hidden_types or self._hidden_by_unwired_filter(d):
+                continue
+            info = self._safe_sym(dtype)
+            ix, iy = self._drawio_to_img(dx_, dy_)
+            iwi = dw_ * self.dx_scale; ihi = dh_ * self.dy_scale
+            ccx, ccy = ix + iwi / 2, iy + ihi / 2
+            try:
+                rot = float(d.get("rotation", 0) or 0)
+            except (TypeError, ValueError):
+                rot = 0.0
+            pil_shape(draw, info["shape"], info["color"], ccx, ccy,
+                      max(iwi, ihi) / 2, ix, iy, iwi, ihi, rot, "#0000FF", ow)
+            draw.text((ccx, ccy), dtype, fill=(0, 0, 0),
+                      font=font(int(min(iwi, ihi) * 0.5), bold=True), anchor="mm")
+            if self._show_device_ids.get():
+                draw.text((ccx, iy - 2), d.get("id", ""), fill=(255, 255, 255),
+                          font=font(int(min(iwi, ihi) * 0.45)), anchor="mb",
+                          stroke_width=max(1, ow // 2), stroke_fill=(0, 0, 0))
+
+        # ---- Drop points (top).
+        if self._project is not None and self._show_drops_visible():
+            active = self._project.active_floor
+            rr = max(8, round(W / 250))
+            for dp in self._drops_on_active_floor():
+                try:
+                    px, py = self._world_to_img(float(dp["x"]), float(dp["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                fill = "#23c6c6" if dp.get("home_floor") == active else "#f0a830"
+                draw.polygon([(px, py - rr), (px + rr, py), (px, py + rr),
+                              (px - rr, py)], fill=rgb(fill), outline=(6, 48, 58))
+
+        return base.convert("RGB")
+
     def _export_map_png(self) -> None:
         """Save a PNG snapshot of the canvas — what's currently visible
         on the map (devices + wires + legend, but not the mode banner /
@@ -15078,50 +15402,24 @@ class CameraWireTool:
         )
         if not path:
             return
-        # Ephemerally hide on-canvas chrome so the snapshot is clean
-        self.canvas.delete("hover_info")
-        was_minimap_built = self._minimap_built
+        img = self._capture_canvas_image()
+        if img is None:
+            messagebox.showerror("Export failed",
+                                 "Could not capture the map image.")
+            return
         try:
-            self._minimap_photo = None       # skip mini-map render
-            self._minimap_built = True
-            self._redraw()
-            # Use Win32 PrintWindow against the canvas widget so we capture
-            # exactly what's on the canvas, even if other windows overlap.
+            tmp_path = path + ".tmp"
+            img.save(tmp_path)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            log_error("Map snapshot failed", e)
             try:
-                import ctypes
-                from PIL import Image
-                hwnd = ctypes.windll.user32.GetParent(self.canvas.winfo_id())
-                # Dimensions of the Tk root, since canvas is embedded
-                rect_root = self._win_rect(hwnd)
-                # Compute the canvas's screen position to crop after capture
-                cx = self.canvas.winfo_rootx()
-                cy = self.canvas.winfo_rooty()
-                cw = self.canvas.winfo_width()
-                ch = self.canvas.winfo_height()
-                full = self._capture_root_window()
-                if full is None:
-                    raise RuntimeError("PrintWindow returned no bitmap")
-                # Translate root-window coords → bitmap coords
-                root_x = rect_root[0]; root_y = rect_root[1]
-                cb = full.crop((cx - root_x, cy - root_y,
-                                 cx - root_x + cw, cy - root_y + ch))
-                # Atomic: stage to .tmp then os.replace
-                tmp_path = path + ".tmp"
-                cb.save(tmp_path)
-                os.replace(tmp_path, path)
-            except Exception as e:
-                log_error("Map snapshot failed", e)
-                try:
-                    if os.path.exists(path + ".tmp"):
-                        os.unlink(path + ".tmp")
-                except OSError:
-                    pass
-                messagebox.showerror("Export failed", str(e))
-                return
-        finally:
-            self._minimap_built = was_minimap_built
-            self._build_minimap_image()
-            self._redraw()
+                if os.path.exists(path + ".tmp"):
+                    os.unlink(path + ".tmp")
+            except OSError:
+                pass
+            messagebox.showerror("Export failed", str(e))
+            return
         self._flash_status(f"✓ Saved map snapshot to {os.path.basename(path)}",
                             ttl_ms=3500)
 
@@ -15234,6 +15532,206 @@ class CameraWireTool:
             except OSError:
                 pass
             messagebox.showerror("Export failed", str(e))
+
+    # ============================================================ PDF export suite
+    # Predefined map "views" — each checked one becomes its own full-view PDF
+    # page. (label, show_wires, show_fov, default-on).
+    _EXPORT_VIEWS = [
+        ("Devices + wires",              True,  False, True),
+        ("Devices only (no wires)",      False, False, False),
+        ("Devices + FOV cones (no wires)", False, True, False),
+        ("Devices + wires + FOV cones",  True,  True,  False),
+    ]
+
+    def _open_export_dialog(self) -> None:
+        """Configurable multi-page PDF export: pick one or more map views
+        (wires / no wires / FOV …), each rendered full-view on its own page,
+        plus an optional one-page summary (BOM, camera models, wire footage)."""
+        if not _HAS_EXPORT or not getattr(export_mod, "_HAS_REPORTLAB", False):
+            messagebox.showwarning(
+                "PDF unavailable",
+                "PDF export requires reportlab. `pip install reportlab` "
+                "then restart.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Export to PDF")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        ttk.Label(dlg, text="Export to PDF",
+                  font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 2))
+        ttk.Label(dlg, text="Each checked map view becomes its own full-view "
+                            "page (rendered at high resolution). Add a one-page "
+                            "summary at the end if you like.",
+                  wraplength=440, foreground="#7fc4ff",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(0, 8))
+
+        view_vars: list[tuple] = []
+        mp_frame = ttk.LabelFrame(dlg, text="Map pages (one PDF page each)")
+        mp_frame.pack(fill=tk.X, padx=12, pady=4)
+        for label, show_wires, show_fov, default_on in self._EXPORT_VIEWS:
+            v = tk.BooleanVar(value=default_on)
+            view_vars.append((v, label, show_wires, show_fov))
+            ttk.Checkbutton(mp_frame, text=label, variable=v).pack(
+                anchor=tk.W, padx=8, pady=1)
+
+        opt_frame = ttk.LabelFrame(dlg, text="Shared map options")
+        opt_frame.pack(fill=tk.X, padx=12, pady=4)
+        hide_legend = tk.BooleanVar(value=False)
+        hide_drops = tk.BooleanVar(value=False)
+        o = ttk.Frame(opt_frame); o.pack(fill=tk.X, padx=8, pady=(4, 2))
+        ttk.Checkbutton(o, text="Hide legend", variable=hide_legend).grid(
+            row=0, column=0, sticky=tk.W, padx=4)
+        ttk.Checkbutton(o, text="Hide drop points", variable=hide_drops).grid(
+            row=0, column=1, sticky=tk.W, padx=4)
+
+        # Per-type include checkboxes (unchecked = hidden on every map page).
+        types_present = sorted({d["type"] for d in self.devices
+                                if isinstance(d, dict) and "type" in d})
+        type_vars: dict[str, tk.BooleanVar] = {}
+        if types_present:
+            tf = ttk.LabelFrame(opt_frame, text="Device types to show on map")
+            tf.pack(fill=tk.X, padx=8, pady=(2, 8))
+            inner = ttk.Frame(tf)
+            inner.pack(fill=tk.X, padx=4, pady=4)
+            for n, tc in enumerate(types_present):
+                v = tk.BooleanVar(value=True)
+                type_vars[tc] = v
+                label = self._safe_sym(tc).get("label", tc)
+                ttk.Checkbutton(inner, text=f"{tc} — {label}"[:28],
+                                variable=v).grid(row=n // 2, column=n % 2,
+                                                 sticky=tk.W, padx=4, pady=1)
+
+        inc_summary = tk.BooleanVar(value=True)
+        rep_frame = ttk.LabelFrame(dlg, text="Summary report")
+        rep_frame.pack(fill=tk.X, padx=12, pady=4)
+        ttk.Checkbutton(
+            rep_frame,
+            text="Append one-page summary (BOM, camera models, wire footage)",
+            variable=inc_summary).pack(anchor=tk.W, padx=8, pady=6)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=12, pady=(6, 12))
+
+        def _do_export():
+            page_specs = [{"label": label, "show_wires": sw, "show_fov": sf}
+                          for (v, label, sw, sf) in view_vars if v.get()]
+            if not page_specs and not inc_summary.get():
+                messagebox.showinfo(
+                    "Nothing to export",
+                    "Pick at least one map view, the summary, or both.")
+                return
+            hide_types = {tc for tc, v in type_vars.items() if not v.get()}
+            dlg.destroy()
+            base = os.path.splitext(os.path.basename(self.drawio_path))[0]
+            path = filedialog.asksaveasfilename(
+                title="Export to PDF", defaultextension=".pdf",
+                initialfile=f"{base}_export.pdf",
+                filetypes=[("PDF", "*.pdf")])
+            if not path:
+                return
+            self._run_pdf_map_export(
+                path,
+                page_specs=page_specs,
+                include_summary=inc_summary.get(),
+                hide_types=hide_types,
+                hide_legend=hide_legend.get(),
+                hide_drops=hide_drops.get(),
+            )
+
+        ttk.Button(btns, text="Export PDF", command=_do_export).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+
+    def _run_pdf_map_export(self, path: str, *, page_specs: list,
+                            include_summary: bool, hide_types: set,
+                            hide_legend: bool, hide_drops: bool) -> None:
+        # Each page is rendered OFF-SCREEN at the floor-plan's native
+        # resolution (see _render_map_image) — no viewport/window juggling, so
+        # the only state we touch is the visibility flags, restored in finally.
+        saved = {
+            "hidden": set(self._hidden_types),
+            "wires": self._show_wires.get(),
+            "legend": self._show_legend.get(),
+            "drops": self._show_drops.get(),
+            "fov": self._show_fov.get(),
+            "only_sel_fov": self._show_only_selected_fov.get(),
+            "legend_box": dict(self.legend_box) if self.legend_box else None,
+        }
+
+        map_pages: list[dict] = []
+        try:
+            if page_specs:
+                self._hidden_types = set(self._hidden_types) | set(hide_types)
+                self._show_legend.set(not hide_legend)
+                self._show_drops.set(not hide_drops)
+                self._show_only_selected_fov.set(False)  # export ALL cones
+                # Nudge the (now-shorter) legend down so it isn't floating high
+                # with empty space beneath it. Export-only; restored after.
+                if self.legend_box:
+                    self.legend_box = {**self.legend_box,
+                                       "y": self.legend_box.get("y", 0) + 250}
+
+                for spec in page_specs:
+                    self._show_wires.set(bool(spec["show_wires"]))
+                    self._show_fov.set(bool(spec["show_fov"]))
+                    img = self._render_map_image()
+                    if img is None:
+                        raise RuntimeError(
+                            "No floor-plan image is loaded to render.")
+                    fd, p = tempfile.mkstemp(suffix=".png", prefix="cwt_map_")
+                    os.close(fd)
+                    img.save(p)
+                    map_pages.append({"image": p, "caption": spec["label"]})
+        finally:
+            self._hidden_types = saved["hidden"]
+            self._show_wires.set(saved["wires"])
+            self._show_legend.set(saved["legend"])
+            self._show_drops.set(saved["drops"])
+            self._show_fov.set(saved["fov"])
+            self._show_only_selected_fov.set(saved["only_sel_fov"])
+            if saved["legend_box"] is not None:
+                self.legend_box = saved["legend_box"]
+            self._redraw()
+
+        tmp_pdf = path + ".tmp"
+        try:
+            project_name = (self._project.project_name if self._project else "")
+            project_name = project_name or os.path.splitext(
+                os.path.basename(self.drawio_path))[0]
+            export_mod.write_map_pdf(
+                tmp_pdf,
+                project_name=project_name,
+                map_pages=map_pages,
+                devices=self.devices,
+                symbol_types=self.symbol_types,
+                wire_routes=self.wire_routes,
+                bom_report=self._build_bom_report(),
+                model_lines=self._model_inventory(),
+                include_summary=include_summary,
+                floor_label=(self._project.active_floor if self._project else None),
+                scale_factor=self.scale_factor,
+                format_length=self._format_length,
+                currency=self._bom_currency_var.get() or "$",
+            )
+            os.replace(tmp_pdf, path)
+            messagebox.showinfo("Exported", f"PDF written:\n{path}")
+        except Exception as e:
+            log_error("PDF map export failed", e)
+            try:
+                if os.path.exists(tmp_pdf):
+                    os.unlink(tmp_pdf)
+            except OSError:
+                pass
+            messagebox.showerror("Export failed", str(e))
+        finally:
+            for pg in map_pages:
+                ip = pg.get("image")
+                if ip and os.path.exists(ip):
+                    try:
+                        os.unlink(ip)
+                    except OSError:
+                        pass
 
     # ============================================================ FOV rendering helper
     def _device_azimuth(self, dev: dict) -> float:

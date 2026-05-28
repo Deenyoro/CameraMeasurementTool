@@ -355,3 +355,206 @@ def write_pdf_report(
     story.append(dev_table)
 
     doc.build(story)
+
+
+def write_map_pdf(
+    path: str,
+    *,
+    project_name: str,
+    map_pages: list[dict] | None = None,
+    devices: list[dict],
+    symbol_types: dict[str, dict],
+    wire_routes: list[dict],
+    bom_report: BomReport,
+    model_lines: list | None = None,
+    include_summary: bool = True,
+    floor_label: str | None = None,
+    scale_factor: float | None = None,
+    format_length=lambda x: f"{x:.2f}\"" if x is not None else "--",
+    currency: str = "$",
+) -> None:
+    """Multi-page PDF: one full-view floor-plan page per entry in `map_pages`
+    (each {"image": path, "caption": str}) followed by an optional one-page
+    summary (project stats, the cable BOM, and the per-camera-model hardware
+    rollup). Each map page is sized to its image so the plan fills the page
+    instead of being shrunk onto a letter sheet; the summary is force-fit onto
+    ONE page via KeepInFrame(shrink). Requires `reportlab`."""
+    if not _HAS_REPORTLAB:
+        raise RuntimeError("reportlab is not installed. `pip install reportlab`.")
+
+    from reportlab.lib.pagesizes import landscape
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.platypus import Frame, KeepInFrame
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        PILImage = None
+
+    styles = getSampleStyleSheet()
+    h2 = ParagraphStyle("MH2", parent=styles["Heading2"], fontSize=13,
+                        textColor=colors.HexColor("#202020"))
+    small = ParagraphStyle("MSmall", parent=styles["BodyText"], fontSize=8,
+                           leading=10, textColor=colors.HexColor("#404040"))
+
+    c = rl_canvas.Canvas(path)
+
+    # ---- One full-view page per map view. Each page is sized to its image so
+    # the plan fills the page (PDF viewers fit-page → whole map, large). A
+    # small caption in the top-left corner names the view (wires / no wires /
+    # FOV …) without shrinking the image. Long side clamped to a sane range
+    # so tiny/huge captures still produce a usable page.
+    for pg in (map_pages or []):
+        img_path = pg.get("image") if isinstance(pg, dict) else None
+        if not img_path or not os.path.exists(img_path):
+            continue
+        caption = pg.get("caption", "") if isinstance(pg, dict) else ""
+        iw, ih = (PILImage.open(img_path).size
+                  if PILImage is not None else (1600, 900))
+        iw = iw or 1600
+        ih = ih or 900
+        # Page sized to the image aspect; the full-resolution image is
+        # embedded regardless, so viewers can zoom in to read every symbol.
+        # Clamp the long side to a sane point range (the page is just the
+        # default display size — detail is preserved at any page size).
+        mw, mh = float(iw), float(ih)
+        longside = max(mw, mh)
+        target = min(max(longside, 1000.0), 1700.0)
+        k = target / longside if longside else 1.0
+        mw, mh = mw * k, mh * k
+        c.setPageSize((mw, mh))
+        c.drawImage(img_path, 0, 0, width=mw, height=mh,
+                    preserveAspectRatio=True, anchor="c")
+        if caption:
+            label = f"{project_name} — {caption}"
+            c.setFont("Helvetica-Bold", 11)
+            tw = c.stringWidth(label, "Helvetica-Bold", 11)
+            c.setFillColorRGB(1, 1, 1)
+            c.rect(8, mh - 26, tw + 12, 20, fill=1, stroke=0)
+            c.setFillColorRGB(0.1, 0.1, 0.1)
+            c.drawString(14, mh - 21, label)
+        c.showPage()
+
+    # ---- Summary page (landscape letter, forced onto ONE page).
+    if include_summary:
+        page = landscape(letter)
+        LM = RM = TM = BM = 0.5 * inch
+        avail_w = page[0] - LM - RM
+        avail_h = page[1] - TM - BM
+        c.setPageSize(page)
+
+        def _is_cam(d):
+            if not isinstance(d, dict) or "type" not in d:
+                return False
+            sym = symbol_types.get(d["type"], {})
+            return isinstance(sym, dict) and sym.get("is_camera")
+
+        n_cam = sum(1 for d in devices if _is_cam(d))
+        total_ft = sum(getattr(l, "total_ft", 0.0) for l in bom_report.lines)
+        hw_total = sum(getattr(m, "subtotal", 0.0) for m in (model_lines or []))
+        full_total = bom_report.grand_total + hw_total
+
+        content = []
+        content.append(Paragraph(f"{project_name} — Summary", h2))
+        content.append(Paragraph(
+            f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            + (f"  ·  Floor {floor_label}" if floor_label else "")
+            + (f"  ·  1 px = {scale_factor:.4f}\"" if scale_factor else ""),
+            small))
+        content.append(Spacer(1, 8))
+
+        stats = [
+            ["Devices", str(len(devices)),
+             "Wire runs", str(len(wire_routes)),
+             "Total wire", f"{total_ft:,.1f} ft"],
+            ["Cameras", str(n_cam),
+             "Cable cost", f"{currency}{bom_report.grand_total:,.2f}",
+             "Hardware", f"{currency}{hw_total:,.2f}"],
+        ]
+        stats_tbl = Table(stats, colWidths=[1.1*inch, 1.4*inch, 1.1*inch,
+                                            1.4*inch, 1.1*inch, 1.5*inch])
+        stats_tbl.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f0f0f0")),
+            ("BACKGROUND", (4, 0), (4, -1), colors.HexColor("#f0f0f0")),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+            ("FONTNAME", (4, 0), (4, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        content.append(stats_tbl)
+        content.append(Spacer(1, 10))
+
+        # Cable BOM table (left).
+        bom_data = [["Cable", "Runs", "Ft", f"Sub ({currency})"]]
+        for line in bom_report.lines:
+            bom_data.append([line.cable_id, str(line.runs),
+                             f"{line.total_ft:,.1f}", f"{line.subtotal:,.2f}"])
+        bom_data.append(["TOTAL", "", f"{total_ft:,.1f}",
+                         f"{bom_report.grand_total:,.2f}"])
+        bom_tbl = Table(bom_data,
+                        colWidths=[1.2*inch, 0.6*inch, 0.8*inch, 1.0*inch])
+        bom_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#202060")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e8e8f4")),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ]))
+
+        # Camera-model hardware table (right).
+        model_data = [["Model", "Model #", "Qty", f"Sub ({currency})"]]
+        for m in (model_lines or []):
+            model_data.append([str(getattr(m, "name", ""))[:24],
+                               str(getattr(m, "model_number", "")),
+                               str(getattr(m, "count", 0)),
+                               f"{getattr(m, 'subtotal', 0.0):,.2f}"])
+        if not (model_lines or []):
+            model_data.append(["(no models assigned)", "", "", ""])
+        else:
+            model_data.append(["HARDWARE TOTAL", "",
+                               str(sum(getattr(m, "count", 0) for m in model_lines)),
+                               f"{hw_total:,.2f}"])
+        model_tbl = Table(model_data,
+                          colWidths=[1.8*inch, 1.1*inch, 0.5*inch, 1.0*inch])
+        model_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#604020")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f4ece8")),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ]))
+
+        side = Table([[bom_tbl, model_tbl]],
+                     colWidths=[avail_w * 0.42, avail_w * 0.58])
+        side.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (0, 0), 12),
+        ]))
+        content.append(side)
+        content.append(Spacer(1, 10))
+        content.append(Paragraph(
+            f"<b>FULL TOTAL (wiring + hardware): "
+            f"{currency}{full_total:,.2f}</b>", h2))
+
+        # KeepInFrame(mode='shrink') guarantees the whole summary fits on one
+        # page — it scales the content down rather than spilling over.
+        kif = KeepInFrame(avail_w, avail_h, content, mode="shrink")
+        frame = Frame(LM, BM, avail_w, avail_h, leftPadding=0, rightPadding=0,
+                      topPadding=0, bottomPadding=0)
+        frame.addFromList([kif], c)
+        c.showPage()
+
+    c.save()

@@ -22,6 +22,7 @@ Thumbs.db
 # Distribution / build
 dist/
 build/
+build_exe.log
 *.egg-info/
 *.egg
 *.spec

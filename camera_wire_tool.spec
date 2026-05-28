@@ -14,9 +14,11 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# Bundle the optional Sun Valley theme's .tcl data files (best-effort —
-# the app runs fine without it, so don't fail the build if it's absent).
-for pkg in ("sv_ttk",):
+# Bundle the Sun Valley theme's .tcl data files and reportlab (PDF export
+# needs its bundled fonts/data). Best-effort per package — the app still
+# launches if one is absent (sv_ttk falls back to ttk; PDF export just
+# reports "reportlab unavailable").
+for pkg in ("sv_ttk", "reportlab"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -35,7 +37,8 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # Not imported by the app — excluding trims a lot off the exe size.
-    excludes=["numpy", "pymupdf", "fitz", "pytest", "reportlab", "mypy", "ruff"],
+    # (reportlab is intentionally NOT excluded — PDF export needs it.)
+    excludes=["numpy", "pymupdf", "fitz", "pytest", "mypy", "ruff"],
     noarchive=False,
 )
 
