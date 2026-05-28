@@ -15,7 +15,8 @@ class SymbolType(TypedDict):
     shape: Literal["ellipse", "rect", "roundrect", "hexagon", "halfrect", "step"]
     color: str           # "#RRGGBB"
     is_camera: bool
-    cable_type: NotRequired[str]   # references CableType.id; default per-category
+    is_run_point: NotRequired[bool]    # wire-aggregation point (IDF closet, NVR, switch)
+    cable_type: NotRequired[str]       # references CableType.id; default per-category
     extra_cables: NotRequired[list[str]]  # optional secondary cables
 
 

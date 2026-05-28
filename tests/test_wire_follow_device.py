@@ -44,6 +44,12 @@ def _make_app(scale_factor=1.0):
         cwt.CameraWireTool._alignment_scale(app, *a, **k))
     app._effective_scale_factor = lambda: (
         cwt.CameraWireTool._effective_scale_factor(app))
+    # Drop-point vertical helpers — no-ops here (project=None → 0.0), but
+    # RecalcWiresCmd consults them when recomputing length_in.
+    app._vertical_in_for_drop_ids = lambda ids: (
+        cwt.CameraWireTool._vertical_in_for_drop_ids(app, ids))
+    app._route_vertical_in = lambda r: (
+        cwt.CameraWireTool._route_vertical_in(app, r))
     return app
 
 

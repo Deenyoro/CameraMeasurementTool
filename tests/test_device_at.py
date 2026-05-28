@@ -14,12 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import camera_wire_tool as cwt
 
 
-def _stub(devices, *, camera_check=lambda t: False):
+def _stub(devices, *, camera_check=lambda t: False, hidden_types=()):
     app = types.SimpleNamespace(devices=devices)
     app.dx_scale = 1.0
     app.dy_scale = 1.0
     app._drawio_to_img = lambda x, y: (x, y)
     app._is_camera_type = camera_check
+    app._hidden_types = set(hidden_types)
     return app
 
 
@@ -65,6 +66,25 @@ def test_skips_device_with_non_numeric_coords():
 def test_no_devices_returns_none():
     app = _stub([])
     assert cwt.CameraWireTool._device_at(app, 5, 5) is None
+
+
+def test_hidden_type_is_not_hittable():
+    """A device whose type is in _hidden_types is non-interactive — the
+    hit-test skips it so clicks fall through to whatever's beneath."""
+    devices = [{"id": "s1", "type": "CR", "x": 0, "y": 0, "w": 10, "h": 10}]
+    app = _stub(devices, hidden_types={"CR"})
+    assert cwt.CameraWireTool._device_at(app, 5, 5) is None
+
+
+def test_hidden_type_falls_through_to_visible_device():
+    """With two overlapping devices, hiding the top type lets the hit-test
+    find the still-visible one underneath."""
+    devices = [
+        {"id": "cr1", "type": "CR", "x": 0, "y": 0, "w": 20, "h": 20},
+        {"id": "md1", "type": "MD", "x": 0, "y": 0, "w": 20, "h": 20},
+    ]
+    app = _stub(devices, hidden_types={"CR"})
+    assert cwt.CameraWireTool._device_at(app, 5, 5) is devices[1]
 
 
 def test_camera_preferred_over_non_camera_overlap():

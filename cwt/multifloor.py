@@ -106,6 +106,21 @@ def _safe_align_field(alignment: dict, key: str, default: float) -> float:
         return default
 
 
+def is_identity_alignment(alignment: dict) -> bool:
+    """True when an alignment is (within tolerance) the identity transform.
+
+    tx/ty within half a pixel, scale within 1e-4, rotation within 0.01°.
+    A non-dict / corrupt value counts as identity — there's nothing
+    meaningful to apply. Used to tell an aligned floor (mapped onto a
+    shared frame) apart from an un-aligned one."""
+    if not isinstance(alignment, dict):
+        return True
+    return (abs(_safe_align_field(alignment, "tx", 0.0)) < 0.5
+            and abs(_safe_align_field(alignment, "ty", 0.0)) < 0.5
+            and abs(_safe_align_field(alignment, "scale", 1.0) - 1.0) < 1e-4
+            and abs(_safe_align_field(alignment, "rotation_deg", 0.0)) < 0.01)
+
+
 def apply_alignment(
     pt: tuple[float, float], alignment: dict,
 ) -> tuple[float, float]:
@@ -160,12 +175,86 @@ class ProjectState:
     floors: list[FloorState] = field(default_factory=list)
     cable_types: dict = field(default_factory=dict)
     risers: list[dict] = field(default_factory=list)
+    # Cross-floor cable drop points (vertical risers placed by the user).
+    # Each is a project-level entity positioned in SHARED world/aligned
+    # coords so it lands at the same physical spot on every floor it's
+    # shown on. See coerce_drop_point() for the dict shape.
+    drop_points: list[dict] = field(default_factory=list)
     scale_factor: float | None = None
     unit: str = "ft-in"
     next_device_id: int = 100
 
     def get_floor(self, fid: str) -> FloorState | None:
         return next((f for f in self.floors if f.id == fid), None)
+
+
+def elevation_gap_ft(project: ProjectState, floor_a_id: str, floor_b_id: str) -> float:
+    """Absolute vertical distance in FEET between two floors, from their
+    elevation_ft. Returns 0.0 if either floor is unknown (no gap to add)."""
+    a = project.get_floor(floor_a_id)
+    b = project.get_floor(floor_b_id)
+    if a is None or b is None:
+        return 0.0
+    try:
+        return abs(float(a.elevation_ft) - float(b.elevation_ft))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def vertical_inches_between(project: ProjectState, floor_a_id: str, floor_b_id: str) -> float:
+    """Vertical riser distance in INCHES between two floors (feet × 12).
+    Wire lengths are tracked in inches, so this is the amount added to a
+    cross-floor wire that terminates on a drop point whose home floor
+    differs from the floor the wire was drawn on."""
+    return elevation_gap_ft(project, floor_a_id, floor_b_id) * 12.0
+
+
+def coerce_drop_point(raw: dict, valid_floor_ids: set[str] | None = None) -> dict | None:
+    """Normalize a drop-point dict (from disk or UI) into a safe, round-
+    trippable shape, or None if too malformed to keep.
+
+    Shape: {id, label, x, y, floors: [floor_id, ...], home_floor, cable_type?}
+      - x, y    : SHARED world/aligned coords (same physical spot on every
+                  floor the drop is shown on — a true vertical riser).
+      - floors  : the floors the drop appears on / can be wired to (>= 1).
+      - home_floor : where the cable actually terminates; the vertical
+                  reference. Forced into `floors` if missing/invalid.
+      - cable_type : optional explicit cable override.
+
+    When valid_floor_ids is given, floor refs outside it are dropped (used
+    when cascading a floor deletion); on plain load we pass None so a
+    transiently-missing floor doesn't silently discard the drop."""
+    if not isinstance(raw, dict):
+        return None
+    did = raw.get("id")
+    if not did or not isinstance(did, str):
+        return None
+    try:
+        x = float(raw.get("x"))
+        y = float(raw.get("y"))
+    except (TypeError, ValueError):
+        return None
+    raw_floors = raw.get("floors", [])
+    floors = ([str(fid) for fid in raw_floors if isinstance(fid, str)]
+              if isinstance(raw_floors, list) else [])
+    if valid_floor_ids is not None:
+        floors = [fid for fid in floors if fid in valid_floor_ids]
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    floors = [f for f in floors if not (f in seen or seen.add(f))]
+    if not floors:
+        return None
+    home = raw.get("home_floor")
+    if not isinstance(home, str) or home not in floors:
+        home = floors[0]
+    label = raw.get("label")
+    label = label if isinstance(label, str) and label else did
+    out = {"id": did, "label": label, "x": x, "y": y,
+           "floors": floors, "home_floor": home}
+    ct = raw.get("cable_type")
+    if isinstance(ct, str) and ct:
+        out["cable_type"] = ct
+    return out
 
 
 def load_project(project_path: str, drawio_path: str) -> ProjectState:
@@ -324,6 +413,12 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
     cable_types = dict(raw_ct) if isinstance(raw_ct, dict) else {}
     raw_risers = data.get("risers", [])
     risers = list(raw_risers) if isinstance(raw_risers, list) else []
+    # Drop points: normalize each entry, skipping malformed ones. Floors
+    # are NOT filtered against the loaded set here — a floor that failed to
+    # parse this session shouldn't silently discard a valid drop.
+    raw_drops = data.get("drop_points", [])
+    drop_points = ([d for d in (coerce_drop_point(r) for r in raw_drops)
+                    if d is not None] if isinstance(raw_drops, list) else [])
     return ProjectState(
         version=2,
         project_name=project_name,
@@ -331,6 +426,7 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         floors=floors,
         cable_types=cable_types,
         risers=risers,
+        drop_points=drop_points,
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -357,6 +453,13 @@ def _serialize_wire(wr: dict) -> dict | None:
     out = {"points": points, "device_id": wr.get("device_id")}
     if wr.get("cable_type"):
         out["cable_type"] = wr["cable_type"]
+    # Drop-point ids the wire terminates on — needed to recompute its
+    # cross-floor riser footage on reload.
+    raw_drop_ids = wr.get("drop_ids")
+    if isinstance(raw_drop_ids, list):
+        ids = [str(i) for i in raw_drop_ids if isinstance(i, str)]
+        if ids:
+            out["drop_ids"] = ids
     return out
 
 
@@ -411,6 +514,11 @@ def save_project(project: ProjectState, project_path: str) -> None:
         # a non-dict entry would survive json.dump but be a tripping
         # hazard on the next load. Skip it at save time too.
         "risers": [r for r in project.risers if isinstance(r, dict)],
+        # Normalize drops on the way out too, so a junk in-memory entry
+        # can't write an un-loadable record.
+        "drop_points": [d for d in (coerce_drop_point(r)
+                                    for r in project.drop_points)
+                        if d is not None],
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,

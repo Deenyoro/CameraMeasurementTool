@@ -30,10 +30,12 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
+import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,7 +43,7 @@ from enum import Enum, auto
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, font as tkfont, messagebox, ttk
 
 from PIL import Image, ImageTk
 
@@ -54,6 +56,7 @@ except ImportError:
 # cwt support package (always available — sits next to this script)
 import cwt
 from cwt import bom as bom_mod
+from cwt import bundle as bundle_mod
 from cwt import fov as fov_mod
 from cwt import lenses as lenses_mod
 from cwt import multifloor as mf_mod
@@ -536,7 +539,8 @@ def _follow_wires_with_device(app, device_id: str,
             # this, dragging a device on a 1.5x-aligned floor produced
             # a length_in that was 1/1.5x its true value.
             eff = app._effective_scale_factor()
-            wr["length_in"] = (wr["length_px"] * eff) if eff is not None else None
+            wr["length_in"] = ((wr["length_px"] * eff + app._route_vertical_in(wr))
+                               if eff is not None else None)
 
 
 class MoveDeviceCmd(Command):
@@ -1279,9 +1283,14 @@ class CameraWireTool:
     # Cleared once consumed.
     _pending_align_target_id: str | None = None
 
-    def __init__(self, root: tk.Tk, drawio_path: str):
+    def __init__(self, root: tk.Tk, drawio_path: str,
+                 bundle_path: str | None = None):
         self.root = root
         self.drawio_path = drawio_path
+        # When opened from a .zsmt, this is that bundle — every save appends
+        # a revision to it (rather than a folder side-car). See
+        # _bundle_sidecar_path().
+        self._bundle_path = bundle_path
         self.root.state("zoomed")
 
         # Parse — show user-friendly error rather than stack trace
@@ -1359,6 +1368,20 @@ class CameraWireTool:
         # other. Default ON so the app looks normal on first launch.
         self._show_devices = tk.BooleanVar(value=True)
         self._show_wires = tk.BooleanVar(value=True)
+        # Per-type on-map visibility: a set of device TYPE CODES (e.g.
+        # "CR", "M") to hide on the canvas. Empty = show everything. It's
+        # an opt-OUT set so any newly-added type is visible by default and
+        # nothing silently disappears. Restored from prefs below, persisted
+        # on change, and applied consistently across floors (type codes are
+        # shared via the legend). Toggled per-type from the Devices pane or
+        # in bulk via the toolbar "Cameras only" preset.
+        self._hidden_types: set[str] = set()
+        # Derived display state for the toolbar "Cameras only" checkbox —
+        # true iff _hidden_types is exactly the set of non-camera types.
+        # Not persisted directly; recomputed from _hidden_types.
+        self._cameras_only_var = tk.BooleanVar(value=False)
+        # Cross-floor cable drop points layer toggle.
+        self._show_drops = tk.BooleanVar(value=True)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -1400,6 +1423,10 @@ class CameraWireTool:
         # `_loaded_unit` only when the project file didn't carry one.
         self._initial_pref_unit = prefs.get("unit")
         self._user_settings = prefs
+        # Restore hidden device types (per-type on-map visibility).
+        ht = prefs.get("hidden_types")
+        if isinstance(ht, list):
+            self._hidden_types = {str(c) for c in ht}
 
         # Restore view toggles from prefs (initialized to defaults above).
         # Use `if key in prefs` so we don't clobber the default with False
@@ -1412,6 +1439,7 @@ class CameraWireTool:
             ("show_legend",     self._show_legend),
             ("show_devices",    self._show_devices),
             ("show_wires",      self._show_wires),
+            ("show_drops",      self._show_drops),
         ):
             if key in prefs:
                 try:
@@ -1434,6 +1462,10 @@ class CameraWireTool:
         # Legend-drag state — set when the user clicks-and-drags the legend
         # rectangle on the canvas to reposition it.
         self._dragging_legend: dict | None = None    # {start_drawio, start_offset}
+        # Cable-drop-point interaction state.
+        self._placing_drop: bool = False             # next click places a drop
+        self._dragging_drop: dict | None = None      # {drop, off_wx, off_wy, moved}
+        self._selected_drop: dict | None = None      # currently selected drop
         # FOV rotation drag state — set when user drags the FOV handle of a camera
         self._rotating_fov: dict | None = None
         # Cache of FOV handle positions per device, populated by _draw_fov_cones
@@ -1489,11 +1521,17 @@ class CameraWireTool:
         self.root.after(800, self._maybe_warn_drastic_alignment)
 
     def _maybe_warn_drastic_alignment(self) -> None:
-        """Surface a one-time prompt at startup if the active floor's
-        alignment looks unusual enough to be an accidental wrong-target
-        apply. Triggered by scale outside [0.6, 1.7] or rotation > 20°.
-        Offers the one-click Clear path so the user doesn't have to
-        hunt through the Floors menu."""
+        """Surface a one-time, NON-destructive nudge at startup only if the
+        active floor's alignment looks genuinely broken (scale way off or a
+        big rotation) — the kind that makes the plan render off-page.
+
+        History: this used to flag scale outside [0.6, 1.7] and offer a
+        one-click reset that SAVED over the project. That destroyed a
+        perfectly valid 1.886x cross-floor alignment. A large scale is a
+        legitimate alignment between floors whose plans were drawn at
+        different scales, so the range is now wide and the prompt never
+        resets-and-saves on its own — it only points at the manual
+        'Clear alignment' action, which is itself undoable via revisions."""
         if self._project is None:
             return
         active = self._project.get_floor(self._project.active_floor)
@@ -1505,43 +1543,21 @@ class CameraWireTool:
             r = float(al.get("rotation_deg", 0.0) or 0.0)
         except (TypeError, ValueError):
             return
-        if 0.6 <= s <= 1.7 and abs(r) <= 20:
-            return   # within normal range, no warning
+        # Only truly extreme transforms (off-page render) warrant a nudge.
+        if 0.1 <= s <= 10.0 and abs(r) <= 90:
+            return   # within the (now generous) normal range, no warning
         try:
             tx = float(al.get("tx", 0) or 0); ty = float(al.get("ty", 0) or 0)
         except (TypeError, ValueError):
             tx = ty = 0
-        ans = messagebox.askyesnocancel(
-            "Unusual alignment detected",
-            f"Floor {active.id} ({active.name}) loaded with a non-identity\n"
-            f"alignment:\n"
-            f"  scale: {s:.3f}x\n"
-            f"  rotation: {r:+.1f}°\n"
-            f"  offset: ({tx:+.0f}, {ty:+.0f}) px\n\n"
-            f"This is what causes the 'symbols off the page / shrunken\n"
-            f"floor plan' look. If you meant to align THIS floor onto\n"
-            f"another floor's frame, keep it as is.\n\n"
-            f"YES — reset {active.id} to identity (recommended if {active.id}\n"
-            f"        is your reference / main floor)\n"
-            f"NO  — keep the current alignment\n"
-            f"Cancel — don't ask again this session")
-        if ans is True:
-            active.alignment = dict(mf_mod.IDENTITY_ALIGNMENT)
-            self._mark_dirty()
-            try:
-                mf_mod.save_project(self._project, self.project_path)
-            except OSError as e:
-                log_error("Save after warn-drastic-clear failed", e)
-            self._fit_image()
-            self._recalc_all_wires()
-            self._refresh_wire_list()
-            self._refresh_bom_tab()
-            if hasattr(self, "scale_label"):
-                self.scale_label.config(text=self._scale_label_text())
-            self._redraw()
-            self._flash_status(
-                f"{active.id} alignment cleared. The floor now renders at "
-                f"its natural size.", ttl_ms=4500)
+        # Non-destructive: just inform. Never reset-and-save automatically —
+        # that's how a valid alignment got wiped before. If the user really
+        # wants to clear it, the Floors menu → 'Clear alignment' does so
+        # explicitly (and a revision is kept so it's reversible).
+        self._flash_status(
+            f"{active.id} has a strong alignment (scale {s:.2f}x, "
+            f"rot {r:+.0f}°). If the plan looks off-page and you didn't mean "
+            f"to align it, use Floors → 'Clear alignment'.", ttl_ms=8000)
 
     def _resume_pending_anchor_pick(self) -> None:
         """If a previous tool instance was switching floors mid-anchor-
@@ -1692,7 +1708,9 @@ class CameraWireTool:
                 continue
             px_len = self._calc_wire_length(pts)
             eff = self._effective_scale_factor()
-            real_in = px_len * eff if eff is not None else None
+            drop_ids = wr.get("drop_ids") if isinstance(wr.get("drop_ids"), list) else None
+            real_in = ((px_len * eff + self._vertical_in_for_drop_ids(drop_ids))
+                       if eff is not None else None)
             entry = {
                 "points": pts,
                 "length_px": px_len,
@@ -1701,6 +1719,8 @@ class CameraWireTool:
             }
             if wr.get("cable_type"):
                 entry["cable_type"] = wr["cable_type"]
+            if drop_ids:
+                entry["drop_ids"] = list(drop_ids)
             self.wire_routes.append(entry)
 
     def _save_project(self) -> None:
@@ -1730,6 +1750,8 @@ class CameraWireTool:
             }
             if wr.get("cable_type"):
                 entry["cable_type"] = wr["cable_type"]
+            if wr.get("drop_ids"):
+                entry["drop_ids"] = list(wr["drop_ids"])
             active.wire_routes.append(entry)
 
         try:
@@ -1737,6 +1759,190 @@ class CameraWireTool:
         except OSError as e:
             log_error(f"Could not write project file {self.project_path}", e)
             messagebox.showerror("Save failed", f"Could not write project file:\n{e}")
+            return
+        # Append a revision to the side-car .zsmt backlog so every save is
+        # recoverable. Best-effort + content-deduped (no-op saves don't spam).
+        self._commit_revision(note="save")
+
+    # ---------------- Project bundle (.zsmt) — revision backlog
+    def _bundle_sidecar_path(self) -> str:
+        """The .zsmt that holds this project's revision history. When the
+        project was opened FROM a bundle, that's the bundle itself; for a
+        plain folder project it's a side-car derived from the project file
+        (Foo.wiremap.json → Foo.zsmt)."""
+        if getattr(self, "_bundle_path", None):
+            return self._bundle_path
+        base = self.project_path
+        for suff in (".wiremap.json", ".json"):
+            if base.endswith(suff):
+                return base[:-len(suff)] + bundle_mod.BUNDLE_EXT
+        return os.path.splitext(base)[0] + bundle_mod.BUNDLE_EXT
+
+    def _floor_drawio_paths(self) -> dict[str, str]:
+        """{floor_id: resolved .drawio path} for the current project."""
+        out: dict[str, str] = {}
+        if self._project is None:
+            return out
+        base = os.path.dirname(self.project_path)
+        for f in self._project.floors:
+            df = f.drawio_file
+            p = (df if os.path.isabs(df)
+                 else os.path.normpath(os.path.join(base, df)))
+            if os.path.exists(p):
+                out[f.id] = p
+        return out
+
+    def _commit_revision(self, note: str = "") -> str | None:
+        """Append a revision of the current on-disk project to the side-car
+        bundle. Reads the just-written wiremap so the snapshot is exact."""
+        if self._project is None:
+            return None
+        try:
+            with open(self.project_path, encoding="utf-8") as fh:
+                wm = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        files = self._floor_drawio_paths()
+        if not files:
+            return None
+        try:
+            return bundle_mod.commit_revision(
+                self._bundle_sidecar_path(), wm, files,
+                note=note, app_version=cwt.__version__)
+        except Exception as e:   # never let a backlog write break a save
+            log_error("Revision commit to bundle failed", e)
+            return None
+
+    def _export_bundle(self) -> None:
+        """Write a portable .zsmt copy (current state + full history) the
+        user can move/share. Ensures the latest state is committed first."""
+        self._save_drawio()   # flush drawio + wiremap + commit a revision
+        sidecar = self._bundle_sidecar_path()
+        if not os.path.exists(sidecar):
+            self._commit_revision(note="export")
+        dest = filedialog.asksaveasfilename(
+            title="Export project bundle",
+            initialdir=os.path.dirname(self.project_path),
+            initialfile=os.path.basename(sidecar),
+            defaultextension=bundle_mod.BUNDLE_EXT,
+            filetypes=[("Camera Measurement bundle", "*" + bundle_mod.BUNDLE_EXT)])
+        if not dest:
+            return
+        try:
+            if os.path.abspath(dest) != os.path.abspath(sidecar):
+                shutil.copy2(sidecar, dest)
+        except OSError as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        self._flash_status(f"Bundle exported to {os.path.basename(dest)}.",
+                           ttl_ms=4000)
+
+    def _show_revisions_dialog(self) -> None:
+        """List the save history from the side-car bundle and let the user
+        revert to any revision."""
+        # Make sure the current state is in the backlog before showing it.
+        self._save_drawio()
+        sidecar = self._bundle_sidecar_path()
+        if not os.path.exists(sidecar):
+            self._flash_status("No revision history yet — save once to start "
+                               "the backlog.", ttl_ms=4000)
+            return
+        try:
+            revs = bundle_mod.list_revisions(sidecar)
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
+            messagebox.showerror("Revisions", f"Couldn't read history:\n{e}")
+            return
+        if not revs:
+            self._flash_status("No revisions recorded yet.", ttl_ms=3000)
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.title("Revision history")
+        dlg.geometry("520x420")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        ttk.Label(dlg, text="Every save is a revision. Select one and revert "
+                            "— your current state is snapshotted first, so "
+                            "revert is itself undoable.",
+                  wraplength=480, justify=tk.LEFT, foreground="#7fc4ff",
+                  ).pack(anchor=tk.W, padx=10, pady=(8, 6))
+        frame = ttk.Frame(dlg)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        lb = tk.Listbox(frame, font=("Consolas", 9))
+        sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=lb.yview)
+        lb.config(yscrollcommand=sb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        # Newest first.
+        ordered = list(reversed(revs))
+        for i, r in enumerate(ordered):
+            tag = "  (current)" if i == 0 else ""
+            lb.insert(tk.END, f'{r.get("iso", "?")}   {r.get("note", "")}{tag}')
+        lb.selection_set(0)
+
+        def _do_revert() -> None:
+            sel = lb.curselection()
+            if not sel:
+                return
+            r = ordered[sel[0]]
+            if not messagebox.askyesno(
+                "Revert?",
+                f"Revert the project to:\n\n{r.get('iso','')}  "
+                f"{r.get('note','')}\n\nYour current state is saved as a new "
+                f"revision first, so you can come back to it.", parent=dlg):
+                return
+            dlg.destroy()
+            self._revert_to_revision(r.get("id"))
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=10, pady=8)
+        ttk.Button(btns, text="Revert to selected",
+                   command=_do_revert).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
+
+    def _revert_to_revision(self, rev_id) -> None:
+        """Restore a revision: write its wiremap + drawios back over the
+        working files, then relaunch the app on the result."""
+        sidecar = self._bundle_sidecar_path()
+        # Snapshot current state first so the revert is reversible.
+        self._commit_revision(note="before revert")
+        try:
+            wm, floors, rev = bundle_mod.read_revision(sidecar, rev_id)
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as e:
+            messagebox.showerror("Revert failed", str(e))
+            return
+        base = os.path.dirname(self.project_path)
+        by_id = {f.get("id"): f for f in wm.get("floors", [])}
+        try:
+            for fid, data in floors.items():
+                f = by_id.get(fid)
+                if not f:
+                    continue
+                df = f.get("drawio_file")
+                p = (df if os.path.isabs(df)
+                     else os.path.normpath(os.path.join(base, df)))
+                with open(p, "wb") as fh:
+                    fh.write(data)
+            with open(self.project_path, "w", encoding="utf-8") as fh:
+                json.dump(wm, fh, indent=2)
+        except OSError as e:
+            messagebox.showerror("Revert failed",
+                                 f"Couldn't write restored files:\n{e}")
+            return
+        active = wm.get("active_floor")
+        af = by_id.get(active) or (wm.get("floors") or [{}])[0]
+        df = af.get("drawio_file")
+        apath = (df if os.path.isabs(df)
+                 else os.path.normpath(os.path.join(base, df)))
+        keep_bundle = self._bundle_path
+        self._flush_pending_settings()
+        self.root.destroy()
+        new_root = tk.Tk()
+        apply_theme(new_root)
+        new_root.title("Camera Wire Estimation Tool")
+        CameraWireTool(new_root, apath, bundle_path=keep_bundle)
+        new_root.mainloop()
 
     # ============================================================ initial render + events
     def _initial_render(self) -> None:
@@ -2370,7 +2576,8 @@ class CameraWireTool:
             except tk.TclError:
                 pass
         file_menu.config(postcommand=_refresh_file_menu_state)
-        file_menu.add_command(label="Open .drawio…", command=self._file_open, accelerator="Ctrl+O")
+        file_menu.add_command(label="Open… (.zsmt / .drawio)",
+                              command=self._file_open, accelerator="Ctrl+O")
         self._recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
         # Refresh on every open so a file deleted externally during this
@@ -2382,6 +2589,11 @@ class CameraWireTool:
         file_menu.add_command(label="Save", command=self._save_drawio, accelerator="Ctrl+S")
         file_menu.add_command(label="Save As…", command=self._file_save_as,
                               accelerator="Ctrl+Shift+S")
+        file_menu.add_separator()
+        file_menu.add_command(label="🕘  Revisions / revert…",
+                              command=self._show_revisions_dialog)
+        file_menu.add_command(label="📦  Export project bundle (.zsmt)…",
+                              command=self._export_bundle)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close,
                               accelerator="Ctrl+Q")
@@ -2713,6 +2925,22 @@ class CameraWireTool:
         )
         fov_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
+        drops_btn = ttk.Checkbutton(
+            toolbar, text="Drops", variable=self._show_drops,
+            style="Toolbutton", command=self._redraw,
+        )
+        drops_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(drops_btn,
+                "Show / hide cross-floor cable drop / riser points on the map.")
+        cam_only_btn = ttk.Checkbutton(
+            toolbar, text="Cameras only", variable=self._cameras_only_var,
+            style="Toolbutton", command=self._on_cameras_only_toggle,
+        )
+        cam_only_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(cam_only_btn,
+                "Show only cameras on the map; hide all other device "
+                "types (card readers, motion sensors, door switches, …). "
+                "Per-type control is in the Devices tab.")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         # Floor switcher — visible at all times so multi-floor mode is
@@ -2735,6 +2963,14 @@ class CameraWireTool:
                 "is its own .drawio — the project (.wiremap.json) bundles "
                 "them together. PgUp/PgDn also switches.")
         self._refresh_floor_mb_label()
+        add_drop_btn = ttk.Button(
+            toolbar, text="🪜 Drop", width=8,
+            command=self._start_place_drop, style="Toolbutton")
+        add_drop_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(add_drop_btn,
+                "Add a cross-floor cable drop / riser point: click here, "
+                "then click the map to place it. You'll pick which floors "
+                "it spans and its home floor.")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         # Mode segmented control
@@ -2900,6 +3136,25 @@ class CameraWireTool:
                 "(Cat6 / Cat5e / …). Ctrl+F focuses.")
         self._dev_search_var.trace_add("write", lambda *_: self._refresh_device_list())
 
+        # Quick on-map visibility presets. Per-type toggles live on each
+        # group header below (click the ● / ○ glyph). These three cover
+        # the common bulk cases.
+        vis_frame = ttk.Frame(tab_dev)
+        vis_frame.pack(fill=tk.X, padx=6, pady=(0, 2))
+        ttk.Label(vis_frame, text="Show on map:").pack(side=tk.LEFT)
+        all_b = ttk.Button(vis_frame, text="All", width=5,
+                           command=self._show_all_types)
+        all_b.pack(side=tk.LEFT, padx=(4, 2))
+        Tooltip(all_b, "Show every device type on the map.")
+        cam_b = ttk.Button(vis_frame, text="Cameras", width=8,
+                           command=self._show_cameras_only)
+        cam_b.pack(side=tk.LEFT, padx=2)
+        Tooltip(cam_b, "Show only cameras; hide all other device types.")
+        none_b = ttk.Button(vis_frame, text="None", width=5,
+                            command=self._hide_all_types)
+        none_b.pack(side=tk.LEFT, padx=2)
+        Tooltip(none_b, "Hide all device types from the map.")
+
         df = ttk.Frame(tab_dev)
         df.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         # EXTENDED selectmode lets the user Ctrl/Shift-click rows to
@@ -3006,6 +3261,16 @@ class CameraWireTool:
         Tooltip(simp_btn,
                 "Remove redundant collinear waypoints from this wire.\n"
                 "Same shape, fewer handles.")
+        # Hide/show ALL wires on the map without touching devices — bound
+        # to the same flag as the toolbar 'Wires' toggle, so the two stay
+        # in sync. Uncheck = clean device-only view.
+        show_wires_cb = ttk.Checkbutton(
+            wbtns, text="Show wires on map",
+            variable=self._show_wires, command=self._redraw)
+        show_wires_cb.pack(side=tk.RIGHT)
+        Tooltip(show_wires_cb,
+                "Hide / show ALL wires on the map without hiding devices. "
+                "Mirrors the toolbar 'Wires' toggle.")
 
         ttk.Separator(tab_wire, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=4)
         # Big total — same prominence as the toolbar metric badge
@@ -3824,7 +4089,12 @@ class CameraWireTool:
         self._tick_save_indicator()
 
     def _update_title(self) -> None:
-        name = os.path.basename(self.drawio_path)
+        # When the project was opened from a .zsmt bundle, show the bundle's
+        # name — the extracted work-dir .drawio is an implementation detail.
+        if getattr(self, "_bundle_path", None):
+            name = os.path.basename(self._bundle_path)
+        else:
+            name = os.path.basename(self.drawio_path)
         star = "*" if self._dirty else ""
         # In multi-floor mode, include the active floor's id + name so
         # the user can tell which floor they're on at a glance from the
@@ -4002,7 +4272,9 @@ class CameraWireTool:
         return devs
 
     def _toggle_dev_group(self, event) -> None:
-        """Click on a group header toggles collapse/expand."""
+        """Click on a group header. The leading ● / ○ glyph on a TYPE
+        header toggles that type's on-map visibility; clicking anywhere
+        else on the header collapses / expands the group."""
         idx = self.dev_listbox.nearest(event.y)
         if idx < 0 or not hasattr(self, "_dev_listbox_rows"):
             return
@@ -4011,15 +4283,470 @@ class CameraWireTool:
         row = self._dev_listbox_rows[idx]
         if not isinstance(row, str):
             return  # not a group header — let normal click handling proceed
+        # Type headers carry a leading visibility glyph. The listbox font
+        # is monospace (Consolas), so a char-width measure reliably tells
+        # us whether the click landed on that glyph vs. the rest of the row.
+        if row.startswith("type:"):
+            try:
+                f = tkfont.Font(font=self.dev_listbox.cget("font"))
+                glyph_zone = f.measure("● ") + 3
+            except tk.TclError:
+                glyph_zone = 16
+            if event.x <= glyph_zone:
+                self._toggle_type_hidden(row.split(":", 1)[1])
+                return
         # Toggle collapsed state and rebuild the list
         if row in self._dev_collapsed:
             self._dev_collapsed.discard(row)
         else:
             self._dev_collapsed.add(row)
         self._refresh_device_list()
+
+    # ---------------- Per-type on-map visibility (show/hide device types)
+    def _all_known_types(self) -> set[str]:
+        """Every device type code the project knows about — the symbol
+        catalog plus any type actually placed on this or other floors.
+        Basis for the bulk show/hide presets."""
+        known: set[str] = set()
+        if isinstance(self.symbol_types, dict):
+            known.update(k for k in self.symbol_types if isinstance(k, str))
+        for d in self.devices:
+            if isinstance(d, dict) and isinstance(d.get("type"), str):
+                known.add(d["type"])
+        for devs in self._other_floor_devs.values():
+            for d in devs:
+                if isinstance(d, dict) and isinstance(d.get("type"), str):
+                    known.add(d["type"])
+        return known
+
+    def _apply_type_visibility(self) -> None:
+        """Re-render + refresh the list after a visibility change, and
+        persist. _refresh_device_list keeps the toolbar checkbox in sync."""
+        self._redraw()
+        self._refresh_device_list()
+        self._persist_user_settings()
+
+    def _sync_cameras_only_var(self) -> None:
+        """Keep the toolbar 'Cameras only' checkbox reflecting reality:
+        checked iff the hidden set is exactly the non-camera types (and
+        both camera and non-camera types exist, so the state is real)."""
+        known = self._all_known_types()
+        cams = {c for c in known if self._is_camera_type(c)}
+        noncams = known - cams
+        cams_only = bool(cams) and bool(noncams) and self._hidden_types == noncams
+        try:
+            # command= (not trace) → programmatic .set() won't re-fire it.
+            self._cameras_only_var.set(cams_only)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _toggle_type_hidden(self, type_code: str) -> None:
+        if type_code in self._hidden_types:
+            self._hidden_types.discard(type_code)
+        else:
+            self._hidden_types.add(type_code)
+        self._apply_type_visibility()
+
+    def _show_all_types(self) -> None:
+        self._hidden_types.clear()
+        self._apply_type_visibility()
+
+    def _hide_all_types(self) -> None:
+        self._hidden_types = self._all_known_types()
+        self._apply_type_visibility()
+
+    def _show_cameras_only(self) -> None:
+        known = self._all_known_types()
+        self._hidden_types = {c for c in known if not self._is_camera_type(c)}
+        self._apply_type_visibility()
+
+    def _show_only_type(self, type_code: str) -> None:
+        known = self._all_known_types()
+        self._hidden_types = {c for c in known if c != type_code}
+        self._apply_type_visibility()
+
+    def _on_cameras_only_toggle(self) -> None:
+        """Toolbar 'Cameras only' checkbox handler — preset, not a raw flag."""
+        if self._cameras_only_var.get():
+            self._show_cameras_only()
+        else:
+            self._show_all_types()
+
+    # ============================================================ Drop points
+    def _show_drops_visible(self) -> bool:
+        try:
+            return bool(self._show_drops.get())
+        except (AttributeError, tk.TclError):
+            return True
+
+    def _drops_on_active_floor(self) -> list[dict]:
+        """Drop points whose floors[] set includes the active floor."""
+        if self._project is None:
+            return []
+        fid = self._project.active_floor
+        return [d for d in self._project.drop_points
+                if isinstance(d, dict) and fid in (d.get("floors") or [])]
+
+    def _drop_at(self, ix, iy):
+        """Hit-test drop points shown on the active floor. ix,iy are raw
+        image coords (same space as _device_at). Returns the nearest drop
+        within a zoom-stable radius, or None."""
+        if not self._show_drops_visible():
+            return None
+        thresh = max(10.0, 16.0 / max(self.zoom * self._alignment_scale(), 0.01))
+        best = None
+        best_d = thresh
+        for d in self._drops_on_active_floor():
+            try:
+                wx = float(d["x"]); wy = float(d["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            dix, diy = self._world_to_img(wx, wy)
+            dist = math.hypot(ix - dix, iy - diy)
+            if dist <= best_d:
+                best_d = dist
+                best = d
+        return best
+
+    def _next_drop_point_id(self) -> str:
+        n = 0
+        for d in (self._project.drop_points if self._project else []):
+            if not isinstance(d, dict):
+                continue
+            m = re.match(r"DP(\d+)$", str(d.get("id", "")))
+            if m:
+                n = max(n, int(m.group(1)))
+        return f"DP{n + 1}"
+
+    def _save_project_quiet(self) -> None:
+        """Best-effort project-file persist after a drop-point / elevation
+        edit, plus a revision so the change is captured in the .zsmt bundle
+        too (otherwise these edits would only live in the loose work files
+        and be lost on the next bundle open)."""
+        if self._project is None:
+            return
+        try:
+            mf_mod.save_project(self._project, self.project_path)
+        except OSError as e:
+            log_error("Save after drop-point edit failed", e)
+            return
+        self._commit_revision(note="edit")
+
+    def _start_place_drop(self) -> None:
+        if self._project is None:
+            self._flash_status("Open or create a project first.", ttl_ms=3000)
+            return
+        self._placing_drop = True
+        try:
+            self._show_drops.set(True)   # ensure the placed drop is visible
+        except (AttributeError, tk.TclError):
+            pass
+        try:
+            self.canvas.config(cursor="crosshair")
+        except tk.TclError:
+            pass
+        self._flash_status(
+            "Click on the map to place a cable drop / riser point. Esc cancels.",
+            ttl_ms=6000)
+
+    def _create_drop_at(self, ix, iy) -> dict | None:
+        """Create a drop at raw-image coords (ix,iy), single-floor scope by
+        default, then open its editor so the user can set floors + home."""
+        if self._project is None:
+            return None
+        wx, wy = self._img_to_world(ix, iy)
+        active = self._project.active_floor
+        new_id = self._next_drop_point_id()
+        drop = {
+            "id": new_id, "label": new_id,
+            "x": float(wx), "y": float(wy),
+            "floors": [active], "home_floor": active,
+        }
+        self._project.drop_points.append(drop)
+        self._selected_drop = drop
+        # Make sure the drops layer is visible — otherwise the user places
+        # a drop and sees nothing (the layer toggle may be off).
+        try:
+            self._show_drops.set(True)
+        except (AttributeError, tk.TclError):
+            pass
+        self._mark_dirty()
+        self._save_project_quiet()
+        self._redraw()
+        # Open the config dialog right away (added in the config-UI step);
+        # falls back to a hint if it isn't wired yet.
+        if hasattr(self, "_edit_drop_dialog"):
+            self._edit_drop_dialog(drop)
+        else:
+            self._flash_status(
+                f"Drop {new_id} placed on {active}. Right-click it to choose "
+                f"which floors it spans and its home floor.", ttl_ms=6000)
+        return drop
+
+    def _delete_drop(self, drop: dict) -> None:
+        if self._project is None or drop is None:
+            return
+        try:
+            self._project.drop_points.remove(drop)
+        except ValueError:
+            return
+        if self._selected_drop is drop:
+            self._selected_drop = None
+        self._mark_dirty()
+        self._save_project_quiet()
+        self._redraw()
+        self._flash_status(f"Drop point {drop.get('label', '')} deleted.",
+                           ttl_ms=2500)
+
+    def _draw_drop_points(self) -> None:
+        if self._project is None or not self._show_drops_visible():
+            return
+        active = self._project.active_floor
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        for d in self._drops_on_active_floor():
+            try:
+                wx = float(d["x"]); wy = float(d["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            cx, cy = self._world_to_canvas(wx, wy)
+            if cx < -60 or cy < -60 or cx > cw + 60 or cy > ch + 60:
+                continue
+            home = d.get("home_floor")
+            floors = d.get("floors") or []
+            multi = len(floors) > 1
+            is_home = (home == active)
+            sel = (self._selected_drop is not None
+                   and self._selected_drop.get("id") == d.get("id"))
+            r = 11
+            # Teal when this floor IS the cable's home (adds no vertical);
+            # amber when it's a remote appearance (wiring here adds the riser).
+            fill = "#23c6c6" if is_home else "#f0a830"
+            outline = "#ffffff" if sel else "#06303a"
+            ow = 3 if sel else 1
+            if multi:
+                self.canvas.create_oval(cx - r - 4, cy - r - 4,
+                                        cx + r + 4, cy + r + 4,
+                                        outline=fill, dash=(3, 3), tags="drop")
+            self.canvas.create_polygon(
+                cx, cy - r, cx + r, cy, cx, cy + r, cx - r, cy,
+                fill=fill, outline=outline, width=ow, tags="drop")
+            self.canvas.create_text(cx, cy, text="↕", fill="#04222a",
+                                    font=("Segoe UI", 11, "bold"), tags="drop")
+            sub = f"{d.get('label', 'DP')}  [{'·'.join(floors)}]"
+            if not is_home:
+                sub += f"  →{home}"
+            self.canvas.create_text(cx, cy + r + 9, text=sub, fill="#d8f6f7",
+                                    font=("Segoe UI", 8), tags="drop")
+
+    def _vertical_in_for_drop_ids(self, drop_ids) -> float:
+        """Sum of vertical riser INCHES for the given drop ids, relative to
+        the ACTIVE floor. A drop contributes |elev(active)−elev(home)|×12
+        when its home floor isn't the active floor. Recomputed live so it
+        tracks elevation / home-floor edits instead of going stale."""
+        if self._project is None or not drop_ids:
+            return 0.0
+        active = self._project.active_floor
+        by_id = {d.get("id"): d for d in self._project.drop_points
+                 if isinstance(d, dict)}
+        total = 0.0
+        for did in drop_ids:
+            drop = by_id.get(did)
+            if drop is None:
+                continue
+            home = drop.get("home_floor")
+            if home and home != active:
+                total += mf_mod.vertical_inches_between(self._project, active, home)
+        return total
+
+    def _route_vertical_in(self, route) -> float:
+        return self._vertical_in_for_drop_ids(
+            route.get("drop_ids") if isinstance(route, dict) else None)
+
+    def _drop_ids_at_endpoints(self, points) -> list[str]:
+        """Ids of drop points a wire terminates on (either endpoint),
+        de-duplicated — used to tag a new wire so it accrues riser footage."""
+        if not points:
+            return []
+        ids: list[str] = []
+        endpoints = [points[0], points[-1]] if len(points) >= 2 else [points[0]]
+        for (ex, ey) in endpoints:
+            drop = self._drop_at(ex, ey)
+            if drop is not None:
+                did = drop.get("id")
+                if did and did not in ids:
+                    ids.append(did)
+        return ids
+
+    def _edit_drop_dialog(self, drop: dict) -> None:
+        """Configure a drop point: label, which floors it appears on
+        (single or multi), its home floor (vertical reference), and an
+        optional cable type."""
+        if self._project is None or not isinstance(drop, dict):
+            return
+        floors = list(self._project.floors)
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.title(f"Cable drop point — {drop.get('id', '')}")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        pad = {"padx": 10, "pady": 4}
+
+        ttk.Label(dlg, text="Label:").grid(row=0, column=0, sticky=tk.W, **pad)
+        label_var = tk.StringVar(value=str(drop.get("label", drop.get("id", ""))))
+        ttk.Entry(dlg, textvariable=label_var, width=28).grid(
+            row=0, column=1, sticky=tk.W, **pad)
+
+        ttk.Label(dlg, text="Show on floors:",
+                  font=("Segoe UI", 9, "bold")).grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, padx=10, pady=(8, 2))
+        cur_floors = set(drop.get("floors") or [])
+        floor_vars: dict[str, tk.BooleanVar] = {}
+        home_var = tk.StringVar(value=str(drop.get("home_floor", "")))
+        home_cb = None
+
+        def _checked_ids() -> list[str]:
+            return [f.id for f in floors if floor_vars[f.id].get()]
+
+        def _sync_home_choices() -> None:
+            ids = _checked_ids()
+            if home_cb is not None:
+                home_cb["values"] = ids
+            if home_var.get() not in ids:
+                home_var.set(ids[0] if ids else "")
+
+        r = 2
+        for f in floors:
+            v = tk.BooleanVar(value=(f.id in cur_floors))
+            floor_vars[f.id] = v
+            ttk.Checkbutton(
+                dlg, variable=v,
+                text=f"{f.id} — {f.name}   ({f.elevation_ft:g} ft)",
+                command=_sync_home_choices,
+            ).grid(row=r, column=0, columnspan=2, sticky=tk.W, padx=24)
+            r += 1
+
+        ttk.Label(dlg, text="Home floor (cable terminates here):").grid(
+            row=r, column=0, sticky=tk.W, **pad)
+        home_cb = ttk.Combobox(dlg, textvariable=home_var, state="readonly",
+                               width=20)
+        home_cb.grid(row=r, column=1, sticky=tk.W, **pad)
+        r += 1
+        Tooltip(home_cb,
+                "Wiring to this drop from any OTHER floor adds the elevation "
+                "gap to its home floor. From the home floor, it adds nothing.")
+        _sync_home_choices()
+
+        ttk.Label(dlg, text="Cable (optional):").grid(
+            row=r, column=0, sticky=tk.W, **pad)
+        cable_var = tk.StringVar(value=str(drop.get("cable_type") or "Auto"))
+        ttk.Combobox(dlg, textvariable=cable_var, state="readonly",
+                     values=["Auto"] + sorted(self.cable_types.keys()),
+                     width=20).grid(row=r, column=1, sticky=tk.W, **pad)
+        r += 1
+
+        ttk.Button(dlg, text="📏 Edit floor elevations / spacing…",
+                   command=lambda: (dlg.destroy(),
+                                    self._edit_elevations_dialog())).grid(
+            row=r, column=0, columnspan=2, sticky=tk.W, **pad)
+        r += 1
+
+        def _save() -> None:
+            ids = _checked_ids()
+            if not ids:
+                messagebox.showwarning(
+                    "No floors",
+                    "A drop point must appear on at least one floor.",
+                    parent=dlg)
+                return
+            home = home_var.get()
+            if home not in ids:
+                home = ids[0]
+            drop["label"] = label_var.get().strip() or drop.get("id", "DP")
+            drop["floors"] = ids
+            drop["home_floor"] = home
+            ct = cable_var.get()
+            if ct and ct != "Auto":
+                drop["cable_type"] = ct
+            else:
+                drop.pop("cable_type", None)
+            self._mark_dirty()
+            self._save_project_quiet()
+            # Home/floor edits can change riser footage on existing wires.
+            self._recalc_all_wires()
+            self._redraw()
+            self._refresh_wire_list()
+            self._refresh_bom_tab()
+            dlg.destroy()
+            self._flash_status(
+                f"Drop {drop['label']} → floors {'·'.join(ids)}, home {home}.",
+                ttl_ms=4000)
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=r, column=0, columnspan=2, pady=10)
+        ttk.Button(btns, text="Save", command=_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Delete",
+                   command=lambda: (dlg.destroy(), self._delete_drop(drop))
+                   ).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: _save())
+
+    def _edit_elevations_dialog(self) -> None:
+        """Set each floor's elevation_ft. The gap between floors is the
+        difference, which is the vertical run a cross-floor drop adds."""
+        if self._project is None or not self._project.floors:
+            self._flash_status("No floors yet.", ttl_ms=3000)
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.title("Floor elevations / spacing")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        ttk.Label(dlg,
+                  text="Each floor's height above a shared datum. The gap "
+                       "between two floors is the difference — that's the "
+                       "vertical run added when a wire crosses to a drop's "
+                       "home floor.",
+                  wraplength=400, justify=tk.LEFT, foreground="#7fc4ff",
+                  ).grid(row=0, column=0, columnspan=3, sticky=tk.W,
+                         padx=10, pady=(8, 6))
+        vars_by_id: dict[str, tk.DoubleVar] = {}
+        r = 1
+        for f in self._project.floors:
+            ttk.Label(dlg, text=f"{f.id} — {f.name}").grid(
+                row=r, column=0, sticky=tk.W, padx=10, pady=3)
+            v = tk.DoubleVar(value=float(f.elevation_ft))
+            vars_by_id[f.id] = v
+            ttk.Entry(dlg, textvariable=v, width=10).grid(row=r, column=1, padx=4)
+            ttk.Label(dlg, text="ft").grid(row=r, column=2, sticky=tk.W)
+            r += 1
+
+        def _save() -> None:
+            for f in self._project.floors:
+                try:
+                    f.elevation_ft = float(vars_by_id[f.id].get())
+                except (tk.TclError, ValueError, KeyError):
+                    pass
+            self._mark_dirty()
+            self._save_project_quiet()
+            self._recalc_all_wires()
+            self._redraw()
+            self._refresh_wire_list()
+            self._refresh_bom_tab()
+            dlg.destroy()
+            self._flash_status("Floor elevations updated.", ttl_ms=3000)
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=r, column=0, columnspan=3, pady=10)
+        ttk.Button(btns, text="Save", command=_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: _save())
         return "break"  # prevent <<ListboxSelect>> from firing on stale indices
 
     def _refresh_device_list(self) -> None:
+        self._sync_cameras_only_var()
         self.dev_listbox.delete(0, tk.END)
         # Sort by type (alphabetically), then by id within each group.
         # Cameras float to the top, then access/intrusion, then run points.
@@ -4118,15 +4845,21 @@ class CameraWireTool:
             cat_word = self._plural(count, cat_singular).split(" ", 1)[1]
             group_key = f"type:{t_code}"
             collapsed = group_key in self._dev_collapsed
+            hidden = t_code in self._hidden_types
             arrow = "▶" if collapsed else "▼"
-            header = (f"{arrow} {t_code}  {sym_label[:24]:24s}  "
+            # Leading glyph = on-map visibility: ● shown, ○ hidden. Click
+            # it to toggle (handled in _toggle_dev_group via x-position).
+            eye = "○" if hidden else "●"
+            header = (f"{eye} {arrow} {t_code}  {sym_label[:24]:24s}  "
                       f"({count} {cat_word})")
             self.dev_listbox.insert(tk.END, header)
             self._dev_listbox_rows.append(group_key)
+            # Hidden types dim to gray; visible types use the blue header hue.
+            hdr_fg = "#5a6b7a" if hidden else "#7fc4ff"
             self.dev_listbox.itemconfig(self.dev_listbox.size() - 1,
-                                         foreground="#7fc4ff",
+                                         foreground=hdr_fg,
                                          selectbackground="#222244",
-                                         selectforeground="#7fc4ff")
+                                         selectforeground=hdr_fg)
             if not collapsed:
                 for d in by_type[t_code]:
                     wire_info = wire_by_device.get(d["id"])
@@ -4136,9 +4869,12 @@ class CameraWireTool:
                         if wire_info else ""
                     )
                     self.dev_listbox.insert(
-                        tk.END, f'  {d["id"]:6s} {d["type"]:5s}{wire_str}',
+                        tk.END, f'    {d["id"]:6s} {d["type"]:5s}{wire_str}',
                     )
                     self._dev_listbox_rows.append(d)
+                    if hidden:
+                        self.dev_listbox.itemconfig(
+                            self.dev_listbox.size() - 1, foreground="#666666")
 
         if not self._filtered_devices and not (self._project and len(self._project.floors) > 1):
             placeholder = ("(no devices yet — Symbols tab → pick a type → "
@@ -4729,6 +5465,22 @@ class CameraWireTool:
         return mf_mod.apply_alignment(
             (ax, ay), mf_mod.inverse_alignment(self._current_alignment()))
 
+    # World/aligned coords are the SHARED frame across floors (the same
+    # space the canvas zoom/offset operate in). Drop points live here so
+    # they land at the same physical spot on every floor they're shown on.
+    def _img_to_world(self, ix, iy):
+        return mf_mod.apply_alignment((ix, iy), self._current_alignment())
+
+    def _world_to_img(self, wx, wy):
+        return mf_mod.apply_alignment(
+            (wx, wy), mf_mod.inverse_alignment(self._current_alignment()))
+
+    def _world_to_canvas(self, wx, wy):
+        return wx * self.zoom + self.offset_x, wy * self.zoom + self.offset_y
+
+    def _canvas_to_world(self, cx, cy):
+        return (cx - self.offset_x) / self.zoom, (cy - self.offset_y) / self.zoom
+
     # ============================================================ Rendering
     def _fit_image(self) -> None:
         cw = self.canvas.winfo_width() or 800
@@ -4998,6 +5750,10 @@ class CameraWireTool:
         if self._show_devices.get():
             for d in self.devices:
                 self._draw_device(d)
+
+        # Drop points draw on top of devices (they're sparse markers the
+        # user needs to click) but their own visibility layer.
+        self._draw_drop_points()
 
         if self._show_legend.get():
             self._draw_legend()
@@ -5380,6 +6136,9 @@ class CameraWireTool:
             dx_ = float(dev["x"]); dy_ = float(dev["y"])
             dw_ = float(dev["w"]); dh_ = float(dev["h"])
         except (KeyError, TypeError, ValueError):
+            return
+        # Per-type visibility filter — type hidden from the map.
+        if dtype in self._hidden_types:
             return
         info = self.symbol_types.get(dtype)
         if info is None:
@@ -5924,6 +6683,10 @@ class CameraWireTool:
         for d in self.devices:
             if not isinstance(d, dict):
                 continue
+            # Hidden types are non-interactive, mirroring the _show_devices
+            # layer behavior — clicks pass through to whatever's beneath.
+            if d.get("type") in getattr(self, "_hidden_types", ()):
+                continue
             try:
                 x = float(d["x"]); y = float(d["y"])
                 w = float(d["w"]); h = float(d["h"])
@@ -6142,7 +6905,8 @@ class CameraWireTool:
         for route in self.wire_routes:
             route["length_px"] = self._calc_wire_length(route["points"])
             route["length_in"] = (
-                route["length_px"] * eff if eff is not None else None
+                route["length_px"] * eff + self._route_vertical_in(route)
+                if eff is not None else None
             )
 
     # ============================================================ Mouse handlers
@@ -6225,6 +6989,17 @@ class CameraWireTool:
             self._switch_floor(ref.id)
             return
 
+        # Drop-point placement takes priority over normal modes — the next
+        # click drops a cable/riser point at that spot.
+        if self._placing_drop:
+            self._placing_drop = False
+            try:
+                self.canvas.config(cursor="")
+            except tk.TclError:
+                pass
+            self._create_drop_at(ix, iy)
+            return
+
         if self.mode == Mode.CALIBRATE:
             self.cal_points.append((ix, iy))
             cx, cy = self._img_to_canvas(ix, iy)
@@ -6271,6 +7046,32 @@ class CameraWireTool:
                         except tk.TclError:
                             pass
                         return
+
+            # -0.5. Drop point — select + arm drag. High priority (they're
+            # sparse, intentional markers) but below FOV handles.
+            drop_hit = self._drop_at(ix, iy)
+            if drop_hit is not None:
+                self._selected_drop = drop_hit
+                self.selected_device = None
+                self.selected_devices = []
+                wx, wy = self._img_to_world(ix, iy)
+                self._dragging_drop = {
+                    "drop": drop_hit,
+                    "off_wx": float(drop_hit["x"]) - wx,
+                    "off_wy": float(drop_hit["y"]) - wy,
+                    "moved": False,
+                }
+                try:
+                    self.canvas.config(cursor="fleur")
+                except tk.TclError:
+                    pass
+                self._redraw()
+                home = drop_hit.get("home_floor")
+                fl = "·".join(drop_hit.get("floors") or [])
+                self.status_label.config(
+                    text=f"Drop {drop_hit.get('label','')} [{fl}], home {home}. "
+                         f"Drag to move; right-click to edit.")
+                return
 
             # 0. Legend drag — if the click is inside the legend rectangle
             # AND not on a device (devices on top win), start dragging the
@@ -6464,6 +7265,18 @@ class CameraWireTool:
             )
             return
 
+        # Drop-point drag — move the riser to a new world position.
+        if self._dragging_drop is not None:
+            drop = self._dragging_drop["drop"]
+            ix, iy = self._canvas_to_img(event.x, event.y)
+            wx, wy = self._img_to_world(ix, iy)
+            drop["x"] = wx + self._dragging_drop["off_wx"]
+            drop["y"] = wy + self._dragging_drop["off_wy"]
+            self._dragging_drop["moved"] = True
+            self._maybe_autopan(event)
+            self._schedule_redraw()
+            return
+
         # FOV rotation: cursor position relative to camera apex sets azimuth
         if self._rotating_fov is not None:
             dev = self._rotating_fov["device"]
@@ -6530,7 +7343,9 @@ class CameraWireTool:
             # frame). With plain self.scale_factor, dragging a waypoint
             # on a 1.5x-aligned floor reported a length 1.5x too small.
             eff = self._effective_scale_factor()
-            route["length_in"] = (route["length_px"] * eff) if eff is not None else None
+            route["length_in"] = ((route["length_px"] * eff
+                                   + self._route_vertical_in(route))
+                                  if eff is not None else None)
 
             # Auto-pan when the drag is near the canvas edge so the user
             # can drag a waypoint anywhere without releasing.
@@ -6627,6 +7442,17 @@ class CameraWireTool:
                 self.dragging_device = None
             self._lasso = None
             self._update_status()
+            self._redraw()
+            return
+
+        # Drop-point drag finished — persist if it actually moved.
+        if self._dragging_drop is not None:
+            moved = self._dragging_drop.get("moved")
+            self._dragging_drop = None
+            self._refresh_mode_ui()  # restore cursor
+            if moved:
+                self._mark_dirty()
+                self._save_project_quiet()
             self._redraw()
             return
 
@@ -7039,12 +7865,15 @@ class CameraWireTool:
                 f" — looks like an accidental click.\n\nKeep it anyway?"):
                 self._cancel_current()
                 return
-        real_in = px_len * eff if eff is not None else None
+        # Cross-floor riser: if an endpoint lands on a drop point whose
+        # home floor differs from this one, add the vertical run.
+        drop_ids = self._drop_ids_at_endpoints(self.current_wire_points)
+        vert_in = self._vertical_in_for_drop_ids(drop_ids)
+        real_in = (px_len * eff + vert_in) if eff is not None else None
         device_id = self.selected_device["id"] if self.selected_device else None
         # Pick a cable. Source is the selected device. Try to detect the
         # destination from the last waypoint — if it lands on a device,
-        # apply the source-vs-runpoint rule so cabling is consistent with
-        # auto-routed wires.
+        # apply the source-vs-runpoint rule.
         end_dev = None
         if self.current_wire_points:
             ex, ey = self.current_wire_points[-1]
@@ -7059,13 +7888,18 @@ class CameraWireTool:
         }
         if cable:
             route["cable_type"] = cable
+        if drop_ids:
+            route["drop_ids"] = drop_ids
         self._execute(AddWireCmd(self, route))
         self.current_wire_points = []
         self._refresh_wire_list()
         self._refresh_device_list()
         self._redraw()
         dev_label = f" for {device_id}" if device_id else " (unassigned)"
-        self.status_label.config(text=f"Wire route saved{dev_label}. Click to start a new one.")
+        riser = (f"  +{self._format_length(vert_in)} vertical riser "
+                 f"({', '.join(drop_ids)})" if vert_in > 0 else "")
+        self.status_label.config(
+            text=f"Wire route saved{dev_label}.{riser} Click to start a new one.")
 
     def _reset_action_state(self) -> None:
         """Pure cleanup: clear in-progress wire / cal / anchor state and
@@ -7098,6 +7932,16 @@ class CameraWireTool:
         """User-initiated cancel (Esc / right-click). Reset state AND
         return to MOVE if we're currently in an action mode. If already
         in Move mode and nothing's in progress, Esc clears the selection."""
+        # Cancel an in-progress drop placement first — it's a transient
+        # one-click action that shouldn't fall through to mode/selection.
+        if self._placing_drop:
+            self._placing_drop = False
+            try:
+                self.canvas.config(cursor="")
+            except tk.TclError:
+                pass
+            self._flash_status("Drop placement cancelled.", ttl_ms=2000)
+            return
         was_acting = self.mode in (Mode.PLACE_DEVICE, Mode.CALIBRATE,
                                     Mode.WIRE)
         had_action_state = bool(self.current_wire_points or self.cal_points
@@ -7589,7 +8433,10 @@ class CameraWireTool:
                     devices_by_id, self.symbol_types,
                     self.cable_types)
                 cable_str = effective + ("" if explicit else " (auto)")
-                row = f'   {n_segs}seg  {length_str}  ({cable_str})'
+                # Mark wires that include a cross-floor vertical riser run.
+                riser = (" ↕" if isinstance(route, dict) and route.get("drop_ids")
+                         else "")
+                row = f'   {n_segs}seg  {length_str}{riser}  ({cable_str})'
                 self.wire_listbox.insert(tk.END, row)
                 self._wire_listbox_rows.append(ri)
 
@@ -7760,6 +8607,8 @@ class CameraWireTool:
                 "show_legend":      bool(self._show_legend.get()),
                 "show_devices":     bool(self._show_devices.get()),
                 "show_wires":       bool(self._show_wires.get()),
+                "show_drops":       bool(self._show_drops.get()),
+                "hidden_types":     sorted(self._hidden_types),
             }
         except (tk.TclError, ValueError, AttributeError):
             return
@@ -8119,9 +8968,7 @@ class CameraWireTool:
         self._status_clear_id = self.root.after(ttl_ms, _restore)
 
     def _update_status(self) -> None:
-        # Default to Move so an unhandled mode never raises KeyError (which
-        # used to surface as a nonsense "obstacle grid" error from the
-        # routing exception handler).
+        # Default to Move so an unhandled mode never raises KeyError.
         # Special-case the annotation sentinel so it doesn't leak into UI.
         place_label = ("annotation"
                        if self._place_type == "__annotation__"
@@ -8175,30 +9022,47 @@ class CameraWireTool:
         if not self._can_navigate_away():
             return
         path = filedialog.askopenfilename(
-            title="Open .drawio file",
-            initialdir=os.path.dirname(self.drawio_path),
-            filetypes=[("Draw.io files", "*.drawio")])
+            title="Open project or drawing",
+            initialdir=os.path.dirname(self.project_path),
+            filetypes=[("Project or drawing",
+                        f"*{bundle_mod.BUNDLE_EXT} *.drawio"),
+                       ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
+                       ("Draw.io files", "*.drawio")])
         if not path:
             return
-        # Sanity-check the new file BEFORE destroying the current root.
-        # parse_drawio raises RuntimeError on bad XML / missing root
-        # cells; if it fails, surface the error and let the user pick
-        # again rather than ripping their session out from under them.
-        try:
-            parse_drawio(path)
-        except (RuntimeError, OSError) as e:
-            log_error(f"Refused to open malformed .drawio: {path}", e)
-            messagebox.showerror(
-                "Couldn't open file",
-                f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
-                f"The current project is untouched.")
-            return
+        bundle_path: str | None = None
+        # A .zsmt bundle → extract its current revision, open the project,
+        # and keep saving revisions into that bundle.
+        if path.lower().endswith(bundle_mod.BUNDLE_EXT):
+            try:
+                drawio = _open_bundle_workdir(path)
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile) as e:
+                messagebox.showerror("Couldn't open bundle", f"{path}\n\n{e}")
+                return
+            if not drawio:
+                messagebox.showerror("Couldn't open bundle",
+                                     "Bundle has no floor drawings.")
+                return
+            bundle_path = path
+            path = drawio
+        else:
+            # Sanity-check the .drawio BEFORE destroying the current root,
+            # so a bad file leaves the session intact.
+            try:
+                parse_drawio(path)
+            except (RuntimeError, OSError) as e:
+                log_error(f"Refused to open malformed .drawio: {path}", e)
+                messagebox.showerror(
+                    "Couldn't open file",
+                    f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
+                    f"The current project is untouched.")
+                return
         self._flush_pending_settings()
         self.root.destroy()
         new_root = tk.Tk()
         apply_theme(new_root)
         new_root.title("Camera Wire Estimation Tool")
-        CameraWireTool(new_root, path)
+        CameraWireTool(new_root, path, bundle_path=bundle_path)
         new_root.mainloop()
 
     def _file_save_as(self) -> None:
@@ -8818,13 +9682,17 @@ class CameraWireTool:
                 continue
             px_len = self._calc_wire_length(pts)
             eff = self._effective_scale_factor()
-            real_in = (px_len * eff) if eff is not None else None
+            drop_ids = wr.get("drop_ids") if isinstance(wr.get("drop_ids"), list) else None
+            real_in = ((px_len * eff + self._vertical_in_for_drop_ids(drop_ids))
+                       if eff is not None else None)
             entry = {
                 "points": pts, "length_px": px_len, "length_in": real_in,
                 "device_id": wr.get("device_id"),
             }
             if wr.get("cable_type"):
                 entry["cable_type"] = wr["cable_type"]
+            if drop_ids:
+                entry["drop_ids"] = list(drop_ids)
             self.wire_routes.append(entry)
         self._mark_dirty()
         self._refresh_symbol_list()
@@ -9441,8 +10309,11 @@ class CameraWireTool:
         n_cam = sum(1 for d in self.devices if self._is_camera_type(d["type"]))
         n_wire = len(self.wire_routes)
         n_floor = len(self._project.floors) if self._project else 1
+        file_label = os.path.basename(
+            self._bundle_path if getattr(self, "_bundle_path", None)
+            else self.drawio_path)
         for label, value in (
-            ("File:",    os.path.basename(self.drawio_path)),
+            ("File:",    file_label),
             ("Devices:", f"{n_dev}  ({n_cam} cameras, {n_dev - n_cam} other)"),
             ("Wires:",   str(n_wire)),
             ("Floors:",  str(n_floor)),
@@ -9533,6 +10404,28 @@ class CameraWireTool:
                     return
 
         ix, iy = self._canvas_to_img(event.x, event.y)
+        # Drop point right-click — edit / delete the riser. Drops draw on
+        # top, so they take priority over annotations / devices / wires.
+        drop = self._drop_at(ix, iy)
+        if drop is not None:
+            self._selected_drop = drop
+            self._redraw()
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(
+                label=f"Drop {drop.get('label', '')}  "
+                      f"[{'·'.join(drop.get('floors') or [])}]  "
+                      f"home {drop.get('home_floor')}",
+                state=tk.DISABLED)
+            menu.add_separator()
+            menu.add_command(label="✏  Edit drop point…",
+                             command=lambda d=drop: self._edit_drop_dialog(d))
+            menu.add_command(label="🗑  Delete drop point",
+                             command=lambda d=drop: self._delete_drop(d))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
         # Annotation right-click takes priority — no device/wire conflicts.
         ann = self._annotation_at(ix, iy)
         if ann is not None:
@@ -9743,6 +10636,10 @@ class CameraWireTool:
             menu.add_command(
                 label="📝  Place annotation here…",
                 command=lambda: self._place_annotation_at(ix, iy))
+            if self._project is not None:
+                menu.add_command(
+                    label="🪜  Add cable drop / riser point here…",
+                    command=lambda: self._create_drop_at(ix, iy))
             menu.add_separator()
             menu.add_command(label="Fit view",
                              command=lambda: (self._fit_image(), self._redraw()))
@@ -10658,6 +11555,10 @@ class CameraWireTool:
         if not group_devs:
             return
         header_text = self.dev_listbox.get(header_idx).strip()
+        row_key = self._dev_listbox_rows[header_idx]
+        t_code = (row_key.split(":", 1)[1]
+                  if isinstance(row_key, str) and row_key.startswith("type:")
+                  else None)
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label=header_text, state=tk.DISABLED)
         m.add_separator()
@@ -10667,6 +11568,18 @@ class CameraWireTool:
         m.add_command(
             label=f"Zoom to fit this group",
             command=lambda devs=group_devs: self._zoom_to_devices(devs))
+        if t_code is not None:
+            m.add_separator()
+            if t_code in self._hidden_types:
+                m.add_command(label=f"👁  Show “{t_code}” on map",
+                              command=lambda c=t_code: self._toggle_type_hidden(c))
+            else:
+                m.add_command(label=f"🚫  Hide “{t_code}” on map",
+                              command=lambda c=t_code: self._toggle_type_hidden(c))
+            m.add_command(label=f"🎯  Show only “{t_code}”",
+                          command=lambda c=t_code: self._show_only_type(c))
+            m.add_command(label="Show all types",
+                          command=self._show_all_types)
         try:
             m.tk_popup(event.x_root, event.y_root)
         finally:
@@ -11181,6 +12094,12 @@ class CameraWireTool:
                       command=self._toggle_ghost_overlay,
                       state=align_state)
         m.add_separator()
+        m.add_command(label="🪜  Add cable drop / riser point…",
+                      command=self._start_place_drop,
+                      state=manage_state)
+        m.add_command(label="📏  Floor elevations / spacing…",
+                      command=self._edit_elevations_dialog,
+                      state=manage_state)
         m.add_command(label="⚙  Manage floors…",
                       command=self._open_floor_manager,
                       state=manage_state)
@@ -11225,6 +12144,13 @@ class CameraWireTool:
         m.add_command(label="Toggle ghost overlay (other floor)",
                       command=self._toggle_ghost_overlay,
                       state=align_state)
+        m.add_separator()
+        m.add_command(label="Add cable drop / riser point…",
+                      command=self._start_place_drop,
+                      state=manage_state)
+        m.add_command(label="Floor elevations / spacing…",
+                      command=self._edit_elevations_dialog,
+                      state=manage_state)
         m.add_separator()
         m.add_command(label="Manage Floors…",
                       command=self._open_floor_manager,
@@ -11371,6 +12297,24 @@ class CameraWireTool:
         nxt = ids[(idx + direction) % len(ids)]
         self._switch_floor(nxt)
 
+    def _floors_share_frame(self) -> bool:
+        """True when the project's floors are aligned onto a common frame —
+        i.e. at least one floor carries a non-identity alignment.
+
+        When floors share a frame the canvas (zoom, offset_x, offset_y)
+        live in shared WORLD coordinates, so preserving them verbatim
+        across a switch keeps the same physical location under the same
+        canvas pixel — each floor's own alignment already absorbs the
+        per-floor image-size / scale difference. When every floor is
+        still at identity the floors are independent and each is re-fit
+        on switch instead. Note the reference floor of an aligned project
+        is itself at identity, so we must check the WHOLE project, not
+        just the target floor."""
+        if self._project is None:
+            return False
+        return any(not mf_mod.is_identity_alignment(f.alignment)
+                   for f in self._project.floors)
+
     def _switch_floor(self, floor_id: str) -> None:
         """Swap the active floor in place. The old behavior was a full
         tool destroy + relaunch with the new .drawio, which silently
@@ -11430,6 +12374,8 @@ class CameraWireTool:
                      "device_id": wr.get("device_id")}
                 if wr.get("cable_type"):
                     e["cable_type"] = wr["cable_type"]
+                if wr.get("drop_ids"):
+                    e["drop_ids"] = list(wr["drop_ids"])
                 active.wire_routes.append(e)
             active.annotations = [dict(a) for a in self.annotations
                                   if isinstance(a, dict)]
@@ -11501,6 +12447,9 @@ class CameraWireTool:
         self._dragging_waypoint = None
         self._dragging_legend = None
         self._rotating_fov = None
+        self._placing_drop = False
+        self._dragging_drop = None
+        self._selected_drop = None
         self.current_wire_points = []
         self.cal_points = []
         self._floor_anchors_picking = None
@@ -11532,11 +12481,15 @@ class CameraWireTool:
                 continue
             px_len = self._calc_wire_length(pts)
             eff = self._effective_scale_factor()
-            real_in = (px_len * eff) if eff is not None else None
+            drop_ids = wr.get("drop_ids") if isinstance(wr.get("drop_ids"), list) else None
+            real_in = ((px_len * eff + self._vertical_in_for_drop_ids(drop_ids))
+                       if eff is not None else None)
             entry = {"points": pts, "length_px": px_len, "length_in": real_in,
                      "device_id": wr.get("device_id")}
             if wr.get("cable_type"):
                 entry["cable_type"] = wr["cable_type"]
+            if drop_ids:
+                entry["drop_ids"] = list(drop_ids)
             self.wire_routes.append(entry)
         self.annotations = [dict(a) for a in (target.annotations or [])
                             if isinstance(a, dict)]
@@ -11560,32 +12513,28 @@ class CameraWireTool:
         # inches-per-raw-pixel rate, so update it on every floor swap.
         if hasattr(self, "scale_label"):
             self.scale_label.config(text=self._scale_label_text())
-        # If the new floor has a non-identity alignment, the user has
-        # already aligned it onto a shared frame — preserve the current
-        # zoom/offset so they keep looking at the same physical
-        # location across floor switches. Only auto-fit when the floor
-        # is at identity (i.e. standalone, no shared frame to preserve).
-        def _is_identity(al):
-            if not isinstance(al, dict):
-                return True
-            return (abs(float(al.get("tx", 0) or 0)) < 0.5
-                    and abs(float(al.get("ty", 0) or 0)) < 0.5
-                    and abs(float(al.get("scale", 1) or 1) - 1.0) < 1e-4
-                    and abs(float(al.get("rotation_deg", 0) or 0)) < 0.01)
-        if _is_identity(target.alignment):
+        # Preserve the viewport across the switch when the project's
+        # floors share an aligned frame: (zoom, offset) are in shared
+        # world coords, so leaving them untouched keeps the same physical
+        # location under the same pixel — at the right apparent size,
+        # since each floor's alignment absorbs its own image-size/scale.
+        # Only auto-fit when NO shared frame exists yet (every floor at
+        # identity = independent). The user can always re-fit with Home.
+        frame_shared = self._floors_share_frame()
+        if not frame_shared:
             self._fit_image()
         self._redraw()
         # Status hint adapts based on whether this floor is already
         # aligned — no point telling the user to align it if they
         # already did, and no point hiding the suggestion when they
         # haven't.
-        if _is_identity(target.alignment):
+        if not frame_shared:
             hint = (" Doesn't line up with the previous floor? Use the "
                     "Floor: toolbar button → 'Drag-align (visual)' to "
                     "map them onto a shared frame.")
         else:
-            hint = (" Aligned to a shared frame — wire lengths share the "
-                    "project scale across floors.")
+            hint = (" Aligned to a shared frame — view stays put across "
+                    "floors; wire lengths share the project scale.")
         self._flash_status(
             f"Switched to {floor_id} — {target.name}.{hint}",
             ttl_ms=6000)
@@ -13096,6 +14045,8 @@ class CameraWireTool:
         for d in self.devices:
             if not self._is_camera_type(d["type"]):
                 continue
+            if d["type"] in self._hidden_types:
+                continue  # camera type hidden from the map → no cone either
             if only_selected and (sel_id is None or d["id"] != sel_id):
                 continue
             cam_ix = (d["x"] + d["w"]/2) * self.dx_scale
@@ -13185,9 +14136,20 @@ class CameraWireTool:
 
 
 # ============================================================ Entry point
+def _app_base_dir() -> str:
+    """Base directory for locating user data (drawio files). When frozen
+    by PyInstaller this is the folder containing the .exe (so a user can
+    drop the exe next to their floor plans); otherwise it's the script's
+    own directory. Without this, a onefile exe would look inside its temp
+    extraction dir and never find the user's files."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def _discover_drawio_files() -> list[str]:
     """Search the standard locations (data/, then script dir) for .drawio files."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = _app_base_dir()
     candidates: list[str] = []
     for sub in ("data", "."):
         d = os.path.join(script_dir, sub)
@@ -13197,6 +14159,53 @@ def _discover_drawio_files() -> list[str]:
             if f.endswith(".drawio"):
                 candidates.append(os.path.normpath(os.path.join(d, f)))
     return candidates
+
+
+def _discover_files(exts: tuple[str, ...]) -> list[str]:
+    """Files in data/ then script dir whose name ends with any of `exts`
+    (case-insensitive). Used to auto-find the project to open at startup."""
+    base = _app_base_dir()
+    out: list[str] = []
+    for sub in ("data", "."):
+        d = os.path.join(base, sub)
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            if f.lower().endswith(exts):
+                out.append(os.path.normpath(os.path.join(d, f)))
+    return out
+
+
+def _active_drawio_for_wiremap(wmpath: str) -> str | None:
+    """Resolve a project file to its active floor's .drawio path so the app
+    can open the whole project without asking the user to pick a drawing."""
+    try:
+        with open(wmpath, encoding="utf-8") as fh:
+            wm = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    floors = wm.get("floors") or []
+    if not floors:
+        return None
+    active = wm.get("active_floor")
+    f = next((x for x in floors if isinstance(x, dict) and x.get("id") == active),
+             None) or (floors[0] if isinstance(floors[0], dict) else None)
+    if not f:
+        return None
+    df = f.get("drawio_file")
+    if not isinstance(df, str):
+        return None
+    base = os.path.dirname(wmpath)
+    return df if os.path.isabs(df) else os.path.normpath(os.path.join(base, df))
+
+
+def _open_bundle_workdir(zsmt_path: str) -> str | None:
+    """Extract a .zsmt's current revision into a sibling work folder and
+    return the active floor's drawio path (to hand to CameraWireTool)."""
+    work = os.path.splitext(zsmt_path)[0] + "_work"
+    os.makedirs(work, exist_ok=True)
+    wmp, floor_paths, _rev = bundle_mod.extract_revision(zsmt_path, work)
+    return _active_drawio_for_wiremap(wmp) or next(iter(floor_paths.values()), None)
 
 
 def _enable_windows_dpi_awareness() -> None:
@@ -13228,26 +14237,58 @@ def main() -> None:
     # 200×200 which is essentially unusable; set a sensible floor.
     root.minsize(900, 600)
 
+    script_dir = _app_base_dir()
+    bundles = _discover_files((bundle_mod.BUNDLE_EXT,))
+    wiremaps = _discover_files((".wiremap.json",))
     drawio_files = _discover_drawio_files()
-    script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    if len(drawio_files) == 1:
+    bundle_path: str | None = None
+    drawio_path: str | None = None
+
+    if len(wiremaps) == 1:
+        # An existing multi/single-floor project — open it directly, no
+        # "pick a drawing" dialog. Its side-car .zsmt keeps the history.
+        drawio_path = _active_drawio_for_wiremap(wiremaps[0])
+    elif not wiremaps and len(bundles) == 1:
+        # Only a portable .zsmt present — open the bundle.
+        bundle_path = bundles[0]
+    elif not wiremaps and not bundles and len(drawio_files) == 1:
         drawio_path = drawio_files[0]
-    elif len(drawio_files) > 1:
-        initial = os.path.dirname(drawio_files[0])
-        drawio_path = filedialog.askopenfilename(
-            title="Select .drawio file", initialdir=initial,
-            filetypes=[("Draw.io files", "*.drawio")])
-        if not drawio_path:
-            sys.exit(0)
-    else:
-        drawio_path = filedialog.askopenfilename(
-            title="Select .drawio file", initialdir=script_dir,
-            filetypes=[("Draw.io files", "*.drawio")])
-        if not drawio_path:
-            sys.exit(0)
 
-    CameraWireTool(root, drawio_path)
+    if bundle_path is None and drawio_path is None:
+        # Ambiguous (none, or several projects) — ask, offering BOTH the
+        # bundle format and raw drawings.
+        initial = (os.path.dirname((bundles or wiremaps or drawio_files or [script_dir])[0])
+                   if (bundles or wiremaps or drawio_files) else script_dir)
+        chosen = filedialog.askopenfilename(
+            title="Open Camera Measurement project",
+            initialdir=initial,
+            filetypes=[("Project or drawing", f"*{bundle_mod.BUNDLE_EXT} *.drawio"),
+                       ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
+                       ("Draw.io files", "*.drawio")])
+        if not chosen:
+            sys.exit(0)
+        if chosen.lower().endswith(bundle_mod.BUNDLE_EXT):
+            bundle_path = chosen
+        else:
+            drawio_path = chosen
+
+    if bundle_path is not None:
+        try:
+            drawio_path = _open_bundle_workdir(bundle_path)
+        except Exception as e:
+            messagebox.showerror("Couldn't open bundle",
+                                 f"{bundle_path}\n\n{e}")
+            sys.exit(1)
+        if not drawio_path:
+            messagebox.showerror("Couldn't open bundle",
+                                 "Bundle contains no floor drawings.")
+            sys.exit(1)
+
+    if not drawio_path:
+        sys.exit(0)
+
+    CameraWireTool(root, drawio_path, bundle_path=bundle_path)
     root.mainloop()
 
 

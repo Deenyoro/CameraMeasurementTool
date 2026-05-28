@@ -25,6 +25,7 @@ build/
 *.egg-info/
 *.egg
 *.spec
+!camera_wire_tool.spec
 *.exe
 
 # Project-specific
@@ -39,3 +40,17 @@ htmlcov/
 
 # Recent files / settings (per-user state)
 .recent_files.json
+
+regexp:^$
+regexp:^$
+
+# Transient .zsmt bundle extractions (regenerated on open)
+*_work/
+
+# Bundle staging
+*.zsmt.tmp
+
+# Dev scratch — screenshot capture scripts + their output
+dev_capture_*.py
+dev_shots/
+app_*.png

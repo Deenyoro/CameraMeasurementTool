@@ -10,9 +10,6 @@ Modules:
     lenses      — Static database of common lenses + sensor sizes
     multifloor  — Multi-floor project model + anchor-point alignment math
     export      — PDF + CSV-bundle emitters (all atomic)
-    routing     — A* obstacle-grid pathfinding (dormant — auto-route was
-                  removed from the UI but the module is kept for tests
-                  and a future rework)
 """
 
 __version__ = "1.0.0"

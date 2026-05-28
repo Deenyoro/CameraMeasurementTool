@@ -48,11 +48,3 @@ def test_cwt_export_imports():
     for name in ("write_pdf_report", "write_bundle_csv",
                   "write_devices_csv", "write_wires_csv"):
         assert hasattr(m, name), f"cwt.export missing {name}"
-
-
-def test_cwt_routing_still_imports_even_though_dormant():
-    """The routing module isn't wired into the UI any more (auto-route
-    was removed), but the tests still cover it and a future reattempt
-    will reuse the implementation — make sure it doesn't quietly break."""
-    m = importlib.import_module("cwt.routing")
-    assert m is not None

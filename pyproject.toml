@@ -8,9 +8,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Dean Thomas" }]
 dependencies = [
     "Pillow>=10.0",
-    "pymupdf>=1.24",
     "sv-ttk>=2.6",
-    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -47,7 +45,7 @@ warn_redundant_casts = true
 strict_optional = true
 # UI code is hard to type fully; only require strictness in non-UI modules
 [[tool.mypy.overrides]]
-module = ["cwt.coords", "cwt.drawio_io", "cwt.bom", "cwt.routing", "cwt.fov"]
+module = ["cwt.coords", "cwt.drawio_io", "cwt.bom", "cwt.fov"]
 disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
