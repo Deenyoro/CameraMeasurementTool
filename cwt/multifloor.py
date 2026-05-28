@@ -192,6 +192,10 @@ class ProjectState:
     # from the model so a camera keeps its model's cone SHAPE while pointing
     # where the user aimed it — and the aim persists across reloads.
     device_azimuths: dict = field(default_factory=dict)
+    # Project-wide default cable type (id into cable_types). When set, a
+    # wire with no explicit cable and whose device-type doesn't specify one
+    # uses this instead of the per-category inference. None = infer.
+    default_cable: str | None = None
     scale_factor: float | None = None
     unit: str = "ft-in"
     next_device_id: int = 100
@@ -523,6 +527,8 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         type_default_models=type_default_models,
         device_models=device_models,
         device_azimuths=device_azimuths,
+        default_cable=(data.get("default_cable")
+                       if isinstance(data.get("default_cable"), str) else None),
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -629,6 +635,7 @@ def save_project(project: ProjectState, project_path: str) -> None:
                      else float(v))
             for k, v in project.device_azimuths.items()
             if isinstance(v, (int, float, list))},
+        "default_cable": project.default_cable,
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,

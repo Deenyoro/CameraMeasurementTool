@@ -63,6 +63,52 @@ def test_cable_for_route_falls_back_to_default():
     assert bom.cable_for_route(route, {"s1": devs[0]}, SYMBOL_TYPES, CABLE_TYPES) == "Cat6"
 
 
+def test_project_default_beats_inference():
+    # MD would infer Cat6, but the project default overrides it.
+    devs = [{"id": "s1", "type": "MD"}]
+    route = {"device_id": "s1"}
+    assert bom.cable_for_route(route, {"s1": devs[0]}, SYMBOL_TYPES, CABLE_TYPES,
+                               project_default="RG59") == "RG59"
+
+
+def test_explicit_beats_project_default():
+    devs = [{"id": "s1", "type": "MD"}]
+    route = {"device_id": "s1", "cable_type": "Cat5e"}
+    assert bom.cable_for_route(route, {"s1": devs[0]}, SYMBOL_TYPES, CABLE_TYPES,
+                               project_default="RG59") == "Cat5e"
+
+
+def test_symbol_cable_beats_project_default():
+    sym = {**SYMBOL_TYPES, "MD": {**SYMBOL_TYPES["MD"], "cable_type": "Cat5e"}}
+    devs = [{"id": "s1", "type": "MD"}]
+    route = {"device_id": "s1"}
+    assert bom.cable_for_route(route, {"s1": devs[0]}, sym, CABLE_TYPES,
+                               project_default="RG59") == "Cat5e"
+
+
+def test_project_default_ignored_when_not_in_catalog():
+    devs = [{"id": "s1", "type": "MD"}]
+    route = {"device_id": "s1"}
+    assert bom.cable_for_route(route, {"s1": devs[0]}, SYMBOL_TYPES, CABLE_TYPES,
+                               project_default="GHOST") == "Cat6"
+
+
+def test_project_default_applies_to_unassigned_run():
+    # A device-less run normally hits the Cat6 fallback; project default wins.
+    route = {"device_id": None, "length_in": 24.0}
+    assert bom.cable_for_route(route, {}, SYMBOL_TYPES, CABLE_TYPES,
+                               project_default="RG59") == "RG59"
+
+
+def test_rollup_honors_project_default():
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 120.0}]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES,
+                     waste_factor=1.0, tax_rate=0.0, project_default="RG59")
+    assert len(rep.lines) == 1
+    assert rep.lines[0].cable_id == "RG59"
+
+
 def test_rollup_simple():
     devs = [{"id": "s1", "type": "MD"}, {"id": "s2", "type": "CR"}]
     routes = [
@@ -195,6 +241,61 @@ def test_csv_roundtrip(tmp_path):
     rows = list(csv.reader(p.open(encoding="utf-8")))
     assert rows[0][0] == "Cable"
     assert any("GRAND TOTAL" in r for r in (row for row in rows))
+
+
+# ---------------- camera-model hardware rollup
+
+_MODELS = {
+    "MA": {"id": "MA", "name": "Model A", "model_number": "A-100", "price": 250.0},
+    "MB": {"id": "MB", "name": "Model B", "model_number": "B-200", "price": 1000.0},
+}
+
+
+def _model_of(mapping):
+    """Return a model_for_device(dev) that looks up the model by device id."""
+    return lambda d: _MODELS.get(mapping.get(d["id"]))
+
+
+def test_model_inventory_groups_and_totals():
+    devs = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]
+    inv = bom.model_inventory(devs, _model_of({"s1": "MA", "s2": "MA", "s3": "MB"}))
+    by_id = {l.model_id: l for l in inv}
+    assert by_id["MA"].count == 2
+    assert abs(by_id["MA"].subtotal - 500.0) < 1e-6
+    assert by_id["MB"].count == 1
+    assert abs(by_id["MB"].subtotal - 1000.0) < 1e-6
+    assert by_id["MA"].model_number == "A-100"
+
+
+def test_model_inventory_skips_unmodeled_devices():
+    devs = [{"id": "s1"}, {"id": "s2"}]
+    inv = bom.model_inventory(devs, _model_of({"s1": "MA"}))   # s2 has none
+    assert [l.model_id for l in inv] == ["MA"]
+    assert inv[0].count == 1
+
+
+def test_model_inventory_empty_when_no_models():
+    devs = [{"id": "s1"}, {"id": "s2"}]
+    assert bom.model_inventory(devs, lambda d: None) == []
+
+
+def test_model_inventory_skips_non_dict_devices():
+    devs = ["junk", {"id": "s1"}]
+    inv = bom.model_inventory(devs, _model_of({"s1": "MB"}))
+    assert [l.model_id for l in inv] == ["MB"]
+
+
+def test_csv_includes_model_section(tmp_path):
+    devs = [{"id": "s1", "type": "MD"}]
+    rep = bom.rollup([], devs, SYMBOL_TYPES, CABLE_TYPES)
+    models = bom.model_inventory([{"id": "s1"}, {"id": "s2"}],
+                                 _model_of({"s1": "MA", "s2": "MA"}))
+    p = tmp_path / "bom.csv"
+    bom.write_csv(rep, str(p), model_lines=models)
+    text = p.read_text(encoding="utf-8")
+    assert "Model #" in text
+    assert "Model A" in text
+    assert "HARDWARE TOTAL" in text
 
 
 def test_rollup_skips_non_dict_wire_route():

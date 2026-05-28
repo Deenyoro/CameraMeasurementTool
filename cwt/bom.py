@@ -77,16 +77,18 @@ def cable_for_route(
     devices_by_id: dict[str, dict],
     symbol_types: dict[str, dict],
     cable_types: dict[str, dict],
+    project_default: str | None = None,
 ) -> str:
     """Resolve which cable a given wire route uses.
 
     Priority: explicit `cable_type` on the route → device's symbol_type
-    `cable_type` → default-for-category.  Falls back to "Cat6" if even
-    the inferred default isn't in cable_types.
+    `cable_type` → project-wide `project_default` → default-for-category.
+    Falls back to "Cat6" if even the inferred default isn't in cable_types.
     """
     explicit = route.get("cable_type")
     if explicit and explicit in cable_types:
         return explicit
+    sym: dict = {}
     did = route.get("device_id")
     if did and did in devices_by_id:
         dev = devices_by_id[did]
@@ -98,6 +100,12 @@ def cable_for_route(
             sym = {}
         if sym.get("cable_type") and sym["cable_type"] in cable_types:
             return sym["cable_type"]
+    # The user's project-wide default beats per-category inference + fallback.
+    if project_default and project_default in cable_types:
+        return project_default
+    # Per-category inference only applies when the route has a device symbol;
+    # device-less runs fall straight through to the Cat6 fallback below.
+    if did and did in devices_by_id:
         inferred = default_cable_for(sym)
         if inferred in cable_types:
             return inferred
@@ -117,6 +125,7 @@ def rollup(
     tax_rate: float = 0.0,
     risers: list[dict] | None = None,
     scale_factor: float | None = None,
+    project_default: str | None = None,
 ) -> BomReport:
     """Compute a BOM from wire routes (+ optional risers).
 
@@ -146,7 +155,8 @@ def rollup(
             length_in = float(raw_len)
         except (TypeError, ValueError):
             length_in = 0.0
-        cid = cable_for_route(route, devices_by_id, symbol_types, cable_types)
+        cid = cable_for_route(route, devices_by_id, symbol_types, cable_types,
+                              project_default=project_default)
         if cid not in totals:
             totals[cid] = {"runs": 0, "total_in": 0.0}
         totals[cid]["runs"] += 1
@@ -247,6 +257,7 @@ def device_inventory(
     cable_types: dict[str, dict],
     *,
     cameras_only: bool = False,
+    project_default: str | None = None,
 ) -> list[DeviceInventoryLine]:
     """One row per symbol type, with placement count + per-device wire totals.
 
@@ -303,6 +314,7 @@ def device_inventory(
         if not isinstance(sym, dict):
             sym = {}
         cable_id = (sym.get("cable_type")
+                    or (project_default if project_default in cable_types else None)
                     or default_cable_for(sym))
         if cable_id not in cable_types:
             cable_id = "—"
@@ -324,11 +336,65 @@ def device_inventory(
     return out
 
 
+# ---------------- Camera-model hardware rollup
+@dataclass
+class ModelInventoryLine:
+    model_id: str
+    name: str
+    model_number: str
+    count: int                # devices resolving to this model
+    unit_price: float
+    subtotal: float           # count × unit_price
+
+
+def model_inventory(devices: list[dict], model_for_device) -> list[ModelInventoryLine]:
+    """Group devices by their effective camera-model and total the hardware.
+
+    `model_for_device(dev)` returns the model dict (id/name/model_number/
+    price) that applies to `dev`, or None. Any device with a model is
+    counted — not just cameras — so accessories with an assigned model
+    roll up here too. Devices with no model are skipped. Rows come back in
+    first-seen order; the caller sorts for display.
+    """
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
+        m = model_for_device(d)
+        if not m or not isinstance(m, dict):
+            continue
+        mid = m.get("id")
+        if not mid:
+            continue
+        if mid not in groups:
+            try:
+                price = max(0.0, float(m.get("price", 0) or 0))
+            except (TypeError, ValueError):
+                price = 0.0
+            name = m.get("name") if isinstance(m.get("name"), str) else mid
+            mnum = m.get("model_number") if isinstance(m.get("model_number"), str) else ""
+            groups[mid] = {"name": name or mid, "model_number": mnum,
+                           "count": 0, "unit_price": price}
+            order.append(mid)
+        groups[mid]["count"] += 1
+    out: list[ModelInventoryLine] = []
+    for mid in order:
+        g = groups[mid]
+        out.append(ModelInventoryLine(
+            model_id=mid, name=g["name"], model_number=g["model_number"],
+            count=g["count"], unit_price=g["unit_price"],
+            subtotal=g["count"] * g["unit_price"]))
+    return out
+
+
 # ---------------- CSV export
-def write_csv(report: BomReport, path: str, currency: str = "$") -> None:
+def write_csv(report: BomReport, path: str, currency: str = "$",
+              model_lines: list[ModelInventoryLine] | None = None) -> None:
     """Write the BOM report to a CSV. Stable column order suitable for Excel.
-    Atomic via tmp+rename so a crash mid-serialization can't leave a
-    half-written file at the destination."""
+    When `model_lines` is given, a second section lists hardware by camera
+    model (qty + unit price + subtotal). Atomic via tmp+rename so a crash
+    mid-serialization can't leave a half-written file at the destination."""
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -350,6 +416,16 @@ def write_csv(report: BomReport, path: str, currency: str = "$") -> None:
             w.writerow(["", f"Tax ({report.tax_rate*100:.2f}%)", "", "", "", "",
                         f"{report.tax_amount:.2f}"])
             w.writerow(["", "GRAND TOTAL", "", "", "", "", f"{report.grand_total:.2f}"])
+            if model_lines:
+                w.writerow([])
+                w.writerow(["Model", "Model #", "Qty",
+                            f"Unit ({currency})", f"Subtotal ({currency})"])
+                hw_total = 0.0; hw_qty = 0
+                for m in model_lines:
+                    w.writerow([m.name, m.model_number, m.count,
+                                f"{m.unit_price:.2f}", f"{m.subtotal:.2f}"])
+                    hw_total += m.subtotal; hw_qty += m.count
+                w.writerow(["HARDWARE TOTAL", "", hw_qty, "", f"{hw_total:.2f}"])
         os.replace(tmp, path)
     except Exception:
         try:

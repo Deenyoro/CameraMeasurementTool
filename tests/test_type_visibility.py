@@ -102,3 +102,36 @@ def test_sync_cameras_only_var_false_when_no_cameras_exist():
     app._cameras_only_var = types.SimpleNamespace(set=lambda v: captured.update(v=v))
     CWT._sync_cameras_only_var(app)
     assert captured["v"] is False
+
+
+# ---------------- 'only cameras without an assigned wire' working filter
+
+def _uw_stub(*, on, cameras=(), wired_ids=()):
+    app = types.SimpleNamespace()
+    app._unwired_cams_only_var = types.SimpleNamespace(get=lambda: on)
+    cam_set = set(cameras)
+    app._is_camera_type = lambda t: t in cam_set
+    app.wire_routes = [{"device_id": w} for w in wired_ids]
+    app._unwired_filter_on = lambda: CWT._unwired_filter_on(app)
+    app._wired_device_ids = lambda: CWT._wired_device_ids(app)
+    return app
+
+
+def test_unwired_filter_off_hides_nothing():
+    app = _uw_stub(on=False, cameras=("MD",), wired_ids=("s1",))
+    assert CWT._hidden_by_unwired_filter(app, {"id": "s1", "type": "MD"}) is False
+
+
+def test_unwired_filter_hides_wired_camera():
+    app = _uw_stub(on=True, cameras=("MD",), wired_ids=("s1",))
+    assert CWT._hidden_by_unwired_filter(app, {"id": "s1", "type": "MD"}) is True
+
+
+def test_unwired_filter_shows_unwired_camera():
+    app = _uw_stub(on=True, cameras=("MD",), wired_ids=())
+    assert CWT._hidden_by_unwired_filter(app, {"id": "s1", "type": "MD"}) is False
+
+
+def test_unwired_filter_hides_non_camera():
+    app = _uw_stub(on=True, cameras=("MD",), wired_ids=())
+    assert CWT._hidden_by_unwired_filter(app, {"id": "r1", "type": "CR"}) is True

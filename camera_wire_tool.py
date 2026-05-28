@@ -2218,6 +2218,8 @@ class CameraWireTool:
         b("<KeyPress-M>", self._kbd_mode_move)
         b("<KeyPress-w>", self._kbd_mode_wire)
         b("<KeyPress-W>", self._kbd_mode_wire)
+        b("<KeyPress-q>", self._kbd_mode_toggle)
+        b("<KeyPress-Q>", self._kbd_mode_toggle)
         b("<KeyPress-c>", self._kbd_mode_cal)
         b("<KeyPress-C>", self._kbd_mode_cal)
         b("<KeyPress-space>", self._kbd_space_press)
@@ -3287,6 +3289,21 @@ class CameraWireTool:
         none_b.pack(side=tk.LEFT, padx=2)
         Tooltip(none_b, "Hide all device types from the map.")
 
+        # Working filter: hide cameras that already have a wire (and all
+        # non-cameras) so only the cameras left to wire are visible — both
+        # on the map and in the list below. Not persisted; resets each launch.
+        unwired_frame = ttk.Frame(tab_dev)
+        unwired_frame.pack(fill=tk.X, padx=6, pady=(0, 2))
+        self._unwired_cams_only_var = tk.BooleanVar(value=False)
+        unwired_cb = ttk.Checkbutton(
+            unwired_frame, text="Only cameras without an assigned wire",
+            variable=self._unwired_cams_only_var,
+            command=self._on_unwired_filter_toggle)
+        unwired_cb.pack(side=tk.LEFT)
+        Tooltip(unwired_cb,
+                "Show only cameras that don't have a wire yet — on the map "
+                "and in this list. Handy for seeing what's left to wire.")
+
         df = ttk.Frame(tab_dev)
         df.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         # EXTENDED selectmode lets the user Ctrl/Shift-click rows to
@@ -3518,7 +3535,7 @@ class CameraWireTool:
         # refresh when their values change.)
 
         # BOM table (Treeview) — cable totals
-        ttk.Label(tab_bom, text="By cable type",
+        ttk.Label(tab_bom, text="Wiring — cable runs (hardware totaled separately below)",
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(4, 0))
         bom_frame = ttk.Frame(tab_bom)
         bom_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -3606,12 +3623,53 @@ class CameraWireTool:
                 "select every device of that type on the map. Right-"
                 "click for more actions (zoom-to-fit, edit symbol).")
 
-        # Totals — laid out as 4 pills + 1 prominent grand-total
+        # By-camera-model Treeview — qty + unit price + subtotal per model
+        ttk.Label(tab_bom, text="By camera model",
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(8, 0))
+        model_frame = ttk.Frame(tab_bom)
+        model_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        model_cols = ("name", "number", "qty", "unit", "subtotal")
+        self._bom_models_tree = ttk.Treeview(
+            model_frame, columns=model_cols, show="headings", height=6,
+        )
+        self._bom_models_sort_state: tuple[str, bool] = ("name", False)
+        def _make_model_sort_cmd(col_id):
+            def cmd():
+                cur, rev = self._bom_models_sort_state
+                self._bom_models_sort_state = (
+                    col_id, not rev if col_id == cur else False)
+                self._refresh_bom_tab()
+            return cmd
+        for c, w, anchor, h in (
+            ("name",     150, tk.W, "Model"),
+            ("number",   110, tk.W, "Model #"),
+            ("qty",      45,  tk.E, "Qty"),
+            ("unit",     80,  tk.E, "Unit"),
+            ("subtotal", 90,  tk.E, "Subtotal"),
+        ):
+            self._bom_models_tree.heading(c, text=h, command=_make_model_sort_cmd(c))
+            self._bom_models_tree.column(c, width=w, anchor=anchor, stretch=False)
+        sb_model = ttk.Scrollbar(model_frame, orient=tk.VERTICAL,
+                                 command=self._bom_models_tree.yview)
+        self._bom_models_tree.config(yscrollcommand=sb_model.set)
+        self._bom_models_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_model.pack(side=tk.RIGHT, fill=tk.Y)
+        Tooltip(self._bom_models_tree,
+                "Hardware rollup by assigned camera model: quantity, unit "
+                "price, and line subtotal. Click headers to sort.")
+
+        # Totals — laid out as 4 pills + 1 prominent grand-total. These are
+        # WIRING/cable costs only; camera hardware is totaled in the model
+        # table above and on the hardware line below.
+        ttk.Label(tab_bom,
+                  text="Wiring totals (cable only — excludes camera hardware)",
+                  font=("Segoe UI", 9, "bold"),
+                  foreground="#7fc4ff").pack(anchor=tk.W, padx=8, pady=(6, 0))
         totals_frame = ttk.Frame(tab_bom)
-        totals_frame.pack(fill=tk.X, padx=8, pady=(6, 0))
+        totals_frame.pack(fill=tk.X, padx=8, pady=(2, 0))
         # Use plain tk.Label so we can color the pills individually
         self._bom_pill_subtotal = tk.Label(
-            totals_frame, text="Subtotal\n—", padx=10, pady=4,
+            totals_frame, text="Cable Subtotal\n—", padx=10, pady=4,
             bg="#23304a", fg="#e0e8ff", font=("Segoe UI", 9),
             justify=tk.CENTER,
         )
@@ -3639,15 +3697,15 @@ class CameraWireTool:
                 "Tax on (subtotal + waste). Enter as a decimal — "
                 "0.08 = 8%. Edit in the BOM input row or Preferences.")
         self._bom_pill_total = tk.Label(
-            totals_frame, text="GRAND TOTAL\n—",
+            totals_frame, text="TOTAL\n—",
             padx=12, pady=4,
             bg="#202060", fg="#FFFFFF", font=("Segoe UI", 10, "bold"),
             justify=tk.CENTER,
         )
         self._bom_pill_total.pack(side=tk.RIGHT, padx=(8, 0))
         Tooltip(self._bom_pill_total,
-                "Subtotal + Waste + Tax. The number to put on the "
-                "installer quote.")
+                "Cable subtotal + waste + tax. Wiring/cable only — camera "
+                "hardware is totaled separately in the model table above.")
         # Warning band — surfaces "scale not set" / "N unassigned wires"
         # written by _refresh_bom_tab. Packed so it's actually visible
         # (was a no-op stub for several rounds — bug fixed).
@@ -3807,6 +3865,33 @@ class CameraWireTool:
         self.mode = new_mode
         self.mode_var.set(new_mode.name)
         self._refresh_mode_ui()
+        # Entering Wire mode with a camera already selected → seed the first
+        # wire point at that device's center so the next click is the next
+        # route point. Right-click clears it if you want a different start.
+        if new_mode == Mode.WIRE:
+            self._autostart_wire_from_selection()
+
+    def _autostart_wire_from_selection(self) -> None:
+        dev = self.selected_device
+        if (dev is None or not isinstance(dev, dict)
+                or self.current_wire_points):
+            return
+        # Only seed for a device that actually lives on the active floor
+        # (selected_device can point at another floor after navigation).
+        if not any(d is dev for d in self.devices):
+            return
+        try:
+            cx, cy = self._drawio_to_img(dev["x"] + dev["w"] / 2,
+                                         dev["y"] + dev["h"] / 2)
+        except (KeyError, TypeError):
+            return
+        self.current_wire_points = [(cx, cy)]
+        self._wire_snap = None
+        info = self._safe_sym(dev["type"])
+        self.status_label.config(
+            text=f"Wire from {dev['id']} ({info.get('label','?')}) — "
+                 f"click route points, right-click to change start.")
+        self._redraw()
 
     def _refresh_mode_ui(self) -> None:
         cursor = {
@@ -3837,6 +3922,17 @@ class CameraWireTool:
             return
         self._set_mode(Mode.WIRE)
         self._flash_status("Mode: Wire (W)  —  click points; right-click finishes")
+
+    def _kbd_mode_toggle(self, event):
+        """Q — flip between Move and Wire (whichever we're not in goes Wire)."""
+        if self._is_text_focus(event):
+            return
+        if self.mode == Mode.WIRE:
+            self._set_mode(Mode.MOVE)
+            self._flash_status("Mode: Move (Q)  —  click devices to select / drag")
+        else:
+            self._set_mode(Mode.WIRE)
+            self._flash_status("Mode: Wire (Q)  —  click points; right-click finishes")
 
     def _kbd_mode_cal(self, event):
         if self._is_text_focus(event):
@@ -3993,14 +4089,18 @@ class CameraWireTool:
         """Compute an optional snap target for the wire-drawing cursor.
 
         Snap priority:
-          1. Device centers within `thresh` (highest)
-          2. Endpoints of existing wire routes
-          3. Waypoints of the wire currently being drawn (close the loop)
-          4. Holding Shift: lock direction from previous point to nearest
+          1. Cable drop points on the active floor (the only thing wires
+             snap to — see below).
+          2. Holding Shift: lock direction from previous point to nearest
              45° increment (orthogonal-friendly).
 
-        Returns (sx, sy, kind) — `kind` ∈ {device, endpoint, self, ortho},
-        or None if no snap.
+        Deliberately does NOT snap to device centers, existing wire
+        endpoints, or the in-progress wire's own waypoints: the user wants
+        wires to pass cleanly through cameras (including the one they
+        started from) and only ever grab a drop point. The destination
+        device is detected on finish, not via snapping.
+
+        Returns (sx, sy, kind) — `kind` ∈ {drop, ortho}, or None if no snap.
 
         Threshold is expressed in raw-image pixels, but the user's mental
         model is canvas pixels. On aligned floors, alignment.scale stretches
@@ -4012,32 +4112,24 @@ class CameraWireTool:
         thresh = max(8.0, 14.0 / eff_z)
         best = None; best_d = float("inf"); best_kind = None
 
-        # 1) device centers (in image-pixel coords)
-        for d in self.devices:
-            cx = (d["x"] + d["w"] / 2) * self.dx_scale
-            cy = (d["y"] + d["h"] / 2) * self.dy_scale
-            dd = math.hypot(ix - cx, iy - cy)
+        # 1) cable drop points on the active floor — so a wire terminates
+        #    cleanly on a riser. Note: device centers are intentionally NOT
+        #    snapped to — routing must be able to pass THROUGH cameras that
+        #    aren't the one being wired. The wire's source is anchored on the
+        #    first click and the destination device is detected on finish.
+        for dp in self._drops_on_active_floor():
+            try:
+                dpx, dpy = self._world_to_img(float(dp["x"]), float(dp["y"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            dd = math.hypot(ix - dpx, iy - dpy)
             if dd < thresh and dd < best_d:
-                best = (cx, cy); best_d = dd; best_kind = "device"
-
-        # 2) endpoints of existing wire routes
-        for r in self.wire_routes:
-            pts = r["points"]
-            for p in (pts[0], pts[-1]):
-                dd = math.hypot(ix - p[0], iy - p[1])
-                if dd < thresh and dd < best_d:
-                    best = p; best_d = dd; best_kind = "endpoint"
-
-        # 3) waypoints of the in-progress wire (snap to close the loop)
-        for p in self.current_wire_points:
-            dd = math.hypot(ix - p[0], iy - p[1])
-            if dd < thresh and dd < best_d:
-                best = p; best_d = dd; best_kind = "self"
+                best = (dpx, dpy); best_d = dd; best_kind = "drop"
 
         if best is not None:
             return (best[0], best[1], best_kind)
 
-        # 4) Shift-lock: orthogonal-or-45° from the last placed point
+        # 2) Shift-lock: orthogonal-or-45° from the last placed point
         if self._shift_held and self.current_wire_points:
             lx, ly = self.current_wire_points[-1]
             dx, dy = ix - lx, iy - ly
@@ -4504,6 +4596,31 @@ class CameraWireTool:
         else:
             self._show_all_types()
 
+    def _unwired_filter_on(self) -> bool:
+        try:
+            return bool(self._unwired_cams_only_var.get())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _wired_device_ids(self) -> set:
+        """IDs of devices that have at least one wire route assigned."""
+        return {wr.get("device_id") for wr in self.wire_routes
+                if isinstance(wr, dict) and wr.get("device_id")}
+
+    def _hidden_by_unwired_filter(self, dev) -> bool:
+        """True when the 'only cameras without a wire' filter is on and this
+        device is either not a camera or already has a wire — used to hide it
+        from the map, hit-testing, the device list, and its FOV cone."""
+        if not self._unwired_filter_on():
+            return False
+        if not isinstance(dev, dict) or not self._is_camera_type(dev.get("type")):
+            return True
+        return dev.get("id") in self._wired_device_ids()
+
+    def _on_unwired_filter_toggle(self) -> None:
+        self._refresh_device_list()
+        self._redraw()
+
     # ============================================================ Drop points
     def _show_drops_visible(self) -> bool:
         try:
@@ -4923,6 +5040,9 @@ class CameraWireTool:
         # Group by symbol type
         by_type: dict[str, list[dict]] = {}
         for d in self.devices:
+            # 'Only cameras without an assigned wire' working filter.
+            if self._hidden_by_unwired_filter(d):
+                continue
             info = self.symbol_types.get(d["type"], {})
             # Same defensive coerce as the sort key — a corrupted symbol
             # entry shouldn't break the entire device list.
@@ -5931,6 +6051,9 @@ class CameraWireTool:
 
         self._draw_mode_banner()
         self._draw_minimap()
+        # Selected wire's length label rides on top of everything (devices,
+        # legend, drops, annotations) so it's always readable.
+        self.canvas.tag_raise("wire_sel_label")
         # Zoom indicator updates with every redraw — cheap, accurate
         if hasattr(self, "zoom_indicator"):
             try:
@@ -6339,6 +6462,9 @@ class CameraWireTool:
         # Per-type visibility filter — type hidden from the map.
         if dtype in self._hidden_types:
             return
+        # 'Only cameras without an assigned wire' working filter.
+        if self._hidden_by_unwired_filter(dev):
+            return
         info = self.symbol_types.get(dtype)
         if info is None:
             return
@@ -6665,24 +6791,33 @@ class CameraWireTool:
                     tags=(f"wire_{idx}", "wire_chevron"),
                 )
 
-        # Wire label visibility tiers based on zoom level:
-        #   zoom < 0.18    → no labels (would be unreadable noise)
-        #   0.18 ≤ z < 0.45 → compact: length only, no device id
-        #   zoom ≥ 0.45    → full: "{did}: {length}"
-        if self.zoom >= 0.18:
+        # Wire length label — only drawn for the single selected wire.
+        # Showing it on every run cluttered the map with hard-to-read
+        # numbers, so it's now opt-in via selection: select exactly one
+        # wire to see its length (and device id at higher zoom).
+        if is_selected and len(sel) == 1:
             mid_idx = len(pts_canvas) // 2
             mx, my = pts_canvas[mid_idx]
             length_in = route.get("length_in")
             length_str = (self._format_length(length_in) if length_in is not None
                           else f'{route["length_px"]:.0f}px')
-            if self.zoom >= 0.45:
-                dev_tag = f"{did}: " if did else ""
-                label = f"{dev_tag}{length_str}"
-            else:
-                label = length_str
-            self.canvas.create_text(mx, my - 12, text=label, fill="#00FFFF",
-                                    font=("Consolas", 9, "bold"),
-                                    tags=f"wire_{idx}")
+            dev_tag = f"{did}: " if did else ""
+            label = f"{dev_tag}{length_str}"
+            # Tagged "wire_sel_label" and raised to the very top at the end
+            # of _redraw so the number is never hidden behind a device or the
+            # legend. A dark plate behind it keeps it legible over anything.
+            txt_id = self.canvas.create_text(
+                mx, my - 12, text=label, fill="#00FFFF",
+                font=("Consolas", 9, "bold"),
+                tags=(f"wire_{idx}", "wire_sel_label"))
+            bbox = self.canvas.bbox(txt_id)
+            if bbox:
+                x0, y0, x1, y1 = bbox
+                plate = self.canvas.create_rectangle(
+                    x0 - 3, y0 - 2, x1 + 3, y1 + 2,
+                    fill="#101820", outline="#00FFFF", width=1,
+                    tags=(f"wire_{idx}", "wire_sel_label"))
+                self.canvas.tag_lower(plate, txt_id)  # plate behind the text
 
     def _wire_index_for_listbox(self, list_index: int) -> int | None:
         """Listbox row → wire_routes index. Returns None for header rows."""
@@ -6965,6 +7100,13 @@ class CameraWireTool:
             # Hidden types are non-interactive, mirroring the _show_devices
             # layer behavior — clicks pass through to whatever's beneath.
             if d.get("type") in getattr(self, "_hidden_types", ()):
+                continue
+            # Same for the 'unwired cameras only' filter — hidden devices
+            # shouldn't intercept clicks meant for whatever's beneath.
+            # getattr-guarded to mirror the _hidden_types line above (keeps
+            # the hit-test usable from a minimal stub in tests).
+            _uw = getattr(self, "_hidden_by_unwired_filter", None)
+            if _uw is not None and _uw(d):
                 continue
             try:
                 x = float(d["x"]); y = float(d["y"])
@@ -7548,9 +7690,9 @@ class CameraWireTool:
             return
 
         if self.mode == Mode.WIRE:
-            # First click in Wire mode: if it lands on a device, auto-anchor
-            # there (so you don't have to switch to Move first to "select"
-            # a source). The wire's device_id will inherit from selected_device.
+            drop_hit = self._drop_at(ix, iy)
+            # First click in Wire mode: auto-anchor on a device (the source)
+            # or a drop point so you don't have to select first.
             if not self.current_wire_points:
                 hit_dev = self._device_at(ix, iy)
                 if hit_dev is not None:
@@ -7567,6 +7709,26 @@ class CameraWireTool:
                         text=f"Wire from {hit_dev['id']} ({info.get('label','?')}) "
                              f"— click route points, right-click to finish.")
                     return
+                if drop_hit is not None:
+                    dpx, dpy = self._world_to_img(
+                        float(drop_hit["x"]), float(drop_hit["y"]))
+                    self.current_wire_points.append((dpx, dpy))
+                    self._wire_snap = None
+                    self._redraw()
+                    self.status_label.config(
+                        text=f"Wire from drop {drop_hit.get('label','')} — "
+                             f"click route points, right-click to finish.")
+                    return
+            else:
+                # Clicking a drop point FINISHES the wire on that drop —
+                # ties the wire to it and adds the cross-floor vertical run
+                # when the drop's home floor differs from this one.
+                if drop_hit is not None:
+                    dpx, dpy = self._world_to_img(
+                        float(drop_hit["x"]), float(drop_hit["y"]))
+                    self.current_wire_points.append((dpx, dpy))
+                    self._finish_wire_route()
+                    return
             # Subsequent clicks: snap if motion handler found a target,
             # otherwise place at raw cursor.
             self._shift_held = bool(event.state & 0x0001)
@@ -7579,7 +7741,7 @@ class CameraWireTool:
             if len(self.current_wire_points) == 1:
                 self.status_label.config(
                     text="Wire: click to add points, right-click to finish. "
-                         "Shift = orthogonal lock; cursor snaps to nearby points.",
+                         "Shift = orthogonal lock; click a drop to end on it.",
                 )
 
     def _on_left_drag(self, event) -> None:
@@ -8042,7 +8204,8 @@ class CameraWireTool:
                 effective = bom_mod.cable_for_route(
                     wire_under,
                     {d["id"]: d for d in self.devices},
-                    self.symbol_types, self.cable_types)
+                    self.symbol_types, self.cable_types,
+                    project_default=self._proj_default_cable())
                 cable = effective + ("" if explicit else " (auto)")
                 # length_px / points may be missing on a transient
                 # malformed in-memory route — coerce defensively.
@@ -8177,10 +8340,8 @@ class CameraWireTool:
                 # so the user knows at a glance what they'll lock onto.
                 scx, scy = self._img_to_canvas(ix2, iy2)
                 ring_color = {
-                    "device":   "#FFD060",   # gold — snapping to a device
-                    "endpoint": "#7FCDFF",   # sky blue — another wire's end
-                    "self":     "#FF80B0",   # pink — close-the-loop on self
-                    "ortho":    "#80FFC8",   # green — Shift-lock orthogonal
+                    "drop":  "#FFD060",   # gold — snapping to a cable drop point
+                    "ortho": "#80FFC8",   # green — Shift-lock orthogonal
                 }.get(kind, "#FFD060")
                 self.canvas.create_oval(scx-9, scy-9, scx+9, scy+9,
                                         outline=ring_color, width=2,
@@ -8754,6 +8915,7 @@ class CameraWireTool:
             effective_cable = bom_mod.cable_for_route(
                 route, devices_by_id_for_search,
                 self.symbol_types, self.cable_types,
+                project_default=self._proj_default_cable(),
             )
             search_blob = (f"{did or ''} {dev_type} {sym_label} "
                             f"{effective_cable}").lower()
@@ -8822,7 +8984,8 @@ class CameraWireTool:
                 effective = bom_mod.cable_for_route(
                     route if isinstance(route, dict) else {},
                     devices_by_id, self.symbol_types,
-                    self.cable_types)
+                    self.cable_types,
+                    project_default=self._proj_default_cable())
                 cable_str = effective + ("" if explicit else " (auto)")
                 # Mark wires that include a cross-floor vertical riser run.
                 riser = (" ↕" if isinstance(route, dict) and route.get("drop_ids")
@@ -9137,7 +9300,8 @@ class CameraWireTool:
                         explicit = route.get("cable_type")
                         effective = bom_mod.cable_for_route(
                             route, {d["id"]: d for d in self.devices},
-                            self.symbol_types, self.cable_types)
+                            self.symbol_types, self.cable_types,
+                            project_default=self._proj_default_cable())
                         cur_cable = effective + ("" if explicit else " (auto)")
                         cable_label = f"🎚  Cable type: {cur_cable}"
                 m.add_cascade(label=cable_label, menu=cable_sub)
@@ -9755,7 +9919,8 @@ class CameraWireTool:
             # Resolve the effective cable so a user typing 'Cat6' finds
             # both explicit-cable wires and auto-resolved ones.
             eff_cable = bom_mod.cable_for_route(
-                r, devices_by_id_qj, self.symbol_types, self.cable_types)
+                r, devices_by_id_qj, self.symbol_types, self.cable_types,
+                project_default=self._proj_default_cable())
             label = f" WIRE  wire #{i+1}  to {did:6s}  {length}  [{eff_cable}]"
             candidates.append((label, f"wire {did} {length} {eff_cable}",
                                lambda i=i: self._jump_to_wire(i)))
@@ -10783,10 +10948,25 @@ class CameraWireTool:
         self._redraw()
 
     def _on_right_click_with_menu(self, event) -> None:
-        # In Wire Mode, right-click finishes (≥2 points) or cancels.
+        # In Wire Mode, right-click finishes (≥2 points), or — when only the
+        # start point is down (often auto-seeded from the selected device) —
+        # clears that start and stays in Wire mode so you can pick a
+        # different one. With nothing down it cancels back to Move.
         if self.mode == Mode.WIRE:
             if len(self.current_wire_points) >= 2:
                 self._finish_wire_route()
+            elif len(self.current_wire_points) == 1:
+                self.current_wire_points = []
+                self._wire_snap = None
+                try:
+                    self.canvas.delete("wire_preview")
+                    self.canvas.delete("wire_snap")
+                except tk.TclError:
+                    pass
+                self._redraw()
+                self._flash_status(
+                    "Start point cleared — click a device or point to start "
+                    "the wire.")
             else:
                 self._cancel_current()
             return
@@ -10904,7 +11084,8 @@ class CameraWireTool:
                 explicit = route.get("cable_type")
                 effective = bom_mod.cable_for_route(
                     route, {d["id"]: d for d in self.devices},
-                    self.symbol_types, self.cable_types)
+                    self.symbol_types, self.cable_types,
+                    project_default=self._proj_default_cable())
                 cur_cable = effective + ("" if explicit else " (auto)")
                 menu.add_cascade(label=f"🎚  Cable type: {cur_cable}",
                                   menu=cable_sub)
@@ -11226,6 +11407,7 @@ class CameraWireTool:
             self.wire_routes, self.devices, self.symbol_types, self.cable_types,
             waste_factor=waste, tax_rate=tax, risers=risers,
             scale_factor=self.scale_factor,
+            project_default=self._proj_default_cable(),
         )
 
     def _refresh_bom_tab(self) -> None:
@@ -11281,6 +11463,7 @@ class CameraWireTool:
             inv = bom_mod.device_inventory(
                 self.devices, self.symbol_types, self.wire_routes,
                 self.cable_types,
+                project_default=self._proj_default_cable(),
             )
             # Apply user sort + arrow indicator (mirror the cable-tree path)
             dev_sort_col, dev_reverse = getattr(
@@ -11351,10 +11534,57 @@ class CameraWireTool:
                                                  background="#202060",
                                                  foreground="#FFFFFF")
 
+        # Camera-model hardware rollup (qty + price per assigned model)
+        if hasattr(self, "_bom_models_tree"):
+            for item in self._bom_models_tree.get_children():
+                self._bom_models_tree.delete(item)
+            models = self._model_inventory()
+            m_sort_col, m_reverse = getattr(
+                self, "_bom_models_sort_state", ("name", False))
+            m_sort_key = {
+                "name":     lambda l: l.name.lower(),
+                "number":   lambda l: l.model_number.lower(),
+                "qty":      lambda l: l.count,
+                "unit":     lambda l: l.unit_price,
+                "subtotal": lambda l: l.subtotal,
+            }.get(m_sort_col, lambda l: l.name.lower())
+            models = sorted(models, key=m_sort_key, reverse=m_reverse)
+            for c, base in (
+                ("name", "Model"), ("number", "Model #"), ("qty", "Qty"),
+                ("unit", "Unit"), ("subtotal", "Subtotal"),
+            ):
+                arrow = (" ▼" if m_reverse else " ▲") if c == m_sort_col else ""
+                self._bom_models_tree.heading(c, text=base + arrow)
+            hw_total = 0.0; hw_qty = 0
+            for line in models:
+                self._bom_models_tree.insert(
+                    "", tk.END,
+                    values=(line.name[:28], line.model_number, line.count,
+                            f"{cur}{line.unit_price:,.2f}",
+                            f"{cur}{line.subtotal:,.2f}"),
+                    tags=("model",),
+                )
+                hw_total += line.subtotal
+                hw_qty += line.count
+            if not models:
+                self._bom_models_tree.insert(
+                    "", tk.END,
+                    values=("—", "(no models assigned — set models in the "
+                            "Devices tab or right-click a camera)", "", "", ""))
+            else:
+                self._bom_models_tree.insert(
+                    "", tk.END,
+                    values=("— hardware total —", "", hw_qty, "",
+                            f"{cur}{hw_total:,.2f}"),
+                    tags=("total",))
+            self._bom_models_tree.tag_configure("model", foreground="#FFD060")
+            self._bom_models_tree.tag_configure(
+                "total", background="#202060", foreground="#FFFFFF")
+
         # Update pills if they exist (legacy code path before _build_ui sets them)
         if hasattr(self, "_bom_pill_subtotal"):
             self._bom_pill_subtotal.config(
-                text=f"Subtotal\n{cur}{report.subtotal:,.2f}")
+                text=f"Cable Subtotal\n{cur}{report.subtotal:,.2f}")
             self._bom_pill_waste.config(
                 text=f"Waste ×{report.waste_factor:.2f}\n"
                      f"{cur}{report.waste_added:,.2f}")
@@ -11362,7 +11592,7 @@ class CameraWireTool:
                 text=f"Tax {report.tax_rate*100:.2f}%\n"
                      f"{cur}{report.tax_amount:,.2f}")
             self._bom_pill_total.config(
-                text=f"GRAND TOTAL\n{cur}{report.grand_total:,.2f}")
+                text=f"TOTAL\n{cur}{report.grand_total:,.2f}")
         # Bottom warning band: scale-not-set + unassigned-wires warnings
         # both surface here. Stale text is reset every refresh — without
         # the reset a fixed problem leaves the warning lingering.
@@ -11375,15 +11605,18 @@ class CameraWireTool:
             warns.append(
                 f"⚠ {self._plural(report.unassigned_runs, 'unassigned wire')}"
                 f" — {self._format_length(report.unassigned_inches)}")
-        cam_hw = self._camera_hardware_total()
+        hw_inv = self._model_inventory()
+        hw_total = sum(line.subtotal for line in hw_inv)
         info_lines: list[str] = []
-        if cam_hw > 0:
-            n = sum(1 for d in self.devices
-                    if self._is_camera_type(d.get("type"))
-                    and self._effective_model_for_device(d))
+        if hw_total > 0:
+            n = sum(line.count for line in hw_inv)
             info_lines.append(
-                f"💲 Camera hardware ({self._plural(n, 'modeled camera')}): "
-                f"{cur}{cam_hw:,.2f}")
+                f"💲 Hardware ({self._plural(n, 'modeled device')}): "
+                f"{cur}{hw_total:,.2f}")
+            # Wiring (cable+waste+tax) + hardware → the full project total.
+            full_total = report.grand_total + hw_total
+            info_lines.append(
+                f"🧾 FULL TOTAL (wiring + hardware): {cur}{full_total:,.2f}")
         if warns:
             self._bom_totals_label.config(
                 text="\n  " + "\n  ".join(info_lines + warns),
@@ -11394,21 +11627,19 @@ class CameraWireTool:
         else:
             self._bom_totals_label.config(text="", foreground="#FF8C42")
 
-    def _camera_hardware_total(self) -> float:
-        """Sum of effective-model prices over all cameras on this floor."""
+    def _model_inventory(self) -> list:
+        """Per-model hardware rollup (qty + unit price + subtotal) over every
+        device on this floor that resolves to a model — cameras and any other
+        modeled device alike."""
         if self._project is None:
-            return 0.0
-        total = 0.0
-        for d in self.devices:
-            if not self._is_camera_type(d.get("type")):
-                continue
-            m = self._effective_model_for_device(d)
-            if m:
-                try:
-                    total += float(m.get("price", 0) or 0)
-                except (TypeError, ValueError):
-                    pass
-        return total
+            return []
+        return bom_mod.model_inventory(self.devices,
+                                       self._effective_model_for_device)
+
+    def _camera_hardware_total(self) -> float:
+        """Sum of effective-model prices over all modeled devices on this
+        floor (cameras + anything else with a model assigned)."""
+        return sum(line.subtotal for line in self._model_inventory())
 
     # ============================================================ BOM right-click
     def _on_bom_devices_rclick(self, event) -> None:
@@ -11541,7 +11772,8 @@ class CameraWireTool:
         matching: list[int] = []
         for i, r in enumerate(self.wire_routes):
             cid = bom_mod.cable_for_route(r, devices_by_id, self.symbol_types,
-                                          self.cable_types)
+                                          self.cable_types,
+                                          project_default=self._proj_default_cable())
             if cid == cable_id:
                 matching.append(i)
         if not matching:
@@ -11586,6 +11818,44 @@ class CameraWireTool:
                  "click 'Add new cable…' for a fresh one.",
             wraplength=520, foreground="#7fc4ff", font=("Segoe UI", 9),
         ).pack(anchor=tk.W, padx=12, pady=(10, 4))
+
+        # ---------------- project-wide default cable
+        AUTO_LABEL = "(auto — infer from device)"
+        def_row = ttk.Frame(dlg)
+        def_row.pack(fill=tk.X, padx=12, pady=(0, 2))
+        ttk.Label(def_row, text="Default wire type for project:").pack(side=tk.LEFT)
+        default_cable_var = tk.StringVar()
+        default_combo = ttk.Combobox(def_row, textvariable=default_cable_var,
+                                     state="readonly", width=26)
+        default_combo.pack(side=tk.LEFT, padx=8)
+        Tooltip(default_combo,
+                "New wires use this cable type unless a device (or the wire "
+                "itself) overrides it. 'auto' infers per device category.")
+
+        def refresh_default_combo() -> None:
+            ids = sorted(self.cable_types.keys())
+            default_combo["values"] = [AUTO_LABEL] + ids
+            if self._project is None:
+                default_cable_var.set(AUTO_LABEL)
+                default_combo.config(state="disabled")
+                return
+            cur = self._project.default_cable
+            if isinstance(cur, str) and cur in self.cable_types:
+                default_cable_var.set(cur)
+            else:
+                default_cable_var.set(AUTO_LABEL)
+
+        def on_default_changed(_e=None) -> None:
+            if self._project is None:
+                return
+            val = default_cable_var.get()
+            new = None if val == AUTO_LABEL else val
+            if new == self._project.default_cable:
+                return
+            self._project.default_cable = new
+            self._mark_dirty()
+            self._post_command_refresh()
+        default_combo.bind("<<ComboboxSelected>>", on_default_changed)
 
         # ---------------- top: cable list with color swatches via tags
         list_frame = ttk.Frame(dlg)
@@ -11696,6 +11966,7 @@ class CameraWireTool:
             if select_id and select_id in self.cable_types:
                 tree.selection_set(select_id)
                 tree.see(select_id)
+            refresh_default_combo()
 
         # ---------------- form load/save
         def load_into_form(cid: str | None) -> None:
@@ -12878,6 +13149,25 @@ class CameraWireTool:
         dlg.bind("<Return>", lambda _e: apply())
 
     # ============================================================ Cable resolution
+    def _proj_default_cable(self) -> str | None:
+        """The project-wide default cable id, if the user set one and it
+        still exists in the catalog; else None (fall back to inference)."""
+        if self._project is None:
+            return None
+        dc = self._project.default_cable
+        if isinstance(dc, str) and dc in self.cable_types:
+            return dc
+        return None
+
+    def _default_cable_for(self, info: dict) -> str:
+        """Per-symbol default cable, honoring the project-wide default first."""
+        return self._proj_default_cable() or bom_mod.default_cable_for(info)
+
+    def _cable_for_route(self, route: dict, devices_by_id: dict) -> str:
+        return bom_mod.cable_for_route(
+            route, devices_by_id, self.symbol_types, self.cable_types,
+            project_default=self._proj_default_cable())
+
     def _resolve_cable_for_pair(self, src: dict, dst: dict | None) -> str:
         """Pick the cable type for a wire run between two endpoints.
 
@@ -12887,12 +13177,12 @@ class CameraWireTool:
         """
         src_info = self._safe_sym(src["type"])
         src_cable = (src_info.get("cable_type")
-                     or bom_mod.default_cable_for(src_info))
+                     or self._default_cable_for(src_info))
         if dst is None:
             return src_cable
         dst_info = self._safe_sym(dst["type"])
         dst_cable = (dst_info.get("cable_type")
-                     or bom_mod.default_cable_for(dst_info))
+                     or self._default_cable_for(dst_info))
         src_rp = bool(src_info.get("is_run_point"))
         dst_rp = bool(dst_info.get("is_run_point"))
         if src_rp and not dst_rp:
@@ -14664,7 +14954,8 @@ class CameraWireTool:
         # bom.write_csv is self-atomic (round 152) — no need to wrap.
         try:
             bom_mod.write_csv(self._build_bom_report(), path,
-                              currency=self._bom_currency_var.get() or "$")
+                              currency=self._bom_currency_var.get() or "$",
+                              model_lines=self._model_inventory())
             messagebox.showinfo("Exported", f"BOM written:\n{path}")
         except OSError as e:
             messagebox.showerror("Export failed", str(e))
@@ -15113,6 +15404,8 @@ class CameraWireTool:
                 continue
             if d["type"] in self._hidden_types:
                 continue  # camera type hidden from the map → no cone either
+            if self._hidden_by_unwired_filter(d):
+                continue  # camera hidden by the 'unwired only' filter
             if d["type"] in self._fov_hidden_types:
                 continue  # FOV cone hidden for this type (e.g. 360 blobs)
             if only_selected and (sel_id is None or d["id"] != sel_id):

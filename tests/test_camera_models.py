@@ -107,3 +107,18 @@ def test_empty_project_has_no_models(tmp_path):
     assert loaded.camera_models == []
     assert loaded.type_default_models == {}
     assert loaded.device_models == {}
+
+
+def test_default_cable_round_trip(tmp_path):
+    p = _project()
+    p.default_cable = "RG59"
+    path = str(tmp_path / "proj.wiremap.json")
+    mf.save_project(p, path)
+    assert mf.load_project(path, "f1.drawio").default_cable == "RG59"
+
+
+def test_default_cable_defaults_none(tmp_path):
+    p = _project()
+    path = str(tmp_path / "proj.wiremap.json")
+    mf.save_project(p, path)
+    assert mf.load_project(path, "f1.drawio").default_cable is None
