@@ -180,12 +180,74 @@ class ProjectState:
     # coords so it lands at the same physical spot on every floor it's
     # shown on. See coerce_drop_point() for the dict shape.
     drop_points: list[dict] = field(default_factory=list)
+    # Camera model catalog + assignments. `camera_models` is the catalog
+    # (each: id, name, model_number, price, fov). `type_default_models`
+    # maps a symbol type code -> model id (the default for every camera of
+    # that type). `device_models` maps a device id -> model id (a per-device
+    # override). Effective model = device override, else type default.
+    camera_models: list[dict] = field(default_factory=list)
+    type_default_models: dict = field(default_factory=dict)
+    device_models: dict = field(default_factory=dict)
+    # Per-device FOV aim (azimuth degrees, 0 = up/north). Stored separately
+    # from the model so a camera keeps its model's cone SHAPE while pointing
+    # where the user aimed it — and the aim persists across reloads.
+    device_azimuths: dict = field(default_factory=dict)
     scale_factor: float | None = None
     unit: str = "ft-in"
     next_device_id: int = 100
 
     def get_floor(self, fid: str) -> FloorState | None:
         return next((f for f in self.floors if f.id == fid), None)
+
+
+def coerce_camera_model(raw: dict) -> dict | None:
+    """Normalize a camera-model dict (catalog entry), or None if unusable.
+
+    Shape: {id, name, model_number, price, fov?}
+      - price coerces to a non-negative float (0.0 on junk).
+      - fov, when present, is kept as a plain dict of its numeric-ish fields
+        (lens_mm, sensor, resolution, mount_height_ft, tilt_deg, azimuth_deg)."""
+    if not isinstance(raw, dict):
+        return None
+    mid = raw.get("id")
+    if not mid or not isinstance(mid, str):
+        return None
+    name = raw.get("name")
+    name = name if isinstance(name, str) and name else mid
+    model_number = raw.get("model_number")
+    model_number = model_number if isinstance(model_number, str) else ""
+    try:
+        price = max(0.0, float(raw.get("price", 0) or 0))
+    except (TypeError, ValueError):
+        price = 0.0
+    out = {"id": mid, "name": name, "model_number": model_number, "price": price}
+    fov = raw.get("fov")
+    if isinstance(fov, dict):
+        out["fov"] = dict(fov)
+    return out
+
+
+def effective_model_id(project: ProjectState, device_id: str,
+                       device_type: str) -> str | None:
+    """The model id that applies to a device: its per-device override if set,
+    otherwise the default model for its type, otherwise None. Only returns
+    an id that still exists in the catalog."""
+    valid = {m.get("id") for m in project.camera_models if isinstance(m, dict)}
+    dm = project.device_models.get(device_id) if isinstance(project.device_models, dict) else None
+    if dm in valid:
+        return dm
+    td = (project.type_default_models.get(device_type)
+          if isinstance(project.type_default_models, dict) else None)
+    if td in valid:
+        return td
+    return None
+
+
+def get_camera_model(project: ProjectState, model_id: str | None) -> dict | None:
+    if not model_id:
+        return None
+    return next((m for m in project.camera_models
+                 if isinstance(m, dict) and m.get("id") == model_id), None)
 
 
 def elevation_gap_ft(project: ProjectState, floor_a_id: str, floor_b_id: str) -> float:
@@ -419,6 +481,36 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
     raw_drops = data.get("drop_points", [])
     drop_points = ([d for d in (coerce_drop_point(r) for r in raw_drops)
                     if d is not None] if isinstance(raw_drops, list) else [])
+    # Camera models + assignments.
+    raw_models = data.get("camera_models", [])
+    camera_models = ([m for m in (coerce_camera_model(r) for r in raw_models)
+                      if m is not None] if isinstance(raw_models, list) else [])
+    raw_tdm = data.get("type_default_models", {})
+    type_default_models = ({str(k): str(v) for k, v in raw_tdm.items()
+                            if isinstance(v, str)}
+                           if isinstance(raw_tdm, dict) else {})
+    raw_dm = data.get("device_models", {})
+    device_models = ({str(k): str(v) for k, v in raw_dm.items()
+                      if isinstance(v, str)}
+                     if isinstance(raw_dm, dict) else {})
+    raw_az = data.get("device_azimuths", {})
+    device_azimuths = {}
+    if isinstance(raw_az, dict):
+        for k, v in raw_az.items():
+            if isinstance(v, list):
+                # Per-channel aim (multi-sensor camera).
+                vals = []
+                for x in v:
+                    try:
+                        vals.append(float(x))
+                    except (TypeError, ValueError):
+                        vals.append(0.0)
+                device_azimuths[str(k)] = vals
+            else:
+                try:
+                    device_azimuths[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    pass
     return ProjectState(
         version=2,
         project_name=project_name,
@@ -427,6 +519,10 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         cable_types=cable_types,
         risers=risers,
         drop_points=drop_points,
+        camera_models=camera_models,
+        type_default_models=type_default_models,
+        device_models=device_models,
+        device_azimuths=device_azimuths,
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -519,6 +615,20 @@ def save_project(project: ProjectState, project_path: str) -> None:
         "drop_points": [d for d in (coerce_drop_point(r)
                                     for r in project.drop_points)
                         if d is not None],
+        "camera_models": [m for m in (coerce_camera_model(r)
+                                      for r in project.camera_models)
+                          if m is not None],
+        "type_default_models": {str(k): str(v)
+                                for k, v in project.type_default_models.items()
+                                if isinstance(v, str)},
+        "device_models": {str(k): str(v)
+                          for k, v in project.device_models.items()
+                          if isinstance(v, str)},
+        "device_azimuths": {
+            str(k): ([float(x) for x in v] if isinstance(v, list)
+                     else float(v))
+            for k, v in project.device_azimuths.items()
+            if isinstance(v, (int, float, list))},
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,

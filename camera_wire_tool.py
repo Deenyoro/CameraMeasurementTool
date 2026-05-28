@@ -37,7 +37,7 @@ import traceback
 import xml.etree.ElementTree as ET
 import zipfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -174,6 +174,24 @@ def default_fov_for_type(type_code: str) -> dict:
     and enabled=True so the cone immediately renders when used."""
     preset = FOV_PRESETS_BY_TYPE.get(type_code, FOV_PRESETS_BY_TYPE["MD"])
     return {**preset, "show": True, "enabled": True}
+
+
+# Distinct, readable hues for color-coding FOV cones by camera type so the
+# user can tell overlapping coverage areas apart at a glance.
+FOV_TYPE_PALETTE = [
+    "#3b82f6", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4",
+    "#a855f7", "#ef4444", "#84cc16", "#f43f5e", "#0ea5e9",
+    "#eab308", "#10b981", "#8b5cf6", "#fb7185", "#2dd4bf",
+]
+
+# Friendly transparency labels → Tk stipple patterns (denser = more opaque).
+FOV_OPACITY_LEVELS = {
+    "Faint": "gray12",
+    "Light": "gray25",
+    "Medium": "gray50",
+    "Heavy": "gray75",
+    "Solid": "",
+}
 
 # Available shapes (for both drawing and saving)
 SHAPE_OPTIONS = ["ellipse", "rect", "roundrect", "hexagon", "halfrect", "step"]
@@ -364,10 +382,12 @@ def parse_drawio(filepath: str):
             y = float(geom.get("y", "0"))
             w = float(geom.get("width", str(C.DEVICE_DEFAULT_W)))
             h = float(geom.get("height", str(C.DEVICE_DEFAULT_H)))
+            rot_m = re.search(r"rotation=(-?\d+(?:\.\d+)?)", style)
+            rotation = float(rot_m.group(1)) if rot_m else 0.0
             devices.append({
                 "id": cell_id, "type": val,
                 "x": x, "y": y, "w": w, "h": h,
-                "orig_style": style,
+                "orig_style": style, "rotation": rotation,
             })
 
     # Match legend icons with text by sorted y-position
@@ -499,6 +519,66 @@ class PasteDevicesCmd(Command):
     def undo(self):
         ids = {d["id"] for d in self.new_devices}
         self.app.devices = [d for d in self.app.devices if d["id"] not in ids]
+
+
+class ChangeDeviceTypeCmd(Command):
+    """Retype one or more devices (bulk symbol-type change). Snapshots each
+    device's previous type + orig_style so undo restores both."""
+
+    def __init__(self, app: "CameraWireTool", devices: list[dict], new_code: str):
+        self.app = app
+        self.new_code = new_code
+        self.targets = [(d, d.get("type"), d.get("orig_style"))
+                        for d in devices if isinstance(d, dict)]
+
+    def _style_for(self, code: str) -> str:
+        info = self.app._safe_sym(code)
+        shape = info.get("shape", "ellipse")
+        return SHAPE_STYLES.get(shape, SHAPE_STYLES["ellipse"]).format(
+            color=info.get("color", "#FFFF00"), fs=8)
+
+    def do(self):
+        style = self._style_for(self.new_code)
+        for d, _ot, _os in self.targets:
+            d["type"] = self.new_code
+            d["orig_style"] = style
+
+    def undo(self):
+        for d, ot, os_ in self.targets:
+            d["type"] = ot
+            if os_ is None:
+                d.pop("orig_style", None)
+            else:
+                d["orig_style"] = os_
+
+    def label(self) -> str:
+        return f"Change type → {self.new_code}"
+
+
+class TransformDeviceCmd(Command):
+    """Scale and/or rotate a single device. Snapshots x/y/w/h/rotation."""
+
+    _FIELDS = ("x", "y", "w", "h", "rotation")
+
+    def __init__(self, app: "CameraWireTool", device: dict,
+                 old: dict, new: dict):
+        self.app = app
+        self.device = device
+        self.old = {k: old[k] for k in self._FIELDS if k in old}
+        self.new = {k: new[k] for k in self._FIELDS if k in new}
+
+    def _apply(self, snap: dict):
+        for k, v in snap.items():
+            self.device[k] = v
+
+    def do(self):
+        self._apply(self.new)
+
+    def undo(self):
+        self._apply(self.old)
+
+    def label(self) -> str:
+        return "Transform device"
 
 
 def _follow_wires_with_device(app, device_id: str,
@@ -1360,6 +1440,16 @@ class CameraWireTool:
         self._show_fov = tk.BooleanVar(value=False)
         self._show_dori = tk.BooleanVar(value=True)
         self._show_only_selected_fov = tk.BooleanVar(value=False)
+        # FOV display tuning (view prefs, persisted): which camera TYPES to
+        # hide cones for (e.g. the wide 360/panoramic blobs), a global cone
+        # transparency (Tk stipple), per-type opacity overrides, and how to
+        # color cones — by camera TYPE (distinct hue per type, so you can
+        # tell them apart) or by DORI level (yellow→red detection quality).
+        self._fov_hidden_types: set[str] = set()
+        self._fov_opacity = "gray25"          # default ~75% transparent
+        self._fov_opacity_by_type: dict[str, str] = {}
+        self._fov_color_mode = "type"         # "type" or "dori"
+        self._fov_color_by_type: dict[str, str] = {}
         self._show_legend = tk.BooleanVar(value=True)
         self._show_grid = tk.BooleanVar(value=False)
         # Master visibility toggles for the two main on-canvas layers.
@@ -1427,12 +1517,28 @@ class CameraWireTool:
         ht = prefs.get("hidden_types")
         if isinstance(ht, list):
             self._hidden_types = {str(c) for c in ht}
+        # Restore FOV display tuning.
+        fht = prefs.get("fov_hidden_types")
+        if isinstance(fht, list):
+            self._fov_hidden_types = {str(c) for c in fht}
+        if isinstance(prefs.get("fov_opacity"), str):
+            self._fov_opacity = prefs["fov_opacity"]
+        if isinstance(prefs.get("fov_opacity_by_type"), dict):
+            self._fov_opacity_by_type = {str(k): str(v) for k, v
+                                         in prefs["fov_opacity_by_type"].items()}
+        if prefs.get("fov_color_mode") in ("type", "dori"):
+            self._fov_color_mode = prefs["fov_color_mode"]
+        if isinstance(prefs.get("fov_color_by_type"), dict):
+            self._fov_color_by_type = {str(k): str(v) for k, v
+                                       in prefs["fov_color_by_type"].items()}
 
         # Restore view toggles from prefs (initialized to defaults above).
         # Use `if key in prefs` so we don't clobber the default with False
         # for users who haven't set the pref yet.
+        # NOTE: show_fov is intentionally NOT restored — FOV cones always
+        # start OFF and must be toggled on each launch (they're a heavy,
+        # focused view, not a default).
         for key, var in (
-            ("show_fov",        self._show_fov),
             ("show_dori",       self._show_dori),
             ("show_grid",       self._show_grid),
             ("show_device_ids", self._show_device_ids),
@@ -1449,6 +1555,7 @@ class CameraWireTool:
             # Persist on change so the next session inherits the state.
             var.trace_add("write",
                           lambda *_, _self=self: _self._persist_user_settings())
+        self._show_fov.set(False)   # always start with FOV off
 
         # Auto-save (writes per-session recovery file every minute)
         self._autosave_path = self.project_path + ".autosave.json"
@@ -1466,6 +1573,11 @@ class CameraWireTool:
         self._placing_drop: bool = False             # next click places a drop
         self._dragging_drop: dict | None = None      # {drop, off_wx, off_wy, moved}
         self._selected_drop: dict | None = None      # currently selected drop
+        # Single-device transform gizmo. _gizmo_handles maps a handle name
+        # ("nw"/"ne"/"se"/"sw" corners, "rot" knob) -> (canvas_x, canvas_y);
+        # _transforming holds the in-progress scale/rotate drag.
+        self._gizmo_handles: dict = {}
+        self._transforming: dict | None = None
         # FOV rotation drag state — set when user drags the FOV handle of a camera
         self._rotating_fov: dict | None = None
         # Cache of FOV handle positions per device, populated by _draw_fov_cones
@@ -2304,31 +2416,42 @@ class CameraWireTool:
         if isinstance(focused, (ttk.Entry, tk.Entry, tk.Text,
                                   ttk.Spinbox, ttk.Combobox)):
             return
-        if not self.selected_devices:
+        self._duplicate_devices(self.selected_devices)
+
+    def _duplicate_devices(self, devices, offset: float = 24.0) -> None:
+        """Duplicate each device at a small offset — same type, model, FOV,
+        size and rotation, with a fresh incremented id. The copies become
+        the selection so the user can immediately drag them elsewhere."""
+        targets = [d for d in devices if isinstance(d, dict)]
+        if not targets:
             self._flash_status("Nothing selected to duplicate.", ttl_ms=2000)
             return
-        # ~24 drawio-units offset = visibly distinct without sliding off-screen
-        offset = 24.0
         new_devices: list[dict] = []
-        for src in self.selected_devices:
+        for src in targets:
             new_id = f"s{self._next_device_id}"
             self._next_device_id += 1
-            # Deepcopy whole src so nested lists (fov.resolution, etc.)
-            # aren't aliased between original and duplicate.
+            # Deepcopy so nested lists (fov.resolution, etc.) aren't aliased
+            # between original and duplicate. Carries type, orig_style, w/h,
+            # rotation, and any per-device fov override.
             d_new = copy.deepcopy(src)
             d_new["id"] = new_id
             d_new["x"] = src["x"] + offset
             d_new["y"] = src["y"] + offset
+            # Carry the per-device camera-model override (it lives project-
+            # side keyed by device id, so the deepcopy doesn't include it).
+            if self._project is not None:
+                mid = self._project.device_models.get(src.get("id"))
+                if mid:
+                    self._project.device_models[new_id] = mid
             new_devices.append(d_new)
         self._execute(PasteDevicesCmd(self, new_devices))
         self.selected_devices = list(new_devices)
         self._primary_selected = new_devices[-1]
-        self.selected_device = new_devices[0]
         self._post_command_refresh()
         self._flash_status(
-            f"Duplicated {self._plural(len(new_devices), 'device')}. "
-            "Ctrl+Z to undo.",
-            ttl_ms=2500)
+            f"Duplicated {self._plural(len(new_devices), 'device')} — drag "
+            "to reposition.  Ctrl+Z to undo.",
+            ttl_ms=3000)
 
     def _paste_devices(self, event_=None) -> None:
         try:
@@ -2793,6 +2916,8 @@ class CameraWireTool:
         tools_menu.add_separator()
         tools_menu.add_command(label="Cable Types Editor…",
                                command=self._open_cable_types_editor)
+        tools_menu.add_command(label="Camera Models…",
+                               command=self._manage_models_dialog)
         tools_menu.add_command(label="Edit FOV for Selected Camera…",
                                command=self._open_fov_dialog_for_selected)
         tools_menu.add_command(
@@ -2925,6 +3050,13 @@ class CameraWireTool:
         )
         fov_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
+        fov_gear = ttk.Button(toolbar, text="⚙", width=2,
+                              style="Toolbutton",
+                              command=self._open_fov_settings_dialog)
+        fov_gear.pack(side=tk.LEFT, padx=(0, 2), pady=2)
+        Tooltip(fov_gear,
+                "FOV display settings — hide cones per camera type "
+                "(e.g. 360s), color, transparency, DORI detail.")
         drops_btn = ttk.Checkbutton(
             toolbar, text="Drops", variable=self._show_drops,
             style="Toolbutton", command=self._redraw,
@@ -4868,8 +5000,16 @@ class CameraWireTool:
                         f'{self._format_length(wire_info["total_in"])}]'
                         if wire_info else ""
                     )
+                    # Show the effective camera model (part # or name) so the
+                    # user can see at a glance what each camera is specced as.
+                    model_str = ""
+                    if self._is_camera_type(d.get("type")):
+                        m = self._effective_model_for_device(d)
+                        if m:
+                            model_str = f'  · {m.get("model_number") or m.get("name")}'
                     self.dev_listbox.insert(
-                        tk.END, f'    {d["id"]:6s} {d["type"]:5s}{wire_str}',
+                        tk.END,
+                        f'    {d["id"]:6s} {d["type"]:5s}{model_str}{wire_str}',
                     )
                     self._dev_listbox_rows.append(d)
                     if hidden:
@@ -4960,7 +5100,7 @@ class CameraWireTool:
         info = self.symbol_types[code]
         self._open_type_editor(code, info, is_new=False)
 
-    def _add_symbol_type(self) -> None:
+    def _add_symbol_type(self, on_saved=None) -> None:
         # Suggest the next available short code: NEW, NEW2, NEW3...
         suggested = "NEW"
         n = 2
@@ -4969,7 +5109,7 @@ class CameraWireTool:
             n += 1
         info = {"label": "New Device", "shape": "ellipse",
                 "color": "#FFFF00", "is_camera": False}
-        self._open_type_editor(suggested, info, is_new=True)
+        self._open_type_editor(suggested, info, is_new=True, on_saved=on_saved)
 
     def _selected_symbol_code(self) -> str | None:
         """Resolve the symbol code from the current listbox selection.
@@ -5058,7 +5198,8 @@ class CameraWireTool:
         }
         self._open_type_editor(code, info, is_new=True)
 
-    def _open_type_editor(self, old_code: str, info: dict, is_new: bool = False) -> None:
+    def _open_type_editor(self, old_code: str, info: dict, is_new: bool = False,
+                          on_saved=None) -> None:
         # Normalize a corrupted (non-dict) symbol_types entry into a safe
         # template so the editor still opens and lets the user fix it.
         # Without this, info["label"] / info["shape"] / info["color"] would
@@ -5271,6 +5412,11 @@ class CameraWireTool:
             self._execute(cmd)
             self._post_command_refresh()
             dlg.destroy()
+            # Caller wants to do something with the freshly-made type (e.g.
+            # the change-type flow applies it to the current selection).
+            if on_saved is not None:
+                on_saved(new_code)
+                return
             # NEW symbol: nudge user straight into placing one. Most of the
             # time, that's why they created it.
             if is_new:
@@ -5747,16 +5893,32 @@ class CameraWireTool:
                 self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3,
                                         fill="#00BFFF", outline="white", tags="wip_wire")
 
+        # Legend is drawn BEFORE devices so device symbols always sit ON TOP
+        # of it — if the legend box overlaps a camera, the camera stays
+        # visible rather than being hidden behind the legend.
+        if self._show_legend.get():
+            self._draw_legend()
+
         if self._show_devices.get():
             for d in self.devices:
                 self._draw_device(d)
 
+        # Transform gizmo for a single selected device (scale + rotate).
+        # Suppressed for a camera while FOV is on — in FOV mode a camera is
+        # locked to aiming its cone, not moving/scaling.
+        _sel1 = (self.selected_devices[0]
+                 if len(self.selected_devices) == 1 else None)
+        _fov_lock = (_sel1 is not None and self._show_fov.get()
+                     and self._is_camera_type(_sel1.get("type")))
+        if (self.mode == Mode.MOVE and self._show_devices.get()
+                and _sel1 is not None and not _fov_lock):
+            self._draw_transform_gizmo(_sel1)
+        else:
+            self._gizmo_handles = {}
+
         # Drop points draw on top of devices (they're sparse markers the
         # user needs to click) but their own visibility layer.
         self._draw_drop_points()
-
-        if self._show_legend.get():
-            self._draw_legend()
 
         # Map annotations sit on top of devices/wires so they're never hidden
         if self.annotations:
@@ -6098,30 +6260,67 @@ class CameraWireTool:
                                     anchor=tk.W, tags="legend")
 
     def _draw_shape(self, shape, color, center_x, center_y, r, bx, by, bw, bh, tag,
-                    outline="#0000FF", outline_width=1.5):
-        if shape == "ellipse":
-            self.canvas.create_oval(center_x-r, center_y-r, center_x+r, center_y+r,
-                                    fill=color, outline=outline, width=outline_width, tags=tag)
-        elif shape in ("rect", "roundrect"):
-            self.canvas.create_rectangle(bx, by, bx+bw, by+bh,
-                                         fill=color, outline=outline, width=outline_width, tags=tag)
+                    outline="#0000FF", outline_width=1.5, rot=0.0):
+        # Fast, unchanged axis-aligned path when there's no rotation.
+        if not rot:
+            if shape == "ellipse":
+                self.canvas.create_oval(center_x-r, center_y-r, center_x+r, center_y+r,
+                                        fill=color, outline=outline, width=outline_width, tags=tag)
+            elif shape in ("rect", "roundrect"):
+                self.canvas.create_rectangle(bx, by, bx+bw, by+bh,
+                                             fill=color, outline=outline, width=outline_width, tags=tag)
+            elif shape == "hexagon":
+                pts = []
+                for a in range(0, 360, 60):
+                    rad = math.radians(a - 30)
+                    pts.extend([center_x + r*math.cos(rad), center_y + r*math.sin(rad)])
+                self.canvas.create_polygon(pts, fill=color, outline=outline,
+                                           width=outline_width, tags=tag)
+            elif shape == "halfrect":
+                self.canvas.create_arc(center_x-r, center_y-r, center_x+r, center_y+r,
+                                       start=0, extent=180, fill=color, outline=outline,
+                                       width=outline_width, tags=tag)
+            elif shape == "step":
+                pts = [bx, by, bx+bw*0.7, by, bx+bw, by+bh*0.5,
+                       bx+bw*0.7, by+bh, bx, by+bh]
+                self.canvas.create_polygon(pts, fill=color, outline=outline,
+                                           width=outline_width, tags=tag)
+            else:
+                self.canvas.create_oval(center_x-r, center_y-r, center_x+r, center_y+r,
+                                        fill=color, outline=outline, width=outline_width, tags=tag)
+            return
+        # Rotated rendering: build the shape's points then rotate them about
+        # the center. (A circle/ellipse looks identical rotated, so it keeps
+        # the cheap oval; an arc rotates via its start angle.)
+        cosr = math.cos(math.radians(rot))
+        sinr = math.sin(math.radians(rot))
+        def R(px, py):
+            ddx, ddy = px - center_x, py - center_y
+            return (center_x + ddx*cosr - ddy*sinr,
+                    center_y + ddx*sinr + ddy*cosr)
+        if shape in ("rect", "roundrect"):
+            base = [(bx, by), (bx+bw, by), (bx+bw, by+bh), (bx, by+bh)]
+            pts = [c for p in base for c in R(*p)]
+            self.canvas.create_polygon(pts, fill=color, outline=outline,
+                                       width=outline_width, tags=tag)
         elif shape == "hexagon":
             pts = []
             for a in range(0, 360, 60):
-                rad = math.radians(a - 30)
+                rad = math.radians(a - 30 + rot)
                 pts.extend([center_x + r*math.cos(rad), center_y + r*math.sin(rad)])
+            self.canvas.create_polygon(pts, fill=color, outline=outline,
+                                       width=outline_width, tags=tag)
+        elif shape == "step":
+            base = [(bx, by), (bx+bw*0.7, by), (bx+bw, by+bh*0.5),
+                    (bx+bw*0.7, by+bh), (bx, by+bh)]
+            pts = [c for p in base for c in R(*p)]
             self.canvas.create_polygon(pts, fill=color, outline=outline,
                                        width=outline_width, tags=tag)
         elif shape == "halfrect":
             self.canvas.create_arc(center_x-r, center_y-r, center_x+r, center_y+r,
-                                   start=0, extent=180, fill=color, outline=outline,
+                                   start=-rot, extent=180, fill=color, outline=outline,
                                    width=outline_width, tags=tag)
-        elif shape == "step":
-            pts = [bx, by, bx+bw*0.7, by, bx+bw, by+bh*0.5,
-                   bx+bw*0.7, by+bh, bx, by+bh]
-            self.canvas.create_polygon(pts, fill=color, outline=outline,
-                                       width=outline_width, tags=tag)
-        else:
+        else:  # ellipse / unknown — circle, rotation-invariant
             self.canvas.create_oval(center_x-r, center_y-r, center_x+r, center_y+r,
                                     fill=color, outline=outline, width=outline_width, tags=tag)
 
@@ -6215,9 +6414,14 @@ class CameraWireTool:
                 outline="#FFD060", width=1, tags=tag,
             )
 
+        try:
+            dev_rot = float(dev.get("rotation", 0) or 0)
+        except (TypeError, ValueError):
+            dev_rot = 0.0
         self._draw_shape(info["shape"], info["color"], center_x, center_y, r,
                          cx, cy, cw, ch, tag,
-                         outline=outline_color, outline_width=outline_width)
+                         outline=outline_color, outline_width=outline_width,
+                         rot=dev_rot)
 
         font_size = max(C.DEVICE_LABEL_FONT_MIN,
                         min(C.DEVICE_LABEL_FONT_MAX, int(8 * self.zoom * self.dx_scale)))
@@ -6234,6 +6438,81 @@ class CameraWireTool:
                 font=("Consolas", id_fs), fill="#FFFFFF" if not is_selected else "#FF3030",
                 anchor=tk.S, tags=tag,
             )
+
+    def _device_center_canvas(self, dev):
+        """(center_x, center_y, half_w, half_h) of a device in canvas px."""
+        ix, iy = self._drawio_to_img(float(dev["x"]), float(dev["y"]))
+        iw = float(dev["w"]) * self.dx_scale
+        ih = float(dev["h"]) * self.dy_scale
+        cx, cy = self._img_to_canvas(ix, iy)
+        cx2, cy2 = self._img_to_canvas(ix + iw, iy + ih)
+        bw = cx2 - cx
+        bh = cy2 - cy
+        return cx + bw / 2, cy + bh / 2, abs(bw) / 2, abs(bh) / 2
+
+    def _draw_transform_gizmo(self, dev) -> None:
+        """Photoshop-style transform handles for a single selected device:
+        4 corner squares (scale) + a knob on a stem above (rotate)."""
+        self._gizmo_handles = {}
+        if not isinstance(dev, dict):
+            return
+        try:
+            cxc, cyc, hw, hh = self._device_center_canvas(dev)
+            rot = float(dev.get("rotation", 0) or 0)
+        except (KeyError, TypeError, ValueError):
+            return
+        # Pad the box a little outside the glyph so the handles don't sit
+        # right on the symbol.
+        hw += 6
+        hh += 6
+        cosr = math.cos(math.radians(rot))
+        sinr = math.sin(math.radians(rot))
+
+        def R(lx, ly):
+            return (cxc + lx * cosr - ly * sinr, cyc + lx * sinr + ly * cosr)
+
+        corners = {"nw": R(-hw, -hh), "ne": R(hw, -hh),
+                   "se": R(hw, hh), "sw": R(-hw, hh)}
+        self.canvas.create_polygon(
+            *corners["nw"], *corners["ne"], *corners["se"], *corners["sw"],
+            outline="#FF3030", fill="", width=1, dash=(3, 2), tags="gizmo")
+        top_mid = R(0, -hh)
+        knob = R(0, -hh - 26)
+        self.canvas.create_line(*top_mid, *knob, fill="#FF3030", width=1,
+                                tags="gizmo")
+        self.canvas.create_oval(knob[0]-6, knob[1]-6, knob[0]+6, knob[1]+6,
+                                fill="#FF3030", outline="white", width=1,
+                                tags="gizmo")
+        self._gizmo_handles["rot"] = knob
+        for name, (hx, hy) in corners.items():
+            self.canvas.create_rectangle(hx-5, hy-5, hx+5, hy+5, fill="white",
+                                         outline="#FF3030", width=2, tags="gizmo")
+            self._gizmo_handles[name] = (hx, hy)
+
+    def _reset_device_transform(self, dev) -> None:
+        """Right-click action: clear rotation + restore default size,
+        keeping the device's center fixed. Undoable."""
+        if not isinstance(dev, dict):
+            return
+        old = {k: dev.get(k) for k in ("x", "y", "w", "h", "rotation")}
+        cdx = float(dev["x"]) + float(dev["w"]) / 2
+        cdy = float(dev["y"]) + float(dev["h"]) / 2
+        nw, nh = float(C.DEVICE_DEFAULT_W), float(C.DEVICE_DEFAULT_H)
+        new = {"x": cdx - nw/2, "y": cdy - nh/2, "w": nw, "h": nh, "rotation": 0.0}
+        self._execute(TransformDeviceCmd(self, dev, old, new))
+        self._post_command_refresh()
+        self._flash_status("Reset size & rotation.  Ctrl+Z to undo.", ttl_ms=3000)
+
+    def _device_is_transformed(self, dev) -> bool:
+        if not isinstance(dev, dict):
+            return False
+        try:
+            rot = abs(float(dev.get("rotation", 0) or 0)) > 0.01
+            wbad = abs(float(dev.get("w", 0)) - C.DEVICE_DEFAULT_W) > 0.5
+            hbad = abs(float(dev.get("h", 0)) - C.DEVICE_DEFAULT_H) > 0.5
+        except (TypeError, ValueError):
+            return False
+        return rot or wbad or hbad
 
     def _draw_wire_route(self, route, idx) -> None:
         # Defensive — the load + save filters drop malformed wires, but
@@ -6921,6 +7200,15 @@ class CameraWireTool:
         except tk.TclError:
             pass
         if (event.state & 0x4) or self._space_pan:
+            # Ctrl normally pans, BUT Ctrl+click on a device toggles it in
+            # the multi-selection (so you can build a set to bulk-edit).
+            # Ctrl on empty canvas still pans.
+            if (event.state & 0x4) and not self._space_pan and self.mode == Mode.MOVE:
+                ix, iy = self._canvas_to_img(event.x, event.y)
+                d = self._device_at(ix, iy)
+                if d is not None:
+                    self._toggle_device_in_selection(d)
+                    return
             self._on_pan_start(event)
             return
         ix, iy = self._canvas_to_img(event.x, event.y)
@@ -7022,30 +7310,47 @@ class CameraWireTool:
             # so we can move them as a group.
             self._multi_drag_starts: dict[str, tuple[float, float]] = {}
 
-            # -1. FOV rotation handle — highest priority. If the click is
-            # on a visible FOV handle, start rotating that camera's cone.
-            for did, (hx, hy, ax, ay) in self._fov_handles.items():
-                if (math.hypot(event.x - hx, event.y - hy)
-                        <= C.FOV_HANDLE_HIT_RADIUS):
-                    dev_obj = next((dd for dd in self.devices
-                                    if dd["id"] == did), None)
-                    if dev_obj is not None:
-                        # Track whether we had to auto-create FOV so undo
-                        # can pop the key cleanly back to "no FOV configured".
-                        fov_was_missing = not dev_obj.get("fov")
-                        if fov_was_missing:
-                            dev_obj["fov"] = default_fov_for_type(dev_obj["type"])
-                        self._rotating_fov = {
-                            "device": dev_obj,
-                            "apex_canvas": (ax, ay),
-                            "old_az": dev_obj["fov"].get("azimuth_deg", 0),
-                            "fov_was_missing": fov_was_missing,
+            # -2. Transform gizmo (single selection): scale corners + rotate
+            # knob take priority over everything else under the cursor.
+            if len(self.selected_devices) == 1 and self._gizmo_handles:
+                for name, (hx, hy) in self._gizmo_handles.items():
+                    if math.hypot(event.x - hx, event.y - hy) <= 9:
+                        dev = self.selected_devices[0]
+                        self._transforming = {
+                            "device": dev,
+                            "mode": "rotate" if name == "rot" else "scale",
+                            "old": {k: dev.get(k)
+                                    for k in ("x", "y", "w", "h", "rotation")},
+                            "moved": False,
                         }
                         try:
-                            self.canvas.config(cursor="exchange")
+                            self.canvas.config(
+                                cursor="exchange" if name == "rot" else "sizing")
                         except tk.TclError:
                             pass
                         return
+
+            # -1. FOV rotation handle — highest priority. Each camera channel
+            # has its own handle, so a multi-directional unit's heads aim
+            # independently.
+            for _key, h in self._fov_handles.items():
+                if (math.hypot(event.x - h["hx"], event.y - h["hy"])
+                        <= C.FOV_HANDLE_HIT_RADIUS):
+                    ch = h["channel"]
+                    self._rotating_fov = {
+                        "device": h["device"],
+                        "apex_canvas": h["apex"],
+                        "channel": ch,
+                        "n_channels": h["n"],
+                        "defaults": h["defaults"],
+                        "old_az": self._channel_azimuth(
+                            h["device"], ch, h["defaults"][ch], h["n"]),
+                    }
+                    try:
+                        self.canvas.config(cursor="exchange")
+                    except tk.TclError:
+                        pass
+                    return
 
             # -0.5. Drop point — select + arm drag. High priority (they're
             # sparse, intentional markers) but below FOV handles.
@@ -7156,6 +7461,46 @@ class CameraWireTool:
 
             dev = self._device_at(ix, iy)
             if dev is not None:
+                # Shift+click toggles the device in the multi-selection
+                # (build a set without dragging). Same as Ctrl+click.
+                if event.state & 0x0001:
+                    self._toggle_device_in_selection(dev)
+                    return
+                # FOV mode: clicking a camera selects it. A single-sensor
+                # camera also arms aiming (drag to swing the cone). A multi-
+                # sensor unit just selects — its per-channel handles appear so
+                # each head can be aimed independently. Won't move the camera.
+                if (self._show_fov.get()
+                        and self._is_camera_type(dev.get("type"))):
+                    fres = dev.get("fov")
+                    if not isinstance(fres, dict):
+                        fres = (self._model_fov_for_device(dev)
+                                or default_fov_for_type(dev["type"]))
+                    chans = self._device_channels(dev, fres)
+                    self.selected_device = dev
+                    self._sync_dev_listbox_to_canvas()
+                    self._redraw()
+                    if len(chans) <= 1:
+                        cdx, cdy = self._drawio_to_img(
+                            dev["x"] + dev["w"]/2, dev["y"] + dev["h"]/2)
+                        apex_cx, apex_cy = self._img_to_canvas(cdx, cdy)
+                        self._rotating_fov = {
+                            "device": dev, "apex_canvas": (apex_cx, apex_cy),
+                            "channel": 0, "n_channels": 1, "defaults": [0.0],
+                            "old_az": self._channel_azimuth(dev, 0, 0.0, 1),
+                        }
+                        try:
+                            self.canvas.config(cursor="exchange")
+                        except tk.TclError:
+                            pass
+                        self.status_label.config(
+                            text=f'{dev["id"]} ({dev["type"]}) — drag to aim '
+                                 f'its FOV. Turn FOV off to move/resize.')
+                    else:
+                        self.status_label.config(
+                            text=f'{dev["id"]} ({dev["type"]}) — {len(chans)} '
+                                 f'channels: drag each handle to aim it.')
+                    return
                 # If the clicked device is in a multi-selection, drag the
                 # whole group as a unit. Otherwise click resets to single.
                 clicked_in_multi = (
@@ -7265,6 +7610,37 @@ class CameraWireTool:
             )
             return
 
+        # Transform gizmo drag — scale (corner) or rotate (knob).
+        if self._transforming is not None:
+            dev = self._transforming["device"]
+            cxc, cyc, _hw, _hh = self._device_center_canvas(dev)
+            if self._transforming["mode"] == "rotate":
+                ang = math.degrees(math.atan2(event.y - cyc, event.x - cxc)) + 90.0
+                if not (event.state & 0x0001):   # 15° snap unless Shift
+                    ang = round(ang / 15.0) * 15.0
+                dev["rotation"] = ang % 360
+            else:
+                rot = float(dev.get("rotation", 0) or 0)
+                cosr = math.cos(math.radians(rot))
+                sinr = math.sin(math.radians(rot))
+                dxp = event.x - cxc
+                dyp = event.y - cyc
+                lx = dxp * cosr + dyp * sinr        # cursor in device-local frame
+                ly = -dxp * sinr + dyp * cosr
+                eff_c = max(self.zoom * self._alignment_scale(), 1e-6)
+                cdx = float(dev["x"]) + float(dev["w"]) / 2
+                cdy = float(dev["y"]) + float(dev["h"]) / 2
+                # Subtract the 6px gizmo padding baked into the handle box.
+                new_w = max(4.0, 2 * (abs(lx) - 6) / (self.dx_scale * eff_c))
+                new_h = max(4.0, 2 * (abs(ly) - 6) / (self.dy_scale * eff_c))
+                dev["w"] = new_w
+                dev["h"] = new_h
+                dev["x"] = cdx - new_w / 2
+                dev["y"] = cdy - new_h / 2
+            self._transforming["moved"] = True
+            self._schedule_redraw()
+            return
+
         # Drop-point drag — move the riser to a new world position.
         if self._dragging_drop is not None:
             drop = self._dragging_drop["drop"]
@@ -7303,7 +7679,15 @@ class CameraWireTool:
             # Snap to 5° increments unless Shift held (free)
             if not (event.state & 0x0001):
                 az = round(az / 5) * 5
-            dev["fov"]["azimuth_deg"] = az
+            # Store the aim for this specific channel (keeps the model's cone
+            # shape; persists). Single-sensor cameras store a plain float.
+            ch = self._rotating_fov.get("channel", 0)
+            n = self._rotating_fov.get("n_channels", 1)
+            defaults = self._rotating_fov.get("defaults", [0.0])
+            self._set_channel_azimuth(dev, ch, n, az, defaults)
+            if n <= 1 and isinstance(dev.get("fov"), dict):
+                dev["fov"]["azimuth_deg"] = az
+            self._rotating_fov["new_az"] = az
             self._schedule_redraw()
             return
 
@@ -7445,6 +7829,21 @@ class CameraWireTool:
             self._redraw()
             return
 
+        # Transform gizmo finished — push one undoable command if it moved.
+        if self._transforming is not None:
+            t = self._transforming
+            self._transforming = None
+            self._refresh_mode_ui()   # restore cursor
+            if t.get("moved"):
+                dev = t["device"]
+                new = {k: dev.get(k) for k in ("x", "y", "w", "h", "rotation")}
+                if new != t["old"]:
+                    # dev already holds `new`; do() re-applies it harmlessly.
+                    self._execute(TransformDeviceCmd(self, dev, t["old"], new))
+                    self._post_command_refresh()
+            self._redraw()
+            return
+
         # Drop-point drag finished — persist if it actually moved.
         if self._dragging_drop is not None:
             moved = self._dragging_drop.get("moved")
@@ -7459,25 +7858,17 @@ class CameraWireTool:
         if self._rotating_fov is not None:
             dev = self._rotating_fov["device"]
             old_az = self._rotating_fov["old_az"]
-            new_az = dev["fov"].get("azimuth_deg", 0)
-            fov_was_missing = self._rotating_fov.get("fov_was_missing", False)
+            new_az = self._rotating_fov.get("new_az", old_az)
             self._rotating_fov = None
-            if abs(old_az - new_az) > 0.1 or fov_was_missing:
-                # Push a single undoable command for the whole drag.
-                # The live mousemove already applied the new az; do() is
-                # a harmless no-op for the current state, undo restores.
-                cmd = RotateFovCmd(self, dev, old_az, new_az,
-                                    time.monotonic())
-                cmd._fov_was_missing = fov_was_missing
-                self._execute(cmd)
-                self._post_command_refresh()
+            # Compare as a circular delta so 359↔1 isn't treated as a big move.
+            if abs((old_az - new_az + 180) % 360 - 180) > 0.1:
+                self._mark_dirty()
+                self._save_project_quiet()   # persists device_azimuths
                 dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 compass = dirs[round(new_az / 45) % 8]
                 self._flash_status(
-                    f"Camera {dev['id']} → {int(new_az)}° ({compass})  "
-                    f"[Ctrl+Z to undo]",
-                    ttl_ms=2000,
-                )
+                    f"Camera {dev['id']} aimed {int(new_az)}° ({compass}).",
+                    ttl_ms=2500)
             self._refresh_mode_ui()  # restore cursor
             self._redraw()
             return
@@ -8609,6 +9000,11 @@ class CameraWireTool:
                 "show_wires":       bool(self._show_wires.get()),
                 "show_drops":       bool(self._show_drops.get()),
                 "hidden_types":     sorted(self._hidden_types),
+                "fov_hidden_types": sorted(self._fov_hidden_types),
+                "fov_opacity":      self._fov_opacity,
+                "fov_opacity_by_type": dict(self._fov_opacity_by_type),
+                "fov_color_mode":   self._fov_color_mode,
+                "fov_color_by_type": dict(self._fov_color_by_type),
             }
         except (tk.TclError, ValueError, AttributeError):
             return
@@ -9147,6 +9543,9 @@ class CameraWireTool:
                     new_style = SHAPE_STYLES.get(
                         info.get("shape", "ellipse"), SHAPE_STYLES["ellipse"]
                     ).format(color=info.get("color", "#FFFF00"), fs=fs)
+                    rot = float(dev.get("rotation", 0) or 0)
+                    if rot:
+                        new_style += f";rotation={rot:g}"
                     cell.set("style", new_style)
                     geom = cell.find("mxGeometry")
                     if geom is not None:
@@ -9166,6 +9565,9 @@ class CameraWireTool:
                     style = SHAPE_STYLES.get(
                         info.get("shape", "ellipse"), SHAPE_STYLES["ellipse"]
                     ).format(color=info.get("color", "#FFFF00"), fs=fs)
+                    rot = float(dev.get("rotation", 0) or 0)
+                    if rot:
+                        style += f";rotation={rot:g}"
                     new_cell = ET.SubElement(root_elem, "mxCell")
                     new_cell.set("id", dev["id"])
                     new_cell.set("value", dev["type"])
@@ -10562,6 +10964,23 @@ class CameraWireTool:
                           f"on this floor",
                     command=lambda devs=same_type:
                         self._select_devices_group(devs))
+            dup_devs = self._selection_or(dev)
+            menu.add_command(
+                label=(f"⧉  Duplicate {len(dup_devs)} selected"
+                       if len(dup_devs) > 1 else "⧉  Duplicate device"),
+                command=lambda ds=dup_devs: self._duplicate_devices(ds),
+                accelerator="Ctrl+D")
+            ct_devs = self._selection_or(dev)
+            ct_sub = self._build_change_type_submenu(menu, ct_devs)
+            if ct_sub is not None:
+                menu.add_cascade(
+                    label=(f"🔁  Change type of {len(ct_devs)} selected ▶"
+                           if len(ct_devs) > 1 else "🔁  Change type ▶"),
+                    menu=ct_sub)
+            if (len(self.selected_devices) <= 1
+                    and self._device_is_transformed(dev)):
+                menu.add_command(label="↺  Reset size & rotation",
+                                 command=lambda d=dev: self._reset_device_transform(d))
             menu.add_separator()
             if info.get("is_camera"):
                 menu.add_command(label="📷  Edit FOV / DORI…",
@@ -10583,6 +11002,18 @@ class CameraWireTool:
                            "Show FOV cone for this camera"),
                     command=lambda d=dev: self._toggle_camera_fov(d),
                 )
+                cam_targets = [d for d in self._selection_or(dev)
+                               if self._is_camera_type(d.get("type"))]
+                cur_m = self._effective_model_for_device(dev)
+                menu.add_cascade(
+                    label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
+                           if len(cam_targets) > 1
+                           else f"🎥  Assign model{(' ('+cur_m['name']+')') if cur_m else ''} ▶"),
+                    menu=self._build_assign_model_submenu(menu, cam_targets))
+                menu.add_cascade(
+                    label=f"⭐  Default model for all {dev['type']} ▶",
+                    menu=self._build_assign_model_submenu(
+                        menu, None, type_code=dev["type"]))
                 menu.add_separator()
             del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
                          if len(self.selected_devices) > 1
@@ -10944,12 +11375,40 @@ class CameraWireTool:
             warns.append(
                 f"⚠ {self._plural(report.unassigned_runs, 'unassigned wire')}"
                 f" — {self._format_length(report.unassigned_inches)}")
+        cam_hw = self._camera_hardware_total()
+        info_lines: list[str] = []
+        if cam_hw > 0:
+            n = sum(1 for d in self.devices
+                    if self._is_camera_type(d.get("type"))
+                    and self._effective_model_for_device(d))
+            info_lines.append(
+                f"💲 Camera hardware ({self._plural(n, 'modeled camera')}): "
+                f"{cur}{cam_hw:,.2f}")
         if warns:
             self._bom_totals_label.config(
-                text="\n  " + "\n  ".join(warns),
+                text="\n  " + "\n  ".join(info_lines + warns),
                 foreground="#FF8C42")
+        elif info_lines:
+            self._bom_totals_label.config(
+                text="\n  " + "\n  ".join(info_lines), foreground="#3ddc84")
         else:
             self._bom_totals_label.config(text="", foreground="#FF8C42")
+
+    def _camera_hardware_total(self) -> float:
+        """Sum of effective-model prices over all cameras on this floor."""
+        if self._project is None:
+            return 0.0
+        total = 0.0
+        for d in self.devices:
+            if not self._is_camera_type(d.get("type")):
+                continue
+            m = self._effective_model_for_device(d)
+            if m:
+                try:
+                    total += float(m.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+        return total
 
     # ============================================================ BOM right-click
     def _on_bom_devices_rclick(self, event) -> None:
@@ -11471,12 +11930,37 @@ class CameraWireTool:
                        "Show FOV cone for this camera"),
                 command=lambda d=device: self._toggle_camera_fov(d),
             )
+            cam_targets = [d for d in self._selection_or(device)
+                           if self._is_camera_type(d.get("type"))]
+            cur_m = self._effective_model_for_device(device)
+            m.add_cascade(
+                label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
+                       if len(cam_targets) > 1
+                       else f"🎥  Assign model{(' ('+cur_m['name']+')') if cur_m else ''} ▶"),
+                menu=self._build_assign_model_submenu(m, cam_targets))
+            m.add_cascade(
+                label=f"⭐  Default model for all {device['type']} ▶",
+                menu=self._build_assign_model_submenu(
+                    m, None, type_code=device["type"]))
         same_type = [d for d in self.devices if d["type"] == device["type"]]
         if len(same_type) > 1:
             m.add_command(
                 label=f"☑  Select all {len(same_type)} {device['type']}",
                 command=lambda devs=same_type:
                     self._select_devices_group(devs))
+        dup_devs = self._selection_or(device)
+        m.add_command(
+            label=(f"⧉  Duplicate {len(dup_devs)} selected"
+                   if len(dup_devs) > 1 else "⧉  Duplicate device"),
+            command=lambda ds=dup_devs: self._duplicate_devices(ds),
+            accelerator="Ctrl+D")
+        ct_devs = self._selection_or(device)
+        ct_sub = self._build_change_type_submenu(m, ct_devs)
+        if ct_sub is not None:
+            m.add_cascade(
+                label=(f"🔁  Change type of {len(ct_devs)} selected ▶"
+                       if len(ct_devs) > 1 else "🔁  Change type ▶"),
+                menu=ct_sub)
         m.add_separator()
         del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
                      if len(self.selected_devices) > 1
@@ -11568,6 +12052,11 @@ class CameraWireTool:
         m.add_command(
             label=f"Zoom to fit this group",
             command=lambda devs=group_devs: self._zoom_to_devices(devs))
+        ct_sub = self._build_change_type_submenu(m, group_devs)
+        if ct_sub is not None:
+            m.add_cascade(
+                label=f"🔁  Change all {len(group_devs)} in group to ▶",
+                menu=ct_sub)
         if t_code is not None:
             m.add_separator()
             if t_code in self._hidden_types:
@@ -11594,6 +12083,383 @@ class CameraWireTool:
         self._flash_status(
             f"Selected all {len(devs)} {word} in this group.")
         self._redraw()
+
+    # ---------------- Multi-select + bulk device-type editing
+    def _toggle_device_in_selection(self, dev: dict) -> None:
+        """Ctrl/Shift-click on the canvas: add/remove a device from the
+        multi-selection (delegates to the selection-set toggle, then
+        refreshes)."""
+        self._toggle_device_selection(dev)
+        self._sync_dev_listbox_to_canvas()
+        self._redraw()
+        n = len(self.selected_devices)
+        self._flash_status(
+            f"{n} device{'s' if n != 1 else ''} selected"
+            + (" — right-click to bulk-edit." if n > 1 else "."),
+            ttl_ms=2000)
+
+    def _selection_or(self, dev: dict | None) -> list[dict]:
+        """Devices a context action should target: the multi-selection when
+        `dev` is part of it, otherwise just [dev]."""
+        sel = [d for d in (self.selected_devices or []) if isinstance(d, dict)]
+        if (dev is not None and len(sel) > 1
+                and any(d.get("id") == dev.get("id") for d in sel)):
+            return sel
+        return [dev] if dev is not None else sel
+
+    def _apply_change_type(self, devices: list[dict], code: str) -> None:
+        targets = [d for d in devices if isinstance(d, dict)]
+        if not targets or code not in self.symbol_types:
+            return
+        self._execute(ChangeDeviceTypeCmd(self, targets, code))
+        self._post_command_refresh()
+        self._flash_status(
+            f"Changed {self._plural(len(targets), 'device')} to "
+            f"{code} ({self._safe_sym(code).get('label', code)}).  Ctrl+Z to undo.",
+            ttl_ms=3500)
+
+    def _new_type_then_apply(self, devices: list[dict]) -> None:
+        targets = [d for d in devices if isinstance(d, dict)]
+        self._add_symbol_type(
+            on_saved=lambda code: self._apply_change_type(targets, code))
+
+    def _build_change_type_submenu(self, parent: tk.Menu,
+                                   devices: list[dict]) -> tk.Menu | None:
+        """A submenu listing every symbol type (+ 'New device type…') that
+        retypes `devices` when clicked."""
+        targets = [d for d in devices if isinstance(d, dict)]
+        if not targets:
+            return None
+        sub = tk.Menu(parent, tearoff=0)
+
+        def _cat(c):
+            s = self._safe_sym(c)
+            return (0 if s.get("is_camera")
+                    else 2 if s.get("is_run_point") else 1, c)
+        for code in sorted(self.symbol_types, key=_cat):
+            info = self._safe_sym(code)
+            tag = ("📷" if info.get("is_camera")
+                   else "🎯" if info.get("is_run_point") else "▫")
+            sub.add_command(
+                label=f"{tag} {code} — {info.get('label', code)}",
+                command=lambda c=code, ds=targets: self._apply_change_type(ds, c))
+        sub.add_separator()
+        sub.add_command(label="➕ New device type…",
+                        command=lambda ds=targets: self._new_type_then_apply(ds))
+        return sub
+
+    # ---------------- Camera models (FOV + price + model#)
+    def _effective_model_for_device(self, dev: dict) -> dict | None:
+        if self._project is None or not isinstance(dev, dict):
+            return None
+        mid = mf_mod.effective_model_id(
+            self._project, dev.get("id"), dev.get("type"))
+        return mf_mod.get_camera_model(self._project, mid)
+
+    def _model_fov_for_device(self, dev: dict) -> dict | None:
+        """FOV preset from the device's effective model, or None. Used as a
+        fallback in _draw_fov_cones when the device has no explicit fov."""
+        m = self._effective_model_for_device(dev)
+        if m and isinstance(m.get("fov"), dict):
+            fov = dict(m["fov"])
+            fov.setdefault("show", True)
+            fov.setdefault("enabled", True)
+            return fov
+        return None
+
+    def _next_model_id(self) -> str:
+        n = 0
+        for m in (self._project.camera_models if self._project else []):
+            mm = re.match(r"M(\d+)$", str(m.get("id", "")))
+            if mm:
+                n = max(n, int(mm.group(1)))
+        return f"M{n + 1}"
+
+    def _assign_model_to_devices(self, devices: list[dict], model_id: str) -> None:
+        if self._project is None:
+            return
+        cams = [d for d in devices
+                if isinstance(d, dict) and self._is_camera_type(d.get("type"))]
+        if not cams:
+            self._flash_status("Select one or more cameras first.", ttl_ms=3000)
+            return
+        for d in cams:
+            self._project.device_models[d["id"]] = model_id
+            d.pop("fov", None)   # let the model's FOV apply
+        self._mark_dirty()
+        self._save_project_quiet()
+        self._post_command_refresh()
+        m = mf_mod.get_camera_model(self._project, model_id)
+        self._flash_status(
+            f"Assigned '{m.get('name', model_id) if m else model_id}' to "
+            f"{self._plural(len(cams), 'camera')}.  (Turn on FOV to see cones.)",
+            ttl_ms=3500)
+
+    def _set_type_default_model(self, type_code: str, model_id: str) -> None:
+        if self._project is None:
+            return
+        self._project.type_default_models[type_code] = model_id
+        self._mark_dirty()
+        self._save_project_quiet()
+        self._post_command_refresh()
+        m = mf_mod.get_camera_model(self._project, model_id)
+        self._flash_status(
+            f"All {type_code} cameras now default to "
+            f"'{m.get('name', model_id) if m else model_id}'.", ttl_ms=4000)
+
+    def _clear_device_models(self, devices: list[dict]) -> None:
+        if self._project is None:
+            return
+        for d in devices:
+            if isinstance(d, dict):
+                self._project.device_models.pop(d.get("id"), None)
+        self._mark_dirty()
+        self._save_project_quiet()
+        self._post_command_refresh()
+        self._flash_status("Reverted to the type's default model.", ttl_ms=3000)
+
+    def _build_assign_model_submenu(self, parent: tk.Menu, devices,
+                                    type_code: str | None = None) -> tk.Menu:
+        """Submenu of models. If `devices` given, clicking assigns to them;
+        if `type_code` given, clicking sets that type's default."""
+        sub = tk.Menu(parent, tearoff=0)
+        models = self._project.camera_models if self._project else []
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id")
+            price = m.get("price", 0) or 0
+            lbl = f"{m.get('name', mid)}"
+            if m.get("model_number"):
+                lbl += f"  [{m['model_number']}]"
+            if price:
+                lbl += f"  ${price:,.0f}"
+            if devices is not None:
+                sub.add_command(label=lbl,
+                                command=lambda i=mid, ds=devices:
+                                    self._assign_model_to_devices(ds, i))
+            else:
+                sub.add_command(label=lbl,
+                                command=lambda i=mid, t=type_code:
+                                    self._set_type_default_model(t, i))
+        if models:
+            sub.add_separator()
+        sub.add_command(
+            label="➕ New model…",
+            command=lambda: self._edit_model_dialog(
+                None,
+                on_saved=((lambda i: self._assign_model_to_devices(devices, i))
+                          if devices is not None
+                          else (lambda i: self._set_type_default_model(type_code, i)))))
+        if devices is not None:
+            sub.add_command(label="↩ Use type default (clear override)",
+                            command=lambda ds=devices: self._clear_device_models(ds))
+        sub.add_separator()
+        sub.add_command(label="⚙ Manage models…",
+                        command=self._manage_models_dialog)
+        return sub
+
+    def _edit_model_dialog(self, model: dict | None, on_saved=None) -> None:
+        """Create or edit a camera model: name, model#, price, and FOV
+        (lens / sensor / resolution / mount height / tilt)."""
+        if self._project is None:
+            return
+        is_new = model is None
+        m = dict(model) if isinstance(model, dict) else {}
+        fov = dict(m.get("fov") or lenses_mod.DEFAULT_FOV)
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.title("New camera model" if is_new else f"Edit model — {m.get('name','')}")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        pad = {"padx": 10, "pady": 3}
+        r = 0
+
+        def _row(label, var, width=24):
+            nonlocal r
+            ttk.Label(dlg, text=label).grid(row=r, column=0, sticky=tk.W, **pad)
+            ttk.Entry(dlg, textvariable=var, width=width).grid(
+                row=r, column=1, sticky=tk.W, **pad)
+            r += 1
+
+        name_var = tk.StringVar(value=m.get("name", ""))
+        modelno_var = tk.StringVar(value=m.get("model_number", ""))
+        price_var = tk.StringVar(value=str(m.get("price", "") or ""))
+        _row("Name:", name_var)
+        _row("Model #:", modelno_var)
+        _row("Price ($):", price_var, width=12)
+
+        ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
+            row=r, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
+        r += 1
+        ttk.Label(dlg, text="Field of view", font=("Segoe UI", 9, "bold")).grid(
+            row=r, column=0, columnspan=2, sticky=tk.W, padx=10)
+        r += 1
+        lens_var = tk.StringVar(value=str(fov.get("lens_mm", 4.0)))
+        sensor_var = tk.StringVar(value=str(fov.get("sensor", '1/2.8"')))
+        res = fov.get("resolution", [1920, 1080])
+        try:
+            resw_var = tk.StringVar(value=str(int(res[0])))
+            resh_var = tk.StringVar(value=str(int(res[1])))
+        except (TypeError, ValueError, IndexError):
+            resw_var = tk.StringVar(value="1920")
+            resh_var = tk.StringVar(value="1080")
+        mount_var = tk.StringVar(value=str(fov.get("mount_height_ft", 9.0)))
+        tilt_var = tk.StringVar(value=str(fov.get("tilt_deg", 15)))
+        hfov_var = tk.StringVar(value=str(fov.get("h_fov_deg", "") or ""))
+
+        ttk.Label(dlg, text="Horizontal FOV (°):").grid(
+            row=r, column=0, sticky=tk.W, **pad)
+        ttk.Entry(dlg, textvariable=hfov_var, width=10).grid(
+            row=r, column=1, sticky=tk.W, **pad)
+        ttk.Label(dlg, text="(360 = full circle; blank = derive from lens)",
+                  foreground="#888888", font=("Segoe UI", 8)).grid(
+            row=r, column=2, sticky=tk.W)
+        r += 1
+        ttk.Label(dlg, text="Lens (mm):").grid(row=r, column=0, sticky=tk.W, **pad)
+        ttk.Combobox(dlg, textvariable=lens_var, width=10,
+                     values=[str(v) for v in lenses_mod.LENS_PRESETS_MM]).grid(
+            row=r, column=1, sticky=tk.W, **pad)
+        r += 1
+        ttk.Label(dlg, text="Sensor:").grid(row=r, column=0, sticky=tk.W, **pad)
+        ttk.Combobox(dlg, textvariable=sensor_var, width=10, state="readonly",
+                     values=list(lenses_mod.SENSORS.keys())).grid(
+            row=r, column=1, sticky=tk.W, **pad)
+        r += 1
+        resf = ttk.Frame(dlg)
+        ttk.Label(dlg, text="Resolution:").grid(row=r, column=0, sticky=tk.W, **pad)
+        resf.grid(row=r, column=1, sticky=tk.W, **pad)
+        ttk.Entry(resf, textvariable=resw_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(resf, text=" × ").pack(side=tk.LEFT)
+        ttk.Entry(resf, textvariable=resh_var, width=7).pack(side=tk.LEFT)
+        r += 1
+        _row("Mount height (ft):", mount_var, width=10)
+        _row("Tilt (deg):", tilt_var, width=10)
+
+        def _save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Name required",
+                                       "Give the model a name.", parent=dlg)
+                return
+            def _f(v, d):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return d
+            new_fov = dict(fov)
+            new_fov.update({
+                "lens_mm": _f(lens_var.get(), 4.0),
+                "sensor": sensor_var.get(),
+                "resolution": [int(_f(resw_var.get(), 1920)),
+                               int(_f(resh_var.get(), 1080))],
+                "mount_height_ft": _f(mount_var.get(), 9.0),
+                "tilt_deg": _f(tilt_var.get(), 15.0),
+                "show": True, "enabled": True,
+            })
+            hf = hfov_var.get().strip()
+            if hf:
+                new_fov["h_fov_deg"] = _f(hf, 0.0)
+            else:
+                new_fov.pop("h_fov_deg", None)
+            mid = m.get("id") or self._next_model_id()
+            entry = mf_mod.coerce_camera_model({
+                "id": mid, "name": name,
+                "model_number": modelno_var.get().strip(),
+                "price": _f(price_var.get(), 0.0),
+                "fov": new_fov,
+            })
+            # Replace existing or append.
+            cm = self._project.camera_models
+            for i, existing in enumerate(cm):
+                if isinstance(existing, dict) and existing.get("id") == mid:
+                    cm[i] = entry
+                    break
+            else:
+                cm.append(entry)
+            self._mark_dirty()
+            self._save_project_quiet()
+            self._post_command_refresh()
+            dlg.destroy()
+            self._flash_status(f"Saved model '{name}'.", ttl_ms=3000)
+            if on_saved is not None:
+                on_saved(mid)
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=r, column=0, columnspan=2, pady=10)
+        ttk.Button(btns, text="Save", command=_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda _e: _save())
+
+    def _manage_models_dialog(self) -> None:
+        """List camera models with counts; edit / delete / add."""
+        if self._project is None:
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.title("Camera models")
+        dlg.geometry("520x380")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        lb = tk.Listbox(dlg, font=("Consolas", 9))
+        lb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
+        ordered: list[dict] = []
+
+        def _refill():
+            lb.delete(0, tk.END)
+            ordered.clear()
+            for m in self._project.camera_models:
+                if not isinstance(m, dict):
+                    continue
+                ordered.append(m)
+                n = sum(1 for d in self.devices
+                        if self._is_camera_type(d.get("type"))
+                        and self._effective_model_for_device(d) is m)
+                price = m.get("price", 0) or 0
+                lb.insert(tk.END,
+                          f"{m.get('name',''):24s} {m.get('model_number',''):14s} "
+                          f"${price:>8,.0f}  ({n} cams)")
+        _refill()
+
+        def _edit_sel():
+            s = lb.curselection()
+            if s:
+                self._edit_model_dialog(ordered[s[0]],
+                                        on_saved=lambda _i: _refill())
+
+        def _del_sel():
+            s = lb.curselection()
+            if not s:
+                return
+            m = ordered[s[0]]
+            mid = m.get("id")
+            if not messagebox.askyesno(
+                "Delete model",
+                f"Delete model '{m.get('name','')}'?\nCameras using it revert "
+                f"to their type default / no model.", parent=dlg):
+                return
+            self._project.camera_models = [
+                x for x in self._project.camera_models if x.get("id") != mid]
+            self._project.device_models = {
+                k: v for k, v in self._project.device_models.items() if v != mid}
+            self._project.type_default_models = {
+                k: v for k, v in self._project.type_default_models.items()
+                if v != mid}
+            self._mark_dirty()
+            self._save_project_quiet()
+            self._post_command_refresh()
+            _refill()
+
+        bf = ttk.Frame(dlg)
+        bf.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Button(bf, text="New…",
+                   command=lambda: self._edit_model_dialog(
+                       None, on_saved=lambda _i: _refill())).pack(side=tk.LEFT)
+        ttk.Button(bf, text="Edit…", command=_edit_sel).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text="Delete", command=_del_sel).pack(side=tk.LEFT)
+        ttk.Button(bf, text="Close",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
 
     def _zoom_to_devices(self, devs: list[dict]) -> None:
         if not devs:
@@ -12450,6 +13316,8 @@ class CameraWireTool:
         self._placing_drop = False
         self._dragging_drop = None
         self._selected_drop = None
+        self._transforming = None
+        self._gizmo_handles = {}
         self.current_wire_points = []
         self.cal_points = []
         self._floor_anchors_picking = None
@@ -13997,6 +14865,204 @@ class CameraWireTool:
             messagebox.showerror("Export failed", str(e))
 
     # ============================================================ FOV rendering helper
+    def _device_azimuth(self, dev: dict) -> float:
+        """The aim (azimuth°, 0=up) for a camera: the per-device override
+        if set, else its (model/own) fov azimuth, else 0."""
+        did = dev.get("id")
+        if (self._project is not None
+                and did in self._project.device_azimuths):
+            try:
+                return float(self._project.device_azimuths[did])
+            except (TypeError, ValueError):
+                return 0.0
+        f = dev.get("fov")
+        if not isinstance(f, dict):
+            f = self._model_fov_for_device(dev)
+        try:
+            return float((f or {}).get("azimuth_deg", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _device_channels(self, d: dict, f: dict) -> list[tuple[dict, float]]:
+        """The sensor channels for a camera: a list of (sensor_fov, default
+        azimuth-offset°). Multi-sensor models carry a `sensors` list; each
+        sensor inherits fov fields it omits. Single-sensor → one channel."""
+        raw = f.get("sensors") if isinstance(f, dict) else None
+        if isinstance(raw, list) and raw:
+            chans: list[tuple[dict, float]] = []
+            for s in raw:
+                sf = dict(f)
+                sf.pop("sensors", None)
+                off = 0.0
+                if isinstance(s, dict):
+                    sf.update({k: v for k, v in s.items()
+                               if k != "azimuth_offset_deg"})
+                    try:
+                        off = float(s.get("azimuth_offset_deg", 0) or 0)
+                    except (TypeError, ValueError):
+                        off = 0.0
+                chans.append((sf, off))
+            return chans
+        return [(f if isinstance(f, dict) else {}, 0.0)]
+
+    def _channel_azimuth(self, d: dict, i: int, default_offset: float,
+                         n_channels: int) -> float:
+        """Absolute aim° for channel i: the per-channel saved value if any,
+        else the model's default offset. device_azimuths[id] is a float for
+        single-sensor cameras, or a list (one per channel) for multi."""
+        stored = (self._project.device_azimuths.get(d.get("id"))
+                  if self._project is not None else None)
+        if isinstance(stored, list):
+            if 0 <= i < len(stored):
+                try:
+                    return float(stored[i]) % 360
+                except (TypeError, ValueError):
+                    pass
+        elif stored is not None and n_channels == 1:
+            try:
+                return float(stored) % 360
+            except (TypeError, ValueError):
+                pass
+        return default_offset % 360
+
+    def _set_channel_azimuth(self, d: dict, i: int, n_channels: int,
+                             az: float, defaults: list[float]) -> None:
+        if self._project is None:
+            return
+        did = d.get("id")
+        if n_channels <= 1:
+            self._project.device_azimuths[did] = az % 360
+            return
+        cur = self._project.device_azimuths.get(did)
+        if not isinstance(cur, list) or len(cur) != n_channels:
+            cur = [self._channel_azimuth(d, j, defaults[j], n_channels)
+                   for j in range(n_channels)]
+        cur = list(cur)
+        cur[i] = az % 360
+        self._project.device_azimuths[did] = cur
+
+    def _fov_color_for_type(self, type_code: str) -> str:
+        """Cone color for a camera type — a user override, else a stable
+        auto-assigned hue from the palette (by sorted camera-type order)."""
+        c = self._fov_color_by_type.get(type_code)
+        if c:
+            return c
+        cams = sorted(t for t in self.symbol_types
+                      if self._is_camera_type(t))
+        try:
+            idx = cams.index(type_code)
+        except ValueError:
+            idx = sum(ord(ch) for ch in str(type_code))
+        return FOV_TYPE_PALETTE[idx % len(FOV_TYPE_PALETTE)]
+
+    def _open_fov_settings_dialog(self) -> None:
+        """Gear popover next to the FOV toggle — control how coverage cones
+        are displayed so a busy plan stays readable."""
+        dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
+        dlg.title("FOV display settings")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        pad = {"padx": 10, "pady": 3}
+        rev = {v: k for k, v in FOV_OPACITY_LEVELS.items()}
+
+        def apply():
+            self._redraw()
+            self._persist_user_settings()
+
+        ttk.Checkbutton(dlg, text="Show FOV cones (toolbar 'FOV')",
+                        variable=self._show_fov, command=apply).grid(
+            row=0, column=0, columnspan=3, sticky=tk.W, **pad)
+        ttk.Checkbutton(dlg, text="Only the selected camera",
+                        variable=self._show_only_selected_fov,
+                        command=apply).grid(row=1, column=0, columnspan=3,
+                                            sticky=tk.W, **pad)
+        ttk.Checkbutton(dlg, text="Full DORI rings  (off = one Detection cone)",
+                        variable=self._show_dori, command=apply).grid(
+            row=2, column=0, columnspan=3, sticky=tk.W, **pad)
+
+        ttk.Label(dlg, text="Color cones by:").grid(row=3, column=0,
+                                                    sticky=tk.W, **pad)
+        cmode = tk.StringVar(value=self._fov_color_mode)
+
+        def set_cmode():
+            self._fov_color_mode = cmode.get()
+            apply()
+        cf = ttk.Frame(dlg)
+        cf.grid(row=3, column=1, columnspan=2, sticky=tk.W)
+        ttk.Radiobutton(cf, text="Camera type", variable=cmode, value="type",
+                        command=set_cmode).pack(side=tk.LEFT)
+        ttk.Radiobutton(cf, text="DORI level", variable=cmode, value="dori",
+                        command=set_cmode).pack(side=tk.LEFT, padx=8)
+
+        ttk.Label(dlg, text="Default transparency:").grid(row=4, column=0,
+                                                          sticky=tk.W, **pad)
+        gop = tk.StringVar(value=rev.get(self._fov_opacity, "Light"))
+
+        def set_gop(*_):
+            self._fov_opacity = FOV_OPACITY_LEVELS.get(gop.get(), "gray25")
+            apply()
+        ttk.Combobox(dlg, textvariable=gop, state="readonly", width=10,
+                     values=list(FOV_OPACITY_LEVELS.keys())).grid(
+            row=4, column=1, sticky=tk.W, **pad)
+        gop.trace_add("write", set_gop)
+
+        ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
+            row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=6)
+        ttk.Label(dlg, text="Per camera type  (show · color · transparency):",
+                  font=("Segoe UI", 9, "bold")).grid(
+            row=6, column=0, columnspan=3, sticky=tk.W, **pad)
+
+        cams = sorted(t for t in self.symbol_types if self._is_camera_type(t))
+        r = 7
+        for code in cams:
+            info = self._safe_sym(code)
+            n = sum(1 for d in self.devices if d.get("type") == code)
+
+            showv = tk.BooleanVar(value=(code not in self._fov_hidden_types))
+
+            def _toggle(c=code, v=showv):
+                if v.get():
+                    self._fov_hidden_types.discard(c)
+                else:
+                    self._fov_hidden_types.add(c)
+                apply()
+            ttk.Checkbutton(
+                dlg, variable=showv, command=_toggle,
+                text=f"{code} — {str(info.get('label', code))[:18]} ({n})",
+            ).grid(row=r, column=0, sticky=tk.W, padx=20)
+
+            swatch = tk.Button(dlg, width=2,
+                               bg=self._fov_color_for_type(code), relief=tk.RAISED)
+
+            def _pick(c=code, btn=None):
+                col = colorchooser.askcolor(
+                    color=self._fov_color_for_type(c), parent=dlg)
+                if col and col[1]:
+                    self._fov_color_by_type[c] = col[1]
+                    btn.config(bg=col[1])
+                    apply()
+            swatch.config(command=lambda c=code, b=swatch: _pick(c, b))
+            swatch.grid(row=r, column=1, padx=4)
+
+            cur = self._fov_opacity_by_type.get(code)
+            opv = tk.StringVar(value=(rev.get(cur) if cur is not None else "(default)"))
+
+            def _setop(c=code, var=None):
+                val = var.get()
+                if val == "(default)":
+                    self._fov_opacity_by_type.pop(c, None)
+                else:
+                    self._fov_opacity_by_type[c] = FOV_OPACITY_LEVELS.get(val, "gray25")
+                apply()
+            ttk.Combobox(dlg, textvariable=opv, state="readonly", width=10,
+                         values=["(default)"] + list(FOV_OPACITY_LEVELS.keys())
+                         ).grid(row=r, column=2, padx=4)
+            opv.trace_add("write", lambda *_a, c=code, var=opv: _setop(c, var))
+            r += 1
+
+        ttk.Button(dlg, text="Close", command=dlg.destroy).grid(
+            row=r, column=0, columnspan=3, pady=10)
+
     def _draw_fov_cones(self) -> None:
         """Render DORI cones for any cameras with `fov` configured.
 
@@ -14005,9 +15071,9 @@ class CameraWireTool:
         in raw image space; _img_to_canvas applies the floor's alignment
         when painting it to canvas. Falls back to 0.5 if no scale set.
         """
-        # Skip rendering entirely at very low zoom — cones become unreadable
-        # noise and dominate render time. User can zoom in to see them.
-        if self.zoom < 0.18:
+        # Skip only at extreme zoom-out. (Was 0.18, which hid cones at the
+        # normal fit-view zoom ~0.14 — making FOV look broken.)
+        if self.zoom < 0.05:
             self._fov_handles = {}
             return
         # Reset handle cache; it gets repopulated as we draw cones.
@@ -14047,6 +15113,8 @@ class CameraWireTool:
                 continue
             if d["type"] in self._hidden_types:
                 continue  # camera type hidden from the map → no cone either
+            if d["type"] in self._fov_hidden_types:
+                continue  # FOV cone hidden for this type (e.g. 360 blobs)
             if only_selected and (sel_id is None or d["id"] != sel_id):
                 continue
             cam_ix = (d["x"] + d["w"]/2) * self.dx_scale
@@ -14055,84 +15123,94 @@ class CameraWireTool:
                     and iy0 - slack <= cam_iy <= iy1 + slack):
                 continue
             f = d.get("fov")
-            # If the camera doesn't have its own FOV configured (or it's
-            # corrupted to a non-dict value), fall back to the per-type
-            # preset so toggling 'Show FOV' shows ALL cameras' coverage
-            # immediately, even on a fresh project.
+            # FOV resolution, highest priority first:
+            #   1. the camera's own per-device fov override (dev['fov'])
+            #   2. the assigned model's fov (model drives coverage)
+            #   3. the per-type preset (so 'Show FOV' lights up every camera)
             if not isinstance(f, dict):
-                f = default_fov_for_type(d["type"])
+                f = self._model_fov_for_device(d) or default_fov_for_type(d["type"])
             elif not f.get("show", True):
                 continue
-            cone = fov_mod.compute_fov(f)
             # Camera apex in image coords
             apex_ix, apex_iy = self._drawio_to_img(
                 d["x"] + d["w"]/2, d["y"] + d["h"]/2)
-            # Draw rings outermost-to-innermost so inner rings overlay correctly
-            for ring in ("D", "O", "R", "I"):
-                if ring != "D" and not self._show_dori.get():
-                    # When DORI rings disabled, draw only Detection (the outer cone)
-                    continue
-                radius_in = cone.distances_in[ring]
-                if radius_in <= 0:
-                    continue
-                poly_img = fov_mod.cone_polygon(
-                    cone,
-                    center_x=apex_ix, center_y=apex_iy,
-                    radius_in=radius_in,
-                    inches_per_pixel=ipp,
-                    azimuth_deg=cone.azimuth_deg,
-                )
-                if len(poly_img) < 3:
-                    continue
-                pts_canvas: list[float] = []
-                for ix, iy in poly_img:
-                    cx, cy = self._img_to_canvas(ix, iy)
-                    pts_canvas.extend([cx, cy])
-                color = fov_mod.DORI_COLORS[ring]
-                self.canvas.create_polygon(
-                    pts_canvas, fill=color, outline=color, width=1,
-                    stipple="gray25",  # semi-transparent feel
-                    tags=("fov", f"fov_{d['id']}"),
-                )
-            # Draw the rotation handle — only on the SELECTED camera (or
-            # when "Show only selected" is on, which already filtered above).
-            # Handle sits at the tip of the cone's center axis, at the
-            # Detection radius. Drag it to rotate.
+            apex_cx, apex_cy = self._img_to_canvas(apex_ix, apex_iy)
+            # One cone per sensor channel; each channel has its own aim so a
+            # multi-directional unit's heads point independently.
+            channels = self._device_channels(d, f)
+            n_ch = len(channels)
+            defaults = [off for (_sf, off) in channels]
+            chan_az = [self._channel_azimuth(d, i, defaults[i], n_ch)
+                       for i in range(n_ch)]
+            color_type = self._fov_color_for_type(d["type"])
+            stipple = self._fov_opacity_by_type.get(d["type"], self._fov_opacity)
             sel_id_now = (self._primary_selected["id"]
                           if self._primary_selected is not None else None)
-            if d["id"] == sel_id_now or only_selected:
-                d_radius_in = cone.distances_in.get("D", 0)
-                if d_radius_in > 0:
-                    radius_px = d_radius_in / ipp
-                    az_rad = math.radians(cone.azimuth_deg)
-                    tip_ix = apex_ix + math.sin(az_rad) * radius_px
-                    tip_iy = apex_iy - math.cos(az_rad) * radius_px
-                    cx_, cy_ = self._img_to_canvas(tip_ix, tip_iy)
-                    apex_cx, apex_cy = self._img_to_canvas(apex_ix, apex_iy)
-                    # Line from apex to handle, then a circle handle
-                    self.canvas.create_line(
-                        apex_cx, apex_cy, cx_, cy_,
-                        fill="#FFFFFF", width=2, dash=(4, 3),
-                        tags=("fov", "fov_axis", f"fov_axis_{d['id']}"),
-                    )
-                    self.canvas.create_oval(
-                        cx_-9, cy_-9, cx_+9, cy_+9,
-                        fill="#FFFFFF", outline="#202060", width=2,
-                        tags=("fov", "fov_handle", f"fov_handle_{d['id']}"),
-                    )
-                    # Cache the handle position (image coords + camera apex)
-                    # for hit-testing in _on_left_press.
-                    self._fov_handles[d["id"]] = (cx_, cy_, apex_cx, apex_cy)
-                    # Floating azimuth readout
-                    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                    compass = dirs[round(cone.azimuth_deg / 45) % 8]
-                    self.canvas.create_text(
-                        cx_+14, cy_+14,
-                        text=f"{int(cone.azimuth_deg)}° ({compass})",
-                        fill="#FFFFFF", font=("Segoe UI", 9, "bold"),
-                        anchor=tk.W,
-                        tags=("fov", f"fov_label_{d['id']}"),
-                    )
+            show_handles = (d["id"] == sel_id_now or only_selected)
+            dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+            for i, (sf, _off) in enumerate(channels):
+                cone = fov_mod.compute_fov(sf)
+                try:
+                    h_override = float(sf.get("h_fov_deg") or 0)
+                except (TypeError, ValueError):
+                    h_override = 0.0
+                cone = dataclass_replace(
+                    cone,
+                    aov_h_deg=(min(360.0, h_override) if h_override > 0
+                               else cone.aov_h_deg),
+                    azimuth_deg=chan_az[i])
+                n_seg = max(24, int(cone.aov_h_deg / 6))
+                for ring in ("D", "O", "R", "I"):
+                    if ring != "D" and not self._show_dori.get():
+                        continue
+                    radius_in = cone.distances_in[ring]
+                    if radius_in <= 0:
+                        continue
+                    poly_img = fov_mod.cone_polygon(
+                        cone, center_x=apex_ix, center_y=apex_iy,
+                        radius_in=radius_in, inches_per_pixel=ipp,
+                        azimuth_deg=cone.azimuth_deg, n_segments=n_seg)
+                    if len(poly_img) < 3:
+                        continue
+                    pts_canvas: list[float] = []
+                    for ix, iy in poly_img:
+                        cx, cy = self._img_to_canvas(ix, iy)
+                        pts_canvas.extend([cx, cy])
+                    color = (fov_mod.DORI_COLORS[ring]
+                             if self._fov_color_mode == "dori" else color_type)
+                    self.canvas.create_polygon(
+                        pts_canvas, fill=color, outline=color, width=1,
+                        stipple=stipple, tags=("fov", f"fov_{d['id']}"))
+                # A rotation handle per channel (only on the selected camera),
+                # so each head can be aimed independently. Full-circle (360°)
+                # channels get no handle — there's nothing to aim.
+                if show_handles and cone.aov_h_deg < 350:
+                    d_radius_in = cone.distances_in.get("D", 0)
+                    if d_radius_in > 0:
+                        radius_px = d_radius_in / ipp
+                        az_rad = math.radians(chan_az[i])
+                        tip_ix = apex_ix + math.sin(az_rad) * radius_px
+                        tip_iy = apex_iy - math.cos(az_rad) * radius_px
+                        hx, hy = self._img_to_canvas(tip_ix, tip_iy)
+                        self.canvas.create_line(
+                            apex_cx, apex_cy, hx, hy, fill="#FFFFFF", width=2,
+                            dash=(4, 3), tags=("fov", f"fov_axis_{d['id']}"))
+                        self.canvas.create_oval(
+                            hx-9, hy-9, hx+9, hy+9, fill="#FFFFFF",
+                            outline="#202060", width=2,
+                            tags=("fov", "fov_handle", f"fov_handle_{d['id']}"))
+                        self._fov_handles[f"{d['id']}#{i}"] = {
+                            "hx": hx, "hy": hy, "apex": (apex_cx, apex_cy),
+                            "device": d, "channel": i, "n": n_ch,
+                            "defaults": defaults,
+                        }
+                        compass = dirs[round(chan_az[i] / 45) % 8]
+                        lbl = (f"#{i+1} {int(chan_az[i])}°" if n_ch > 1
+                               else f"{int(chan_az[i])}° ({compass})")
+                        self.canvas.create_text(
+                            hx+12, hy+12, text=lbl, fill="#FFFFFF",
+                            font=("Segoe UI", 9, "bold"), anchor=tk.W,
+                            tags=("fov", f"fov_label_{d['id']}"))
 
 
 # ============================================================ Entry point
@@ -14245,14 +15323,13 @@ def main() -> None:
     bundle_path: str | None = None
     drawio_path: str | None = None
 
-    if len(wiremaps) == 1:
-        # An existing multi/single-floor project — open it directly, no
-        # "pick a drawing" dialog. Its side-car .zsmt keeps the history.
-        drawio_path = _active_drawio_for_wiremap(wiremaps[0])
-    elif not wiremaps and len(bundles) == 1:
-        # Only a portable .zsmt present — open the bundle.
+    if len(bundles) == 1:
+        # Prefer the .zsmt bundle — it's the canonical, revisioned project.
         bundle_path = bundles[0]
-    elif not wiremaps and not bundles and len(drawio_files) == 1:
+    elif not bundles and len(wiremaps) == 1:
+        # No bundle, but a loose folder project — open it directly.
+        drawio_path = _active_drawio_for_wiremap(wiremaps[0])
+    elif not bundles and not wiremaps and len(drawio_files) == 1:
         drawio_path = drawio_files[0]
 
     if bundle_path is None and drawio_path is None:
