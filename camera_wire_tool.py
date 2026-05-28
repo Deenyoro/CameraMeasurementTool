@@ -3366,6 +3366,30 @@ class CameraWireTool:
                 "cable (Cat6 / Cat5e / RG59 / …). Ctrl+F focuses.")
         self._wire_search_var.trace_add("write", lambda *_: self._refresh_wire_list())
 
+        # Sort control — group-by-device is the default; the run-length and
+        # type/cable orderings make it easy to find the longest pulls or
+        # everything of one camera/cable type.
+        sort_row = ttk.Frame(tab_wire)
+        sort_row.pack(fill=tk.X, padx=6, pady=(0, 2))
+        ttk.Label(sort_row, text="Sort:").pack(side=tk.LEFT)
+        self._wire_sort_var = tk.StringVar(value="Group by device")
+        wire_sort_combo = ttk.Combobox(
+            sort_row, textvariable=self._wire_sort_var, state="readonly",
+            width=22, values=[
+                "Group by device",
+                "Longest run first",
+                "Shortest run first",
+                "Group by camera type",
+                "Group by cable type",
+            ])
+        wire_sort_combo.pack(side=tk.LEFT, padx=4)
+        Tooltip(wire_sort_combo,
+                "Order the wire list: by device (grouped), by run length "
+                "(longest/shortest first, flat), or grouped by camera type "
+                "or cable type.")
+        wire_sort_combo.bind("<<ComboboxSelected>>",
+                             lambda _e: self._refresh_wire_list())
+
         wf = ttk.Frame(tab_wire)
         wf.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         # EXTENDED so user can Ctrl-click multiple wires for bulk delete.
@@ -8893,106 +8917,150 @@ class CameraWireTool:
             self._wire_search_var.get() if hasattr(self, "_wire_search_var") else ""
         ).lower().strip()
         # _filtered_wire_indices: actual indices into wire_routes for items
-        # that pass the filter. _wire_listbox_rows: parallel list mapping
-        # listbox row → wire-routes index OR None (header / placeholder).
+        # that pass the filter (display order). _wire_listbox_rows: parallel
+        # list mapping listbox row → wire-routes index OR None (header /
+        # placeholder). _wire_header_devs: listbox row → device id for the
+        # per-device group headers, so clicking a header selects that device.
         self._filtered_wire_indices: list[int] = []
         self._wire_listbox_rows: list[int | None] = []
+        self._wire_header_devs: dict[int, str] = {}
 
-        # Group filtered wires by device id (None = unassigned)
-        groups: dict[str | None, list[tuple[int, dict]]] = {}
-        # Pre-build the id→device map once so the per-route cable resolve
-        # isn't O(N) inside the loop.
-        devices_by_id_for_search = {d["id"]: d for d in self.devices}
+        mode = (self._wire_sort_var.get()
+                if hasattr(self, "_wire_sort_var") else "Group by device")
+        devices_by_id = {d["id"]: d for d in self.devices}
+
+        # One record per filtered wire — display + sort fields computed once.
+        recs: list[dict] = []
         for i, route in enumerate(self.wire_routes):
-            did = route.get("device_id")
-            dev = devices_by_id_for_search.get(did) if did else None
+            rdict = route if isinstance(route, dict) else {}
+            did = rdict.get("device_id")
+            dev = devices_by_id.get(did) if did else None
             dev_type = dev["type"] if dev else ""
-            sym_info = self._safe_sym(dev_type) if dev_type else {}
-            sym_label = sym_info.get("label", dev_type or "")
-            # Match against the EFFECTIVE cable (what the row displays), not
-            # only the explicit cable_type override — searching "Cat6" should
-            # find auto-resolved Cat6 wires too.
-            effective_cable = bom_mod.cable_for_route(
-                route, devices_by_id_for_search,
-                self.symbol_types, self.cable_types,
-                project_default=self._proj_default_cable(),
-            )
+            sym_label = (self._safe_sym(dev_type).get("label", dev_type or "")
+                         if dev_type else "")
+            effective = bom_mod.cable_for_route(
+                rdict, devices_by_id, self.symbol_types, self.cable_types,
+                project_default=self._proj_default_cable())
             search_blob = (f"{did or ''} {dev_type} {sym_label} "
-                            f"{effective_cable}").lower()
+                           f"{effective}").lower()
             if query and query not in search_blob:
                 continue
-            groups.setdefault(did, []).append((i, route))
-
-        # Render groups, with None (unassigned) last
-        ordered_keys = (
-            sorted([k for k in groups if k is not None]) +
-            ([None] if None in groups else [])
-        )
-        for did in ordered_keys:
-            entries = groups[did]
-            n_entries = len(entries)
-            wire_count = self._plural(n_entries, "wire")
-            if did is None:
-                header = f"── unassigned  ({wire_count}) ──"
+            length_in = rdict.get("length_in")
+            if length_in is not None:
+                try:
+                    lv = float(length_in)
+                except (TypeError, ValueError):
+                    lv = 0.0
+                length_str = self._format_length(length_in)
             else:
-                dev = next((d for d in self.devices if d["id"] == did), None)
-                dev_type = dev["type"] if dev else "—"
-                sym_label = (self._safe_sym(dev_type).get("label", dev_type)
-                              if dev else "")
-                tot_in = sum((r.get("length_in") or 0) for _, r in entries)
-                if tot_in:
-                    tot_str = self._format_length(tot_in)
-                else:
-                    # Sum length_px tolerantly — a malformed route would
-                    # KeyError on r['length_px'] in the original genexpr.
-                    total_px = sum(r.get("length_px", 0)
-                                    for _, r in entries
-                                    if isinstance(r, dict))
-                    tot_str = f"{int(total_px)} px"
-                header = (f"── {did}  {dev_type:5s}  {sym_label[:24]}"
-                          f"  ({wire_count}, {tot_str}) ──")
-            self.wire_listbox.insert(tk.END, header)
+                try:
+                    lv = float(rdict.get("length_px", 0) or 0)
+                except (TypeError, ValueError):
+                    lv = 0.0
+                length_str = f"{lv:.0f}px"
+            pts = rdict.get("points")
+            n_segs = len(pts) - 1 if isinstance(pts, list) and pts else 0
+            explicit = rdict.get("cable_type")
+            cable_str = effective + ("" if explicit else " (auto)")
+            riser = " ↕" if rdict.get("drop_ids") else ""
+            recs.append({"idx": i, "route": rdict, "did": did, "dev": dev,
+                         "dev_type": dev_type, "sym_label": sym_label,
+                         "length_val": lv, "length_str": length_str,
+                         "n_segs": n_segs, "cable": effective,
+                         "cable_str": cable_str, "riser": riser})
+
+        def _add_header(text: str, dev_id: str | None = None) -> None:
+            self.wire_listbox.insert(tk.END, text)
             self._wire_listbox_rows.append(None)
-            self.wire_listbox.itemconfig(self.wire_listbox.size() - 1,
-                                          foreground="#7fc4ff",
-                                          selectbackground="#222244",
-                                          selectforeground="#7fc4ff")
-            devices_by_id = {d["id"]: d for d in self.devices}
-            for ri, route in entries:
-                self._filtered_wire_indices.append(ri)
-                # Defensive — a malformed route shouldn't break the whole
-                # list refresh on one bad row.
-                length_in = (route.get("length_in")
-                             if isinstance(route, dict) else None)
-                if length_in is not None:
-                    length_str = self._format_length(length_in)
+            pos = self.wire_listbox.size() - 1
+            if dev_id:
+                self._wire_header_devs[pos] = dev_id
+            self.wire_listbox.itemconfig(pos, foreground="#7fc4ff",
+                                         selectbackground="#222244",
+                                         selectforeground="#7fc4ff")
+
+        def _add_wire(e: dict, flat: bool = False) -> None:
+            self._filtered_wire_indices.append(e["idx"])
+            if flat:
+                did = e["did"] or "—"
+                row = (f'  {did:>6}  {(e["dev_type"] or "·"):<4} '
+                       f'{e["length_str"]:>9}{e["riser"]}  '
+                       f'{e["n_segs"]}seg ({e["cable_str"]})')
+            else:
+                row = (f'   {e["n_segs"]}seg  {e["length_str"]}{e["riser"]}'
+                       f'  ({e["cable_str"]})')
+            self.wire_listbox.insert(tk.END, row)
+            self._wire_listbox_rows.append(e["idx"])
+
+        def _grp_total_str(es: list[dict]) -> str:
+            tot_in = sum((e["route"].get("length_in") or 0) for e in es)
+            if tot_in:
+                return self._format_length(tot_in)
+            total_px = sum((e["route"].get("length_px") or 0) for e in es)
+            return f"{int(total_px)} px"
+
+        if mode in ("Longest run first", "Shortest run first"):
+            rev = (mode == "Longest run first")
+            for e in sorted(recs, key=lambda e: e["length_val"], reverse=rev):
+                _add_wire(e, flat=True)
+
+        elif mode == "Group by camera type":
+            tgroups: dict[str, list[dict]] = {}
+            for e in recs:
+                tgroups.setdefault(e["dev_type"], []).append(e)
+            keys = sorted([k for k in tgroups if k]) + (
+                [""] if "" in tgroups else [])
+            for k in keys:
+                es = sorted(tgroups[k], key=lambda e: e["length_val"],
+                            reverse=True)
+                if k:
+                    label = self._safe_sym(k).get("label", k)
+                    header = (f"── {k:5s} {label[:22]}  "
+                              f"({self._plural(len(es), 'wire')}, "
+                              f"{_grp_total_str(es)}) ──")
                 else:
-                    px_raw = (route.get("length_px", 0)
-                              if isinstance(route, dict) else 0)
-                    try:
-                        length_str = f"{float(px_raw):.0f}px"
-                    except (TypeError, ValueError):
-                        length_str = "--"
-                pts = route.get("points") if isinstance(route, dict) else None
-                n_segs = (len(pts) - 1
-                          if isinstance(pts, list) and pts else 0)
-                # Show the EFFECTIVE cable (explicit override OR resolved
-                # device default) so the user always knows what BOM line
-                # this wire contributes to.
-                explicit = (route.get("cable_type")
-                            if isinstance(route, dict) else None)
-                effective = bom_mod.cable_for_route(
-                    route if isinstance(route, dict) else {},
-                    devices_by_id, self.symbol_types,
-                    self.cable_types,
-                    project_default=self._proj_default_cable())
-                cable_str = effective + ("" if explicit else " (auto)")
-                # Mark wires that include a cross-floor vertical riser run.
-                riser = (" ↕" if isinstance(route, dict) and route.get("drop_ids")
-                         else "")
-                row = f'   {n_segs}seg  {length_str}{riser}  ({cable_str})'
-                self.wire_listbox.insert(tk.END, row)
-                self._wire_listbox_rows.append(ri)
+                    header = (f"── (no type / unassigned)  "
+                              f"({self._plural(len(es), 'wire')}) ──")
+                _add_header(header)
+                for e in es:
+                    _add_wire(e, flat=True)
+
+        elif mode == "Group by cable type":
+            cgroups: dict[str, list[dict]] = {}
+            for e in recs:
+                cgroups.setdefault(e["cable"], []).append(e)
+            for k in sorted(cgroups):
+                es = sorted(cgroups[k], key=lambda e: e["length_val"],
+                            reverse=True)
+                header = (f"── {k}  ({self._plural(len(es), 'wire')}, "
+                          f"{_grp_total_str(es)}) ──")
+                _add_header(header)
+                for e in es:
+                    _add_wire(e, flat=True)
+
+        else:  # "Group by device" (default)
+            dgroups: dict[str | None, list[dict]] = {}
+            for e in recs:
+                dgroups.setdefault(e["did"], []).append(e)
+            ordered = (sorted([k for k in dgroups if k is not None])
+                       + ([None] if None in dgroups else []))
+            for did in ordered:
+                es = dgroups[did]
+                if did is None:
+                    _add_header(f"── unassigned  "
+                                f"({self._plural(len(es), 'wire')}) ──")
+                else:
+                    dev = devices_by_id.get(did)
+                    dev_type = dev["type"] if dev else "—"
+                    sym_label = (self._safe_sym(dev_type).get("label", dev_type)
+                                 if dev else "")
+                    header = (f"── {did}  {dev_type:5s}  {sym_label[:24]}"
+                              f"  ({self._plural(len(es), 'wire')}, "
+                              f"{_grp_total_str(es)}) ──")
+                    # dev_id makes this header clickable → selects the device.
+                    _add_header(header, dev_id=did)
+                for e in es:
+                    _add_wire(e, flat=False)
 
         if not self._filtered_wire_indices:
             placeholder = ("(no wires yet — right-click any device on the map → "
@@ -9116,6 +9184,18 @@ class CameraWireTool:
                 return
 
     def _on_wire_select(self, _event) -> None:
+        # Clicking a per-device group header (it carries the device id)
+        # selects that device on the map — so the Wires pane lets you pick
+        # either a wire (a wire row) or its device (the header above it).
+        sel = self.wire_listbox.curselection()
+        if (sel and hasattr(self, "_wire_header_devs")
+                and sel[0] in self._wire_header_devs):
+            did = self._wire_header_devs[sel[0]]
+            dev = next((d for d in self.devices if d.get("id") == did), None)
+            if dev is not None:
+                self.selected_device = dev
+                if hasattr(self, "_sync_dev_listbox_to_canvas"):
+                    self._sync_dev_listbox_to_canvas()
         self._redraw()
 
     def _on_unit_change(self) -> None:
