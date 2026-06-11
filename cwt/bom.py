@@ -124,7 +124,6 @@ def rollup(
     waste_factor: float = 1.10,
     tax_rate: float = 0.0,
     risers: list[dict] | None = None,
-    scale_factor: float | None = None,
     project_default: str | None = None,
 ) -> BomReport:
     """Compute a BOM from wire routes (+ optional risers).

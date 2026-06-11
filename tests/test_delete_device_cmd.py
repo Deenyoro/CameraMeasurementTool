@@ -56,7 +56,7 @@ def test_undo_delete_restores_device_and_wires():
     # All wires restored
     assert len(app.wire_routes) == len(original_wires)
     # Original wire identities preserved (same dicts, same order)
-    for restored, original in zip(app.wire_routes, original_wires):
+    for restored, original in zip(app.wire_routes, original_wires, strict=False):
         assert restored is original
 
 

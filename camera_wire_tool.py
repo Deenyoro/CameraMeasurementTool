@@ -1294,7 +1294,10 @@ def load_recent_files() -> list[str]:
         return []
     try:
         data = json.loads(RECENT_FILES_PATH.read_text(encoding="utf-8"))
-        return [p for p in data if isinstance(p, str)]
+        # Prune entries whose file no longer exists (deleted projects,
+        # temp extractions) — a dead recent is a guaranteed open error.
+        return [p for p in data
+                if isinstance(p, str) and os.path.exists(p)]
     except (OSError, ValueError):
         return []
 
@@ -1659,10 +1662,6 @@ class CameraWireTool:
         # Only truly extreme transforms (off-page render) warrant a nudge.
         if 0.1 <= s <= 10.0 and abs(r) <= 90:
             return   # within the (now generous) normal range, no warning
-        try:
-            tx = float(al.get("tx", 0) or 0); ty = float(al.get("ty", 0) or 0)
-        except (TypeError, ValueError):
-            tx = ty = 0
         # Non-destructive: just inform. Never reset-and-save automatically —
         # that's how a valid alignment got wiped before. If the user really
         # wants to clear it, the Floors menu → 'Clear alignment' does so
@@ -2033,6 +2032,8 @@ class CameraWireTool:
                 if not f:
                     continue
                 df = f.get("drawio_file")
+                if not df or not isinstance(df, str):
+                    continue
                 p = (df if os.path.isabs(df)
                      else os.path.normpath(os.path.join(base, df)))
                 with open(p, "wb") as fh:
@@ -2046,6 +2047,13 @@ class CameraWireTool:
         active = wm.get("active_floor")
         af = by_id.get(active) or (wm.get("floors") or [{}])[0]
         df = af.get("drawio_file")
+        if not df or not isinstance(df, str):
+            messagebox.showerror(
+                "Revert failed",
+                "The restored revision has no usable floor-plan file path; "
+                "the working files were restored but the app can't relaunch "
+                "automatically. Please reopen the project manually.")
+            return
         apath = (df if os.path.isabs(df)
                  else os.path.normpath(os.path.join(base, df)))
         keep_bundle = self._bundle_path
@@ -2073,6 +2081,18 @@ class CameraWireTool:
         # ttk.Button doesn't accept `foreground` via config(); the changing
         # text (⚠-prefixed → plain "Scale:") is enough to signal state.
         self.scale_label.config(text=self._scale_label_text())
+        # Safety: hidden_types is a persisted user pref — a "Hide all"
+        # from a past session would make EVERY device invisible on a
+        # fresh launch, which reads as "my symbols are gone" with no
+        # visible cause. If the pref hides every known type, reset it.
+        known = self._all_known_types()
+        if known and self._hidden_types >= known:
+            self._hidden_types = set()
+            self._persist_user_settings()
+            self._flash_status(
+                "All device types were hidden from a previous session — "
+                "showing all. Use the Devices tab to hide types.",
+                ttl_ms=8000)
         self._fit_image()
         self._refresh_wire_list()
         self._redraw()
@@ -4248,8 +4268,8 @@ class CameraWireTool:
             "MoveDeviceCmd":      lambda c: f"move device {c.device_id}",
             "MoveDevicesCmd":     lambda c: f"move {len(c.deltas)} devices",
             "AddWireCmd":         lambda c: f"add wire ({len(c.route['points'])} pts)",
-            "DeleteWireCmd":      lambda c: f"delete wire",
-            "ClearWiresCmd":      lambda c: f"clear all wires",
+            "DeleteWireCmd":      lambda c: "delete wire",
+            "ClearWiresCmd":      lambda c: "clear all wires",
             "ClearDeviceWiresCmd":lambda c: f"clear wires on {c.device_id}",
             "MoveWaypointCmd":    lambda c: f"reshape wire (waypoint #{c.point_idx})",
             "InsertWaypointCmd":  lambda c: f"insert waypoint #{c.insert_idx} on wire",
@@ -4277,8 +4297,8 @@ class CameraWireTool:
                 f"{self._plural(len(c.devices_with_fov), 'camera')}"),
             "AddAnnotationCmd":   lambda c: f"add annotation '{c.ann.get('text','')[:20]}'",
             "DeleteAnnotationCmd":lambda c: f"delete annotation '{c.ann.get('text','')[:20]}'",
-            "EditAnnotationCmd":  lambda c: f"edit annotation",
-            "CalibrateCmd":       lambda c: f"calibrate scale",
+            "EditAnnotationCmd":  lambda c: "edit annotation",
+            "CalibrateCmd":       lambda c: "calibrate scale",
         }
         try:
             return labels.get(cls, lambda _c: cls)(cmd)
@@ -5952,7 +5972,6 @@ class CameraWireTool:
         a_scale = self._alignment_scale(ghost_align)
         # Inverse-transform the canvas viewport corners to the ghost's
         # raw image space so we can crop to just the visible piece.
-        active_align = self._current_alignment()
         def _canvas_to_ghost_raw(cx, cy):
             ax = (cx - self.offset_x) / self.zoom
             ay = (cy - self.offset_y) / self.zoom
@@ -8637,8 +8656,6 @@ class CameraWireTool:
         # The aligned bbox's top-left lands at offset_x + ax0*zoom on canvas,
         # bottom-right at offset_x + ax1*zoom. Keep at least margin_x of
         # the image visible.
-        img_pw = (ax1 - ax0) * self.zoom
-        img_ph = (ay1 - ay0) * self.zoom
         margin_x = 0.10 * cw
         margin_y = 0.10 * ch
         # right edge = offset_x + ax1*zoom ≥ margin_x  ⇒  offset_x ≥ margin_x - ax1*zoom
@@ -8812,7 +8829,7 @@ class CameraWireTool:
         self._select_wire_in_listbox(nxt)
         # Center on its midpoint
         r = self.wire_routes[nxt]
-        if r["points"]:
+        if isinstance(r, dict) and r.get("points"):
             mid = r["points"][len(r["points"]) // 2]
             cw = self.canvas.winfo_width() or 800
             ch = self.canvas.winfo_height() or 600
@@ -8840,7 +8857,7 @@ class CameraWireTool:
                 ys = [p[1] for p in pts]
                 self._zoom_to_image_bbox(min(xs), min(ys), max(xs), max(ys),
                                           pad=80)
-                self.status_label.config(text=f"Zoomed to selected wire.")
+                self.status_label.config(text="Zoomed to selected wire.")
             else:
                 self.status_label.config(
                     text="Selected wire has no valid points to zoom to.")
@@ -10483,7 +10500,11 @@ class CameraWireTool:
             # Font size also tracks alignment scale so annotations stay
             # proportional to the bg / devices on aligned floors. Min
             # clamped at 8px so the text remains readable when zoomed out.
-            fs = max(8, int(ann.get("font_size", 16)
+            try:
+                base_fs = float(ann.get("font_size", 16))
+            except (TypeError, ValueError):
+                base_fs = 16.0
+            fs = max(8, int(base_fs
                              * self.zoom * self.dx_scale
                              * self._alignment_scale()))
             color = ann.get("color", "#FFD060") or "#FFD060"
@@ -11281,10 +11302,12 @@ class CameraWireTool:
                 cam_targets = [d for d in self._selection_or(dev)
                                if self._is_camera_type(d.get("type"))]
                 cur_m = self._effective_model_for_device(dev)
+                cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
+                              if isinstance(cur_m, dict) else "")
                 menu.add_cascade(
                     label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
                            if len(cam_targets) > 1
-                           else f"🎥  Assign model{(' ('+cur_m['name']+')') if cur_m else ''} ▶"),
+                           else f"🎥  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
                     menu=self._build_assign_model_submenu(menu, cam_targets))
                 menu.add_cascade(
                     label=f"⭐  Default model for all {dev['type']} ▶",
@@ -11501,7 +11524,6 @@ class CameraWireTool:
         return bom_mod.rollup(
             self.wire_routes, self.devices, self.symbol_types, self.cable_types,
             waste_factor=waste, tax_rate=tax, risers=risers,
-            scale_factor=self.scale_factor,
             project_default=self._proj_default_cable(),
         )
 
@@ -11694,8 +11716,8 @@ class CameraWireTool:
         warns: list[str] = []
         if self.scale_factor is None and self.wire_routes:
             warns.append(
-                f"⚠ Scale not set — wire totals are 0. "
-                f"Press C or click 'Set Scale' to calibrate.")
+                "⚠ Scale not set — wire totals are 0. "
+                "Press C or click 'Set Scale' to calibrate.")
         if report.unassigned_runs:
             warns.append(
                 f"⚠ {self._plural(report.unassigned_runs, 'unassigned wire')}"
@@ -12182,8 +12204,6 @@ class CameraWireTool:
         ttk.Button(button_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
 
         # Enter in any form field commits
-        for w in (id_entry, ):  # easy fallthrough
-            pass
         dlg.bind("<Return>", lambda _e: commit_form())
 
         # Initial state — show the first cable selected
@@ -12299,10 +12319,12 @@ class CameraWireTool:
             cam_targets = [d for d in self._selection_or(device)
                            if self._is_camera_type(d.get("type"))]
             cur_m = self._effective_model_for_device(device)
+            cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
+                          if isinstance(cur_m, dict) else "")
             m.add_cascade(
                 label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
                        if len(cam_targets) > 1
-                       else f"🎥  Assign model{(' ('+cur_m['name']+')') if cur_m else ''} ▶"),
+                       else f"🎥  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
                 menu=self._build_assign_model_submenu(m, cam_targets))
             m.add_cascade(
                 label=f"⭐  Default model for all {device['type']} ▶",
@@ -12416,7 +12438,7 @@ class CameraWireTool:
             label=f"Select all {len(group_devs)} in this group",
             command=lambda devs=group_devs: self._select_devices_group(devs))
         m.add_command(
-            label=f"Zoom to fit this group",
+            label="Zoom to fit this group",
             command=lambda devs=group_devs: self._zoom_to_devices(devs))
         ct_sub = self._build_change_type_submenu(m, group_devs)
         if ct_sub is not None:
@@ -15139,7 +15161,6 @@ class CameraWireTool:
 
         base = self.bg_image.convert("RGBA")
         W, H = base.size
-        line_w = max(2, round(W / 1400))
 
         _font_cache: dict[tuple, object] = {}
 
@@ -15829,6 +15850,7 @@ class CameraWireTool:
         are displayed so a busy plan stays readable."""
         dlg = tk.Toplevel(self.root)
         dlg.transient(self.root)
+        dlg.grab_set()
         dlg.title("FOV display settings")
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         pad = {"padx": 10, "pady": 3}

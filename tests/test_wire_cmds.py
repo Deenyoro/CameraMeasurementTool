@@ -18,7 +18,7 @@ def _make_app(scale_factor=None):
     app = types.SimpleNamespace(wire_routes=[], scale_factor=scale_factor)
     def _calc(pts):
         return sum(math.hypot(b[0]-a[0], b[1]-a[1])
-                    for a, b in zip(pts, pts[1:]))
+                    for a, b in zip(pts, pts[1:], strict=False))
     app._calc_wire_length = _calc
     return app
 

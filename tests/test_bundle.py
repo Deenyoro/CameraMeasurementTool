@@ -147,6 +147,6 @@ def test_read_revision_missing_id_raises(tmp_path):
     bundle.commit_revision(bpath, _wiremap(), {"F1": str(f)})
     try:
         bundle.read_revision(bpath, "rev_nope")
-        assert False, "expected KeyError"
+        raise AssertionError("expected KeyError")
     except KeyError:
         pass

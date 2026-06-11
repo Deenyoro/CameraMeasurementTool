@@ -101,6 +101,26 @@ def test_write_wires_csv_skips_malformed_entries(tmp_path):
     assert rows[3][4] == "24.00"
 
 
+def test_write_wires_csv_skips_malformed_devices(tmp_path):
+    """Malformed entries in the DEVICES list (non-dict, missing id) must
+    not crash the index build when effective-cable resolution is on."""
+    devices = [
+        "not a dict",                       # skipped
+        {"type": "MD"},                     # no id — skipped
+        None,                               # skipped
+        {"id": "s1", "type": "MD"},         # well-formed
+    ]
+    routes = [{"device_id": "s1", "points": [(0, 0), (1, 1)],
+               "length_in": 12.0}]
+    path = tmp_path / "wires.csv"
+    export.write_wires_csv(
+        routes, lambda i: f"{i:.0f}in", str(path),
+        devices=devices, symbol_types=SYMBOL_TYPES, cable_types=CABLE_TYPES)
+    rows = _read(path)
+    assert len(rows) == 2
+    assert rows[1][2] == "Cat6 (auto)"
+
+
 def test_write_devices_csv_skips_malformed_entries(tmp_path):
     """Corrupted device entries / non-numeric x,y should not crash the
     devices CSV — bad rows are skipped (no id) or render '—' for the

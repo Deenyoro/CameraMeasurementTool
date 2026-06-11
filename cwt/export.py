@@ -100,8 +100,10 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
     contract.
     """
     rows = [["#", "Device", "Cable", "Segments", "Length (in)", "Length"]]
-    # Build the index once instead of O(N) per route.
-    devices_by_id = ({d["id"]: d for d in devices}
+    # Build the index once instead of O(N) per route. Skip malformed
+    # entries (non-dict or missing id) — same filter as bom.rollup.
+    devices_by_id = ({d["id"]: d for d in devices
+                      if isinstance(d, dict) and "id" in d}
                      if devices is not None else None)
     can_resolve = (devices_by_id is not None
                    and symbol_types is not None

@@ -66,5 +66,5 @@ def test_undo_delete_symbol_restores_everything():
     assert {d["id"] for d in app.devices} == {d["id"] for d in original_devices}
     # Every wire is back
     assert len(app.wire_routes) == len(original_wires)
-    for restored, original in zip(app.wire_routes, original_wires):
+    for restored, original in zip(app.wire_routes, original_wires, strict=False):
         assert restored is original
