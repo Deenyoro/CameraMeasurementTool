@@ -7566,9 +7566,8 @@ class CameraWireTool:
             # inches/reference-pixel. Without this, calibrating on a
             # 1.5x-aligned floor stored a value 1.5x too big and every
             # other floor's wire lengths read 1.5x too long.
-            raw_scale = total_in / px_dist
-            a_scale = self._alignment_scale()
-            new_scale = raw_scale / a_scale if a_scale else raw_scale
+            new_scale = self._calibration_scale(
+                total_in, px_dist, self._alignment_scale())
             # Skip the round-trip if the user happened to recalibrate to
             # the same scale (rare but possible — and it's wasted history).
             if (self.scale_factor is not None
@@ -7636,6 +7635,27 @@ class CameraWireTool:
         return sum(math.dist(points[i], points[i+1]) for i in range(len(points) - 1))
 
     _ALIGN_DEFAULT = object()   # sentinel for 'use active floor'
+
+    @staticmethod
+    def _calibration_scale(total_in: float, px_dist: float,
+                           a_scale: float) -> float:
+        """Project scale_factor from one calibration measurement.
+
+        Derivation (all distances positive):
+        - The two clicked points are stored in RAW image pixels of the
+          active floor, so `px_dist` raw px ≙ `total_in` inches:
+              inches per RAW px = total_in / px_dist
+        - scale_factor is defined as inches per REFERENCE-frame pixel.
+          One raw pixel maps to `a_scale` reference pixels
+          (apply_alignment multiplies by alignment.scale), hence:
+              inches/REF px = (inches/RAW px) / a_scale
+        - Reading lengths back uses
+              effective = scale_factor × a_scale  (inches per raw px),
+          so measure→calibrate→measure round-trips exactly regardless
+          of which floor the user calibrated on.
+        """
+        raw_scale = total_in / px_dist
+        return raw_scale / a_scale if a_scale else raw_scale
 
     def _alignment_scale(self, alignment=_ALIGN_DEFAULT) -> float:
         """Return alignment.scale safely coerced. With no arg, reads the
