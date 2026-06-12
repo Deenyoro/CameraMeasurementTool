@@ -858,6 +858,79 @@ class DeleteWaypointCmd(Command):
         self._recalc()
 
 
+class MoveLegendCmd(Command):
+    """Reposition the on-map legend box. The drag applies the move live;
+    this command exists so undo/redo can replay it."""
+
+    def __init__(self, app: "CameraWireTool", old_xy, new_xy):
+        self.app = app
+        self.old_xy = (float(old_xy[0]), float(old_xy[1]))
+        self.new_xy = (float(new_xy[0]), float(new_xy[1]))
+
+    def _set(self, xy) -> None:
+        if isinstance(self.app.legend_box, dict):
+            self.app.legend_box["x"], self.app.legend_box["y"] = xy
+
+    def do(self):  self._set(self.new_xy)
+    def undo(self): self._set(self.old_xy)
+
+
+class AddDropCmd(Command):
+    """Place a cross-floor drop point. Undo removes it (and clears the
+    selection if it pointed at the removed drop)."""
+
+    def __init__(self, app: "CameraWireTool", drop: dict):
+        self.app = app
+        self.drop = drop
+
+    def do(self):
+        if (self.app._project is not None
+                and self.drop not in self.app._project.drop_points):
+            self.app._project.drop_points.append(self.drop)
+
+    def undo(self):
+        if self.app._project is None:
+            return
+        try:
+            self.app._project.drop_points.remove(self.drop)
+        except ValueError:
+            pass
+        if getattr(self.app, "_selected_drop", None) is self.drop:
+            self.app._selected_drop = None
+
+
+class DeleteDropCmd(Command):
+    """Remove a drop point; undo re-inserts it at its original index so
+    the drop list order (and DP numbering) stays stable."""
+
+    def __init__(self, app: "CameraWireTool", drop: dict):
+        self.app = app
+        self.drop = drop
+        try:
+            self.index = app._project.drop_points.index(drop)
+        except (AttributeError, ValueError):
+            self.index = -1
+
+    def do(self):
+        if self.app._project is None:
+            return
+        try:
+            self.app._project.drop_points.remove(self.drop)
+        except ValueError:
+            pass
+        if getattr(self.app, "_selected_drop", None) is self.drop:
+            self.app._selected_drop = None
+
+    def undo(self):
+        if self.app._project is None:
+            return
+        drops = self.app._project.drop_points
+        if self.drop in drops:
+            return
+        idx = self.index if 0 <= self.index <= len(drops) else len(drops)
+        drops.insert(idx, self.drop)
+
+
 class ClearDeviceWiresCmd(Command):
     """Remove every wire associated with a single device."""
 
@@ -3349,8 +3422,10 @@ class CameraWireTool:
         self._dev_search_var.trace_add("write", lambda *_: self._refresh_device_list())
 
         # Quick on-map visibility presets. Per-type toggles live on each
-        # group header below (click the ● / ○ glyph). These three cover
-        # the common bulk cases.
+        # group header below (click the ● / ○ glyph). The middle buttons
+        # are CATEGORY presets built dynamically from the categories in
+        # use (IT / Security / Cameras by default, plus any the user
+        # creates) — they rebuild whenever symbol types change.
         vis_frame = ttk.Frame(tab_dev)
         vis_frame.pack(fill=tk.X, padx=6, pady=(0, 2))
         ttk.Label(vis_frame, text="Show on map:").pack(side=tk.LEFT)
@@ -3358,14 +3433,15 @@ class CameraWireTool:
                            command=self._show_all_types)
         all_b.pack(side=tk.LEFT, padx=(4, 2))
         Tooltip(all_b, "Show every device type on the map.")
-        cam_b = ttk.Button(vis_frame, text="Cameras", width=8,
-                           command=self._show_cameras_only)
-        cam_b.pack(side=tk.LEFT, padx=2)
-        Tooltip(cam_b, "Show only cameras; hide all other device types.")
+        # Dynamic category buttons live in this sub-frame, rebuilt by
+        # _rebuild_category_buttons (called from _refresh_symbol_list).
+        self._cat_btn_frame = ttk.Frame(vis_frame)
+        self._cat_btn_frame.pack(side=tk.LEFT)
         none_b = ttk.Button(vis_frame, text="None", width=5,
                             command=self._hide_all_types)
         none_b.pack(side=tk.LEFT, padx=2)
         Tooltip(none_b, "Hide all device types from the map.")
+        self._rebuild_category_buttons()
 
         # Working filter: hide cameras that already have a wire (and all
         # non-cameras) so only the cameras left to wire are visible — both
@@ -4097,10 +4173,12 @@ class CameraWireTool:
         # totals, wire counts, or device lists, so a full refresh just
         # flickers all three side-panel listboxes for nothing.
         self._redraw()
+        # 2s was too brief to read a ~50-char confirmation; repeated R
+        # presses re-flash anyway so a longer TTL costs nothing.
         self._flash_status(
             f"Camera {dev['id']} → azimuth {new_az}° ({compass})  "
             f"[Ctrl+Z to undo]",
-            ttl_ms=2000)
+            ttl_ms=4000)
 
     def _kbd_help(self, event):
         if self._is_text_focus(event):
@@ -4327,6 +4405,9 @@ class CameraWireTool:
             "ClearDeviceWiresCmd":lambda c: f"clear wires on {c.device_id}",
             "MoveWaypointCmd":    lambda c: f"reshape wire (waypoint #{c.point_idx})",
             "InsertWaypointCmd":  lambda c: f"insert waypoint #{c.insert_idx} on wire",
+            "AddDropCmd":         lambda c: f"place drop point {c.drop.get('id', '?')}",
+            "DeleteDropCmd":      lambda c: f"delete drop point {c.drop.get('id', '?')}",
+            "MoveLegendCmd":      lambda c: "move legend",
             "DeleteWaypointCmd":  lambda c: f"delete waypoint #{c.point_idx} on wire",
             "AddDeviceCmd":       lambda c: f"add device {c.device['id']}",
             "DeleteDeviceCmd":    lambda c: f"delete device {c.device['id']}",
@@ -4499,6 +4580,9 @@ class CameraWireTool:
 
     # ============================================================ Symbol list
     def _refresh_symbol_list(self) -> None:
+        # Keep the user's scroll position across rebuilds (see
+        # _refresh_device_list for the full rationale).
+        _yv = self.sym_listbox.yview()
         self.sym_listbox.delete(0, tk.END)
         counts: dict[str, int] = {}
         for d in self.devices:
@@ -4583,6 +4667,13 @@ class CameraWireTool:
         self.place_combo["values"] = self._sym_keys
         if self._sym_keys and not self.place_type_var.get():
             self.place_type_var.set(self._sym_keys[0])
+
+        # Category presets track the types in use — rebuild so a new or
+        # renamed category gets its 'Show on map' button immediately.
+        self._rebuild_category_buttons()
+
+        if _yv and _yv[0] > 0:
+            self.sym_listbox.yview_moveto(_yv[0])
 
     def _get_other_floor_devices(self, floor: "mf_mod.FloorState") -> list[dict]:
         """Parse and cache devices from a non-active floor's drawio file."""
@@ -4698,6 +4789,43 @@ class CameraWireTool:
         self._hidden_types = {c for c in known if c != type_code}
         self._apply_type_visibility()
 
+    def _show_category_only(self, category: str) -> None:
+        """Show only the types belonging to `category` — the dynamic
+        'Show on map' preset buttons route here."""
+        known = self._all_known_types()
+        self._hidden_types = {c for c in known
+                              if self._category_of(c) != category}
+        self._apply_type_visibility()
+
+    def _rebuild_category_buttons(self) -> None:
+        """(Re)build the per-category 'Show on map' preset buttons from
+        the categories currently in use. Called at UI build and whenever
+        symbol types change, so a freshly-created category gets its
+        button without a restart."""
+        frame = getattr(self, "_cat_btn_frame", None)
+        if frame is None:
+            return
+        try:
+            for w in frame.winfo_children():
+                w.destroy()
+        except tk.TclError:
+            return
+        # Categories with at least one type, ordered: standard ones
+        # first (Cameras, Security, IT), then customs alphabetically.
+        cats_in_use: dict[str, int] = {}
+        for code in self.symbol_types:
+            cats_in_use[self._category_of(code)] = (
+                cats_in_use.get(self._category_of(code), 0) + 1)
+        std = [c for c in ("Cameras", "Security", "IT") if c in cats_in_use]
+        custom = sorted(c for c in cats_in_use if c not in std)
+        for cat in std + custom:
+            b = ttk.Button(frame, text=cat, width=max(6, len(cat) + 1),
+                           command=lambda c=cat: self._show_category_only(c))
+            b.pack(side=tk.LEFT, padx=2)
+            Tooltip(b, f"Show only {cat} devices on the map "
+                       f"({self._plural(cats_in_use[cat], 'type')}); "
+                       f"hide everything else.")
+
     def _on_cameras_only_toggle(self) -> None:
         """Toolbar 'Cameras only' checkbox handler — preset, not a raw flag."""
         if self._cameras_only_var.get():
@@ -4809,7 +4937,8 @@ class CameraWireTool:
 
     def _create_drop_at(self, ix, iy) -> dict | None:
         """Create a drop at raw-image coords (ix,iy), single-floor scope by
-        default, then open its editor so the user can set floors + home."""
+        default, then open its editor so the user can set floors + home.
+        Undoable: routed through AddDropCmd so Ctrl+Z removes it."""
         if self._project is None:
             return None
         wx, wy = self._img_to_world(ix, iy)
@@ -4820,7 +4949,7 @@ class CameraWireTool:
             "x": float(wx), "y": float(wy),
             "floors": [active], "home_floor": active,
         }
-        self._project.drop_points.append(drop)
+        self._execute(AddDropCmd(self, drop))
         self._selected_drop = drop
         # Make sure the drops layer is visible — otherwise the user places
         # a drop and sees nothing (the layer toggle may be off).
@@ -4828,7 +4957,6 @@ class CameraWireTool:
             self._show_drops.set(True)
         except (AttributeError, tk.TclError):
             pass
-        self._mark_dirty()
         self._save_project_quiet()
         self._redraw()
         # Open the config dialog right away (added in the config-UI step);
@@ -4844,17 +4972,15 @@ class CameraWireTool:
     def _delete_drop(self, drop: dict) -> None:
         if self._project is None or drop is None:
             return
-        try:
-            self._project.drop_points.remove(drop)
-        except ValueError:
+        if drop not in self._project.drop_points:
             return
+        self._execute(DeleteDropCmd(self, drop))
         if self._selected_drop is drop:
             self._selected_drop = None
-        self._mark_dirty()
         self._save_project_quiet()
         self._redraw()
-        self._flash_status(f"Drop point {drop.get('label', '')} deleted.",
-                           ttl_ms=2500)
+        self._flash_status(f"Drop point {drop.get('label', '')} deleted. "
+                           f"Ctrl+Z restores it.", ttl_ms=3000)
 
     def _draw_drop_points(self) -> None:
         if self._project is None or not self._show_drops_visible():
@@ -5105,6 +5231,20 @@ class CameraWireTool:
 
     def _refresh_device_list(self) -> None:
         self._sync_cameras_only_var()
+        # Preserve the user's place: scroll fraction + selected device
+        # ids survive the rebuild. Without this, EVERY mutation (delete,
+        # rename, model assign, wire change — anything that calls
+        # _post_command_refresh) snapped the list back to the top and
+        # dropped the selection, so right-clicks landed on whatever
+        # scrolled under the cursor. The #1 reported list complaint.
+        yview = self.dev_listbox.yview()
+        prev_sel_ids: set[str] = set()
+        if hasattr(self, "_dev_listbox_rows"):
+            for i in self.dev_listbox.curselection():
+                if i < len(self._dev_listbox_rows):
+                    row = self._dev_listbox_rows[i]
+                    if isinstance(row, dict) and row.get("id"):
+                        prev_sel_ids.add(row["id"])
         self.dev_listbox.delete(0, tk.END)
         # Sort by type (alphabetically), then by id within each group.
         # Cameras float to the top, then access/intrusion, then run points.
@@ -5229,13 +5369,15 @@ class CameraWireTool:
                         f'{self._format_length(wire_info["total_in"])}]'
                         if wire_info else ""
                     )
-                    # Show the effective camera model (part # or name) so the
-                    # user can see at a glance what each camera is specced as.
+                    # Show the effective model (part # or name) so the user
+                    # can see at a glance what each device is specced as.
+                    # NOT camera-gated: WAPs, readers, anything with a model
+                    # assignment shows it — otherwise two same-type devices
+                    # with different models are indistinguishable here.
                     model_str = ""
-                    if self._is_camera_type(d.get("type")):
-                        m = self._effective_model_for_device(d)
-                        if m:
-                            model_str = f'  · {m.get("model_number") or m.get("name")}'
+                    m = self._effective_model_for_device(d)
+                    if m:
+                        model_str = f'  · {m.get("model_number") or m.get("name")}'
                     self.dev_listbox.insert(
                         tk.END,
                         f'    {d["id"]:6s} {d["type"]:5s}{model_str}{wire_str}',
@@ -5311,6 +5453,14 @@ class CameraWireTool:
                 total_txt = (f"{self._plural(n_total, 'device')} "
                        f"({n_cam_filtered} cameras)")
             self._dev_total_label.config(text=total_txt)
+
+        # Restore the user's place (saved at the top of this method).
+        if prev_sel_ids:
+            for i, row in enumerate(self._dev_listbox_rows):
+                if isinstance(row, dict) and row.get("id") in prev_sel_ids:
+                    self.dev_listbox.selection_set(i)
+        if yview and yview[0] > 0:
+            self.dev_listbox.yview_moveto(yview[0])
 
     # ============================================================ Symbol editor dialog
     def _edit_symbol_type(self) -> None:
@@ -5786,8 +5936,15 @@ class CameraWireTool:
             try:
                 self._apply_default_fov_to_one(device, record=False)
                 self._show_fov.set(True)
-            except Exception:
-                pass
+            except Exception as e:
+                # Don't fail the placement, but don't be silent either —
+                # the user expects a cone and would otherwise see nothing
+                # with no explanation.
+                log_error("Default FOV apply failed during placement", e)
+                self._flash_status(
+                    f"Placed {new_id}, but couldn't apply its default "
+                    f"FOV ({e}). Right-click → Edit FOV to set one.",
+                    ttl_ms=5000)
         self.selected_device = device   # so it shows red-outlined immediately
         if not repeat:
             self._set_mode(Mode.MOVE)
@@ -8191,11 +8348,25 @@ class CameraWireTool:
             return
 
         if self._dragging_legend is not None:
+            drag = self._dragging_legend
             self._dragging_legend = None
-            self._mark_dirty()
+            # Undoable: record the move as a command so an accidental
+            # legend drag is one Ctrl+Z away instead of permanent.
+            old_xy = drag.get("start_drawio")
+            new_xy = (self.legend_box["x"], self.legend_box["y"])
+            if (old_xy is not None
+                    and (abs(old_xy[0] - new_xy[0]) > 0.5
+                         or abs(old_xy[1] - new_xy[1]) > 0.5)):
+                cmd = MoveLegendCmd(self, old_xy, new_xy)
+                self.history.append(cmd)   # already applied during drag
+                if len(self.history) > C.HISTORY_LIMIT:
+                    self.history.pop(0)
+                self.future.clear()
+                self._mark_dirty()
+                self._update_undo_redo_state()
+                self._flash_status(
+                    "Legend repositioned. Ctrl+Z to undo.", ttl_ms=3000)
             self._refresh_mode_ui()  # restore default cursor
-            self._flash_status("Legend repositioned. Save to keep this layout.",
-                                ttl_ms=3000)
             self._redraw()
             return
 
@@ -8495,8 +8666,11 @@ class CameraWireTool:
                 # so the user knows at a glance what they'll lock onto.
                 scx, scy = self._img_to_canvas(ix2, iy2)
                 ring_color = {
-                    "drop":  "#FFD060",   # gold — snapping to a cable drop point
-                    "ortho": "#80FFC8",   # green — Shift-lock orthogonal
+                    "drop":     "#FFD060",   # gold — snapping to a cable drop point
+                    "ortho":    "#80FFC8",   # green — Shift-lock orthogonal
+                    "device":   "#7FC4FF",   # blue — device center
+                    "endpoint": "#FF9DF0",   # pink — another wire's endpoint
+                    "self":     "#FFFFFF",   # white — this wire's own points
                 }.get(kind, "#FFD060")
                 self.canvas.create_oval(scx-9, scy-9, scx+9, scy+9,
                                         outline=ring_color, width=2,
@@ -9041,6 +9215,16 @@ class CameraWireTool:
 
     # ============================================================ List management
     def _refresh_wire_list(self) -> None:
+        # Preserve scroll + selected route indices across the rebuild
+        # (see _refresh_device_list for rationale).
+        _yv = self.wire_listbox.yview()
+        _prev_routes: set[int] = set()
+        if hasattr(self, "_wire_listbox_rows"):
+            for i in self.wire_listbox.curselection():
+                if i < len(self._wire_listbox_rows):
+                    ri = self._wire_listbox_rows[i]
+                    if isinstance(ri, int):
+                        _prev_routes.add(ri)
         self.wire_listbox.delete(0, tk.END)
         query = (
             self._wire_search_var.get() if hasattr(self, "_wire_search_var") else ""
@@ -9242,6 +9426,14 @@ class CameraWireTool:
             text=f"Devices: {n_dev}  ·  Cameras: {n_cam}  ·  "
                  f"Wires: {n_wire}  ·  {wire_str}{cost_str}",
         )
+
+        # Restore the user's place (saved at the top of this method).
+        if _prev_routes and hasattr(self, "_wire_listbox_rows"):
+            for i, ri in enumerate(self._wire_listbox_rows):
+                if isinstance(ri, int) and ri in _prev_routes:
+                    self.wire_listbox.selection_set(i)
+        if _yv and _yv[0] > 0:
+            self.wire_listbox.yview_moveto(_yv[0])
 
     def _on_dev_select(self, _event) -> None:
         sel = self.dev_listbox.curselection()
@@ -9618,13 +9810,15 @@ class CameraWireTool:
         ttk.Label(dlg, text="Pick a new device for this wire:",
                   font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(4, 4))
 
-        # Search filter
+        # Search filter — focused on open so the user can type to filter
+        # immediately (the natural first action in a pick-a-device list).
         search_var = tk.StringVar()
         search_row = ttk.Frame(dlg)
         search_row.pack(fill=tk.X, padx=12, pady=2)
         ttk.Label(search_row, text="Filter:").pack(side=tk.LEFT)
-        ttk.Entry(search_row, textvariable=search_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        search_entry = ttk.Entry(search_row, textvariable=search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        search_entry.focus_set()
 
         # List of devices
         list_frame = ttk.Frame(dlg)
@@ -11627,6 +11821,11 @@ class CameraWireTool:
     def _refresh_bom_tab(self) -> None:
         if not hasattr(self, "_bom_tree"):
             return
+        # Preserve scroll across the rebuild (same as the listboxes).
+        try:
+            _yv = self._bom_tree.yview()
+        except tk.TclError:
+            _yv = None
         for item in self._bom_tree.get_children():
             self._bom_tree.delete(item)
         report = self._build_bom_report()
@@ -11841,6 +12040,12 @@ class CameraWireTool:
         else:
             self._bom_totals_label.config(text="", foreground="#FF8C42")
 
+        if _yv and _yv[0] > 0:
+            try:
+                self._bom_tree.yview_moveto(_yv[0])
+            except tk.TclError:
+                pass
+
     def _model_inventory(self) -> list:
         """Per-model hardware rollup (qty + unit price + subtotal) over every
         device on this floor that resolves to a model — cameras and any other
@@ -12024,7 +12229,9 @@ class CameraWireTool:
         dlg.title("Cable Types")
         dlg.geometry("560x520")
         dlg.transient(self.root); dlg.grab_set()
-        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        # Escape/close handler is bound at the bottom of this method
+        # (needs commit_form in scope) so a dirty form is auto-committed
+        # instead of silently dropped.
 
         ttk.Label(
             dlg,
@@ -12297,11 +12504,23 @@ class CameraWireTool:
                 load_into_form(first)
             else:
                 load_into_form(None)
+        def close_dialog():
+            # Auto-commit a dirty form on the way out — the editor's
+            # whole model is 'autosaves on row-switch / Enter', so
+            # closing mid-edit silently dropping changes was a trap.
+            # If the dirty form fails validation, stay open so the user
+            # can fix or revert it consciously.
+            if is_dirty[0] and not commit_form():
+                return
+            dlg.destroy()
+
         ttk.Button(button_row, text="Delete", command=on_delete).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Close", command=close_dialog).pack(side=tk.RIGHT)
 
         # Enter in any form field commits
         dlg.bind("<Return>", lambda _e: commit_form())
+        dlg.bind("<Escape>", lambda _e: close_dialog())
+        dlg.protocol("WM_DELETE_WINDOW", close_dialog)
 
         # Initial state — show the first cable selected
         repop()
@@ -12365,7 +12584,9 @@ class CameraWireTool:
             self.dev_listbox.selection_clear(0, tk.END)
             self.dev_listbox.selection_set(idx)
             self.selected_device = device
-        self._redraw()
+        # NOTE: canvas redraw is deferred to after the menu closes (see
+        # tk_popup's finally below) — a synchronous redraw here made the
+        # selection visibly flicker before the menu appeared.
 
         info = self._safe_sym(device["type"])
         wires = [w for w in self.wire_routes if w.get("device_id") == device["id"]]
@@ -12413,20 +12634,24 @@ class CameraWireTool:
                        "Show FOV cone for this camera"),
                 command=lambda d=device: self._toggle_camera_fov(d),
             )
-            cam_targets = [d for d in self._selection_or(device)
-                           if self._is_camera_type(d.get("type"))]
-            cur_m = self._effective_model_for_device(device)
-            cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
-                          if isinstance(cur_m, dict) else "")
-            m.add_cascade(
-                label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
-                       if len(cam_targets) > 1
-                       else f"🎥  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
-                menu=self._build_assign_model_submenu(m, cam_targets))
-            m.add_cascade(
-                label=f"⭐  Default model for all {device['type']} ▶",
-                menu=self._build_assign_model_submenu(
-                    m, None, type_code=device["type"]))
+        # Model assignment — for EVERY device type, not just cameras.
+        # WAPs / readers / any hardware can carry a model + price (it
+        # rolls into the BOM), and without the menu here there was no
+        # way to tell two same-type devices apart (e.g. U7 Pro vs U7
+        # Outdoor APs).
+        model_targets = list(self._selection_or(device))
+        cur_m = self._effective_model_for_device(device)
+        cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
+                      if isinstance(cur_m, dict) else "")
+        m.add_cascade(
+            label=(f"🏷  Assign model to {len(model_targets)} selected ▶"
+                   if len(model_targets) > 1
+                   else f"🏷  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
+            menu=self._build_assign_model_submenu(m, model_targets))
+        m.add_cascade(
+            label=f"⭐  Default model for all {device['type']} ▶",
+            menu=self._build_assign_model_submenu(
+                m, None, type_code=device["type"]))
         same_type = [d for d in self.devices if d["type"] == device["type"]]
         if len(same_type) > 1:
             m.add_command(
@@ -12456,6 +12681,9 @@ class CameraWireTool:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+            # Deferred from the selection-change above: sync the canvas
+            # highlight once the menu is gone (no pre-menu flicker).
+            self._redraw()
 
     def _show_wire_group_menu(self, event, header_idx: int) -> None:
         """Right-click on a group header in the Wires listbox → bulk actions."""
@@ -15799,6 +16027,8 @@ class CameraWireTool:
 
         ttk.Button(btns, text="Export PDF", command=_do_export).pack(side=tk.LEFT)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        # Return = primary action, matching every other dialog in the app.
+        dlg.bind("<Return>", lambda _e: _do_export())
 
     def _run_pdf_map_export(self, path: str, *, page_specs: list,
                             include_summary: bool, hide_types: set,
