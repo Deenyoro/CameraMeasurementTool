@@ -1786,6 +1786,12 @@ class CameraWireTool:
         if proj.next_device_id:
             self._next_device_id = max(self._next_device_id, proj.next_device_id)
 
+        # Overlay durable per-type metadata (category / cable_type /
+        # is_run_point) onto the freshly-parsed symbol_types. The legend
+        # in the .drawio can't encode these, so without the overlay they
+        # were silently reset on every reload.
+        self._apply_symbol_meta()
+
         # If we adopted a sibling project file, override active_floor to
         # the floor matching THIS drawio so the user lands on what they
         # actually clicked instead of the project's last-saved active.
@@ -1835,6 +1841,53 @@ class CameraWireTool:
                 entry["drop_ids"] = list(drop_ids)
             self.wire_routes.append(entry)
 
+    def _apply_symbol_meta(self) -> None:
+        """Overlay project.symbol_meta onto in-memory symbol_types."""
+        if self._project is None or not isinstance(
+                self._project.symbol_meta, dict):
+            return
+        for code, meta in self._project.symbol_meta.items():
+            cleaned = mf_mod.coerce_symbol_meta(meta)
+            sym = self.symbol_types.get(code)
+            if not cleaned or not isinstance(sym, dict):
+                continue
+            sym.update(cleaned)
+
+    def _collect_symbol_meta(self) -> dict:
+        """Capture the durable per-type fields out of symbol_types for
+        persistence. Only writes entries that have something to say."""
+        out: dict = {}
+        for code, sym in self.symbol_types.items():
+            if not isinstance(sym, dict):
+                continue
+            meta = mf_mod.coerce_symbol_meta({
+                "category": sym.get("category"),
+                "cable_type": sym.get("cable_type"),
+                # Only persist is_run_point when True — absent means
+                # False and keeps the file diff-quiet for ordinary types.
+                **({"is_run_point": True} if sym.get("is_run_point") else {}),
+            })
+            if meta:
+                out[str(code)] = meta
+        return out
+
+    def _category_of(self, type_code) -> str:
+        """The category for a symbol type: explicit if set, else
+        'Cameras' for camera types, else 'Security'."""
+        sym = self._safe_sym(type_code)
+        cat = sym.get("category")
+        if isinstance(cat, str) and cat.strip():
+            return cat.strip()
+        return mf_mod.default_category_for(sym)
+
+    def _all_categories(self) -> list[str]:
+        """Sorted union of the default categories and every category in
+        use — feeds comboboxes and the export dialog's filter row."""
+        cats = set(mf_mod.DEFAULT_CATEGORIES)
+        for code in self.symbol_types:
+            cats.add(self._category_of(code))
+        return sorted(cats)
+
     def _save_project(self) -> None:
         """Persist as v2 project file. Captures cable types + active floor wires."""
         if self._project is None:
@@ -1850,6 +1903,7 @@ class CameraWireTool:
         proj.unit = self.unit_var.get()
         proj.next_device_id = self._next_device_id
         proj.cable_types = {k: dict(v) for k, v in self.cable_types.items()}
+        proj.symbol_meta = self._collect_symbol_meta()
 
         # Sync active floor's wire_routes from the live list
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
@@ -5488,6 +5542,23 @@ class CameraWireTool:
                 "Edit the Cable Types catalog under Tools → Cable Types…")
         row += 1
 
+        # Category — editable combobox: pick a standard one (IT /
+        # Security / Cameras) or type a custom name. Drives the
+        # category filter in the PDF map export and device grouping.
+        ttk.Label(dlg, text="Category:").grid(row=row, column=0, sticky=tk.W, **pad)
+        cat_current = (info.get("category")
+                       or mf_mod.default_category_for(info))
+        category_var = tk.StringVar(value=cat_current)
+        category_combo = ttk.Combobox(
+            dlg, textvariable=category_var, width=18,
+            values=self._all_categories())
+        category_combo.grid(row=row, column=1, sticky=tk.W, **pad)
+        Tooltip(category_combo,
+                "Equipment category for this symbol type (IT / Security /\n"
+                "Cameras by default — type any name to create your own).\n"
+                "Used to filter PDF exports and group equipment.")
+        row += 1
+
         if not is_new:
             count = sum(1 for d in self.devices if d["type"] == old_code)
             ttk.Label(dlg, text=f"Instances on map: {count}", foreground="gray").grid(
@@ -5576,6 +5647,9 @@ class CameraWireTool:
                 "is_camera": cam_var.get(),
                 "is_run_point": runpoint_var.get(),
                 "cable_type": cable_var.get(),
+                "category": (category_var.get().strip()
+                             or mf_mod.default_category_for(
+                                 {"is_camera": cam_var.get()})),
             }
             # Skip the round-trip when nothing actually changed (editing
             # an existing symbol and the user clicked Apply unchanged).
@@ -6698,6 +6772,25 @@ class CameraWireTool:
             return False
         return rot or wbad or hbad
 
+    def _wire_hidden(self, route) -> bool:
+        """True when a wire should follow its device into hiding: the
+        owning device's type is in _hidden_types (or the device is
+        suppressed by the unwired-cameras filter). Keeps 'hide cameras'
+        exports/views from still showing a web of camera cable runs."""
+        if not isinstance(route, dict):
+            return False
+        did = route.get("device_id")
+        if not did:
+            return False
+        dev = next((d for d in self.devices
+                    if isinstance(d, dict) and d.get("id") == did), None)
+        if dev is None:
+            return False
+        if dev.get("type") in getattr(self, "_hidden_types", ()):
+            return True
+        _uw = getattr(self, "_hidden_by_unwired_filter", None)
+        return bool(_uw and _uw(dev))
+
     def _draw_wire_route(self, route, idx) -> None:
         # Defensive — the load + save filters drop malformed wires, but
         # a transient in-memory mutation could land here briefly. Skip
@@ -6707,6 +6800,10 @@ class CameraWireTool:
             return
         pts = route.get("points")
         if not isinstance(pts, list) or len(pts) < 2:
+            return
+        # Wires follow their device's visibility — a hidden device's
+        # cable run hides with it.
+        if self._wire_hidden(route):
             return
         sel = self.wire_listbox.curselection()
         is_selected = bool(sel) and self._wire_index_for_listbox(sel[0]) == idx
@@ -13703,6 +13800,9 @@ class CameraWireTool:
         for k, v in (syms or {}).items():
             merged_syms.setdefault(k, v)
         self.symbol_types = merged_syms
+        # Types discovered fresh from this floor's legend need the
+        # durable metadata overlay (category / cable / run-point).
+        self._apply_symbol_meta()
         if leg is not None:
             self.legend_box = leg
 
@@ -15320,6 +15420,11 @@ class CameraWireTool:
                 pts = route.get("points")
                 if not isinstance(pts, list) or len(pts) < 2:
                     continue
+                # Same rule as the canvas: a hidden device's wires hide
+                # with it, so a 'Security only' export doesn't render
+                # the camera cable web.
+                if self._wire_hidden(route):
+                    continue
                 cable = bom_mod.cable_for_route(
                     route, devices_by_id, self.symbol_types, self.cable_types,
                     project_default=self._proj_default_cable())
@@ -15607,10 +15712,40 @@ class CameraWireTool:
         ttk.Checkbutton(o, text="Hide drop points", variable=hide_drops).grid(
             row=0, column=1, sticky=tk.W, padx=4)
 
-        # Per-type include checkboxes (unchecked = hidden on every map page).
+        # Category master toggles — one checkbox per equipment category
+        # (IT / Security / Cameras / custom). Toggling a category flips
+        # every type checkbox under it, so 'Security only' is one click:
+        # uncheck Cameras + IT. Wires follow their devices automatically.
         types_present = sorted({d["type"] for d in self.devices
                                 if isinstance(d, dict) and "type" in d})
         type_vars: dict[str, tk.BooleanVar] = {}
+        cats_present: dict[str, list[str]] = {}
+        for tc in types_present:
+            cats_present.setdefault(self._category_of(tc), []).append(tc)
+        if len(cats_present) > 1:
+            cf = ttk.LabelFrame(opt_frame, text="Equipment categories")
+            cf.pack(fill=tk.X, padx=8, pady=(2, 2))
+            cf_inner = ttk.Frame(cf)
+            cf_inner.pack(fill=tk.X, padx=4, pady=4)
+            def _make_cat_toggle(cat_name, codes):
+                cv = tk.BooleanVar(value=True)
+                def _on_cat(*_):
+                    for code in codes:
+                        if code in type_vars:
+                            type_vars[code].set(cv.get())
+                cv.trace_add("write", _on_cat)
+                return cv
+            cat_vars: dict[str, tk.BooleanVar] = {}
+            for n, cat_name in enumerate(sorted(cats_present)):
+                codes = cats_present[cat_name]
+                cv = _make_cat_toggle(cat_name, codes)
+                cat_vars[cat_name] = cv
+                ttk.Checkbutton(
+                    cf_inner,
+                    text=f"{cat_name} ({len(codes)})",
+                    variable=cv).grid(row=0, column=n, sticky=tk.W, padx=6)
+
+        # Per-type include checkboxes (unchecked = hidden on every map page).
         if types_present:
             tf = ttk.LabelFrame(opt_frame, text="Device types to show on map")
             tf.pack(fill=tk.X, padx=8, pady=(2, 8))
@@ -15620,7 +15755,8 @@ class CameraWireTool:
                 v = tk.BooleanVar(value=True)
                 type_vars[tc] = v
                 label = self._safe_sym(tc).get("label", tc)
-                ttk.Checkbutton(inner, text=f"{tc} — {label}"[:28],
+                cat = self._category_of(tc)
+                ttk.Checkbutton(inner, text=f"{tc} — {label} [{cat}]"[:34],
                                 variable=v).grid(row=n // 2, column=n % 2,
                                                  sticky=tk.W, padx=4, pady=1)
 

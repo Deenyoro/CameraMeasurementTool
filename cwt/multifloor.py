@@ -196,12 +196,53 @@ class ProjectState:
     # wire with no explicit cable and whose device-type doesn't specify one
     # uses this instead of the per-category inference. None = infer.
     default_cable: str | None = None
+    # Per-symbol-type metadata that must survive reloads. symbol_types
+    # themselves are rebuilt from the .drawio legend on every load, so any
+    # field the legend can't encode (category, cable_type, is_run_point)
+    # was previously LOST on reload. This map is the durable home:
+    #   {type_code: {"category": str, "cable_type": str,
+    #                "is_run_point": bool}}
+    # All keys optional per entry. Overlaid onto symbol_types after parse.
+    symbol_meta: dict = field(default_factory=dict)
     scale_factor: float | None = None
     unit: str = "ft-in"
     next_device_id: int = 100
 
     def get_floor(self, fid: str) -> FloorState | None:
         return next((f for f in self.floors if f.id == fid), None)
+
+
+# Standard equipment categories. Users can type their own in the Symbol
+# Editor — these are just the suggestions every project starts with.
+DEFAULT_CATEGORIES = ["IT", "Security", "Cameras"]
+
+
+def coerce_symbol_meta(raw) -> dict | None:
+    """Normalize one symbol_meta entry ({category, cable_type,
+    is_run_point}), or None when nothing usable is present. Unknown keys
+    are dropped; values are type-checked so a hand-edited file can't
+    poison symbol_types at overlay time."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    cat = raw.get("category")
+    if isinstance(cat, str) and cat.strip():
+        out["category"] = cat.strip()
+    ct = raw.get("cable_type")
+    if isinstance(ct, str) and ct.strip():
+        out["cable_type"] = ct.strip()
+    if "is_run_point" in raw:
+        out["is_run_point"] = bool(raw.get("is_run_point"))
+    return out or None
+
+
+def default_category_for(symbol: dict) -> str:
+    """Category to assume when a type has no explicit one: cameras →
+    'Cameras', everything else → 'Security' (this is a security-overlay
+    tool; IT gear gets tagged explicitly)."""
+    if isinstance(symbol, dict) and symbol.get("is_camera"):
+        return "Cameras"
+    return "Security"
 
 
 def coerce_camera_model(raw: dict) -> dict | None:
@@ -515,6 +556,13 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
                     device_azimuths[str(k)] = float(v)
                 except (TypeError, ValueError):
                     pass
+    raw_sm = data.get("symbol_meta", {})
+    symbol_meta = {}
+    if isinstance(raw_sm, dict):
+        for code, meta in raw_sm.items():
+            cleaned = coerce_symbol_meta(meta)
+            if cleaned:
+                symbol_meta[str(code)] = cleaned
     return ProjectState(
         version=2,
         project_name=project_name,
@@ -529,6 +577,7 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         device_azimuths=device_azimuths,
         default_cable=(data.get("default_cable")
                        if isinstance(data.get("default_cable"), str) else None),
+        symbol_meta=symbol_meta,
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -636,6 +685,15 @@ def save_project(project: ProjectState, project_path: str) -> None:
             for k, v in project.device_azimuths.items()
             if isinstance(v, (int, float, list))},
         "default_cable": project.default_cable,
+        "symbol_meta": {
+            str(code): cleaned
+            for code, cleaned in (
+                (c, coerce_symbol_meta(m))
+                for c, m in (project.symbol_meta.items()
+                             if isinstance(project.symbol_meta, dict) else ())
+            )
+            if cleaned
+        },
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,
