@@ -3422,25 +3422,18 @@ class CameraWireTool:
         self._dev_search_var.trace_add("write", lambda *_: self._refresh_device_list())
 
         # Quick on-map visibility presets. Per-type toggles live on each
-        # group header below (click the ● / ○ glyph). The middle buttons
-        # are CATEGORY presets built dynamically from the categories in
-        # use (IT / Security / Cameras by default, plus any the user
-        # creates) — they rebuild whenever symbol types change.
+        # group header below (click the ● / ○ glyph). The buttons are
+        # CATEGORY presets built dynamically (All / Cameras / Security /
+        # IT / customs / None) and laid out in a WRAPPING flow that
+        # reflows to the side panel's real width — a fixed horizontal
+        # row clipped buttons off-screen on narrow panels.
         vis_frame = ttk.Frame(tab_dev)
         vis_frame.pack(fill=tk.X, padx=6, pady=(0, 2))
-        ttk.Label(vis_frame, text="Show on map:").pack(side=tk.LEFT)
-        all_b = ttk.Button(vis_frame, text="All", width=5,
-                           command=self._show_all_types)
-        all_b.pack(side=tk.LEFT, padx=(4, 2))
-        Tooltip(all_b, "Show every device type on the map.")
-        # Dynamic category buttons live in this sub-frame, rebuilt by
-        # _rebuild_category_buttons (called from _refresh_symbol_list).
+        ttk.Label(vis_frame, text="Show on map:").pack(anchor=tk.W)
         self._cat_btn_frame = ttk.Frame(vis_frame)
-        self._cat_btn_frame.pack(side=tk.LEFT)
-        none_b = ttk.Button(vis_frame, text="None", width=5,
-                            command=self._hide_all_types)
-        none_b.pack(side=tk.LEFT, padx=2)
-        Tooltip(none_b, "Hide all device types from the map.")
+        self._cat_btn_frame.pack(fill=tk.X, expand=True)
+        self._cat_btn_frame.bind(
+            "<Configure>", lambda _e: self._reflow_category_buttons())
         self._rebuild_category_buttons()
 
         # Working filter: hide cameras that already have a wire (and all
@@ -4798,10 +4791,11 @@ class CameraWireTool:
         self._apply_type_visibility()
 
     def _rebuild_category_buttons(self) -> None:
-        """(Re)build the per-category 'Show on map' preset buttons from
-        the categories currently in use. Called at UI build and whenever
-        symbol types change, so a freshly-created category gets its
-        button without a restart."""
+        """(Re)build the 'Show on map' preset buttons (All / one per
+        category in use / None). Called at UI build and whenever symbol
+        types change, so a freshly-created category gets its button
+        without a restart. Layout is handled by
+        _reflow_category_buttons, which wraps to the panel width."""
         frame = getattr(self, "_cat_btn_frame", None)
         if frame is None:
             return
@@ -4818,13 +4812,54 @@ class CameraWireTool:
                 cats_in_use.get(self._category_of(code), 0) + 1)
         std = [c for c in ("Cameras", "Security", "IT") if c in cats_in_use]
         custom = sorted(c for c in cats_in_use if c not in std)
+
+        all_b = ttk.Button(frame, text="All", width=5,
+                           command=self._show_all_types)
+        Tooltip(all_b, "Show every device type on the map.")
         for cat in std + custom:
-            b = ttk.Button(frame, text=cat, width=max(6, len(cat) + 1),
+            b = ttk.Button(frame, text=cat, width=max(6, len(cat) + 2),
                            command=lambda c=cat: self._show_category_only(c))
-            b.pack(side=tk.LEFT, padx=2)
             Tooltip(b, f"Show only {cat} devices on the map "
                        f"({self._plural(cats_in_use[cat], 'type')}); "
                        f"hide everything else.")
+        none_b = ttk.Button(frame, text="None", width=5,
+                            command=self._hide_all_types)
+        Tooltip(none_b, "Hide all device types from the map.")
+        self._cat_btn_last_width = -1   # force reflow
+        self._reflow_category_buttons()
+
+    def _reflow_category_buttons(self) -> None:
+        """Grid the preset buttons into as many rows as the panel's
+        CURRENT width requires. Re-runs on <Configure> (sash drag /
+        window resize) so nothing ever sits off-screen unreachable."""
+        frame = getattr(self, "_cat_btn_frame", None)
+        if frame is None:
+            return
+        try:
+            btns = list(frame.winfo_children())
+        except tk.TclError:
+            return
+        if not btns:
+            return
+        avail = frame.winfo_width()
+        if avail <= 1:
+            # Not yet laid out — Tk reports 1px before first mapping.
+            # The <Configure> binding re-invokes us once it has a size.
+            return
+        if getattr(self, "_cat_btn_last_width", None) == avail:
+            return   # no width change → layout already correct
+        self._cat_btn_last_width = avail
+        row = col = 0
+        x = 0
+        for b in btns:
+            bw = b.winfo_reqwidth() + 4   # + grid padx
+            if col > 0 and x + bw > avail:
+                row += 1
+                col = 0
+                x = 0
+            b.grid(row=row, column=col, padx=2, pady=1, sticky="w")
+            x += bw
+            col += 1
 
     def _on_cameras_only_toggle(self) -> None:
         """Toolbar 'Cameras only' checkbox handler — preset, not a raw flag."""
