@@ -162,6 +162,8 @@ def _wire_app(devices, hidden_types):
     app = types.SimpleNamespace(devices=devices)
     app._hidden_types = set(hidden_types)
     app._hidden_by_unwired_filter = lambda d: False
+    app._devices_by_id = lambda: (
+        cwt.CameraWireTool._devices_by_id(app))
     return app
 
 

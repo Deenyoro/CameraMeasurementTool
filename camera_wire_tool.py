@@ -1944,6 +1944,49 @@ class CameraWireTool:
                 out[str(code)] = meta
         return out
 
+    _SEARCH_DEBOUNCE_MS = 150
+
+    def _debounced_search(self, key: str, refresh_fn) -> None:
+        """Coalesce search-as-you-type refreshes: each keystroke resets
+        a short timer instead of rebuilding the whole list immediately.
+        A 200-device project rebuilt sorted+formatted rows per
+        keystroke, which felt like the input lagged."""
+        if not hasattr(self, "_search_debounce_ids"):
+            self._search_debounce_ids = {}
+        prev = self._search_debounce_ids.get(key)
+        if prev is not None:
+            try:
+                self.root.after_cancel(prev)
+            except tk.TclError:
+                pass
+        def _go():
+            self._search_debounce_ids[key] = None
+            refresh_fn()
+        try:
+            self._search_debounce_ids[key] = self.root.after(
+                self._SEARCH_DEBOUNCE_MS, _go)
+        except tk.TclError:
+            refresh_fn()   # window tearing down — refresh inline
+
+    def _devices_by_id(self) -> dict:
+        """Cached {device_id: device} map for the hot render/hover
+        paths, which used to linear-scan self.devices per wire per
+        frame — O(wires × devices) per redraw. Invalidated explicitly
+        by _post_command_refresh and floor switches; sample-checked
+        for in-place mutation as a safety net."""
+        cached = getattr(self, "_devices_by_id_cache", None)
+        if cached is not None and len(cached) == len(self.devices):
+            if not self.devices or cached.get(
+                    self.devices[0].get("id")) is self.devices[0]:
+                return cached
+        mapping = {d["id"]: d for d in self.devices
+                   if isinstance(d, dict) and "id" in d}
+        self._devices_by_id_cache = mapping
+        return mapping
+
+    def _invalidate_devices_cache(self) -> None:
+        self._devices_by_id_cache = None
+
     def _category_of(self, type_code) -> str:
         """The category for a symbol type: explicit if set, else
         'Cameras' for camera types, else 'Security'."""
@@ -2033,7 +2076,18 @@ class CameraWireTool:
 
     def _commit_revision(self, note: str = "") -> str | None:
         """Append a revision of the current on-disk project to the side-car
-        bundle. Reads the just-written wiremap so the snapshot is exact."""
+        bundle. Reads the just-written wiremap synchronously (so the
+        snapshot is exactly what the save wrote), then runs the
+        expensive part — hashing the ~1.3MB-per-floor drawio blobs and
+        rewriting the .zsmt zip — on a BACKGROUND thread. The zip write
+        used to block the UI for up to a second per save on multi-floor
+        projects.
+
+        A busy-flag serializes commits: if one is still running when
+        the next save lands, the new commit is dropped (the FOLLOWING
+        save will capture that state; the bundle is a backlog, not the
+        canonical store — the canonical files were already written
+        synchronously by the caller)."""
         if self._project is None:
             return None
         try:
@@ -2044,21 +2098,48 @@ class CameraWireTool:
         files = self._floor_drawio_paths()
         if not files:
             return None
-        try:
-            return bundle_mod.commit_revision(
-                self._bundle_sidecar_path(), wm, files,
-                note=note, app_version=cwt.__version__)
-        except Exception as e:   # never let a backlog write break a save
-            log_error("Revision commit to bundle failed", e)
+        if getattr(self, "_revision_commit_busy", False):
+            log_error("Revision commit skipped — previous still running",
+                      RuntimeError("busy"))
             return None
+        self._revision_commit_busy = True
+        bundle_path = self._bundle_sidecar_path()
+
+        def _commit_bg():
+            try:
+                bundle_mod.commit_revision(
+                    bundle_path, wm, files,
+                    note=note, app_version=cwt.__version__)
+            except Exception as e:   # never let a backlog write break a save
+                log_error("Revision commit to bundle failed", e)
+            finally:
+                self._revision_commit_busy = False
+
+        import threading
+        t = threading.Thread(target=_commit_bg, daemon=True,
+                             name="zsmt-commit")
+        self._revision_commit_thread = t
+        t.start()
+        return None
+
+    def _flush_revision_commit(self, timeout: float = 10.0) -> None:
+        """Block until any in-flight background revision commit lands.
+        Called before operations that READ the sidecar bundle (export
+        a copy, show revision history, app exit) so they see the
+        latest revision instead of a mid-write zip."""
+        t = getattr(self, "_revision_commit_thread", None)
+        if t is not None and t.is_alive():
+            t.join(timeout)
 
     def _export_bundle(self) -> None:
         """Write a portable .zsmt copy (current state + full history) the
         user can move/share. Ensures the latest state is committed first."""
         self._save_drawio()   # flush drawio + wiremap + commit a revision
+        self._flush_revision_commit()   # commit runs async — wait for it
         sidecar = self._bundle_sidecar_path()
         if not os.path.exists(sidecar):
             self._commit_revision(note="export")
+            self._flush_revision_commit()
         dest = filedialog.asksaveasfilename(
             title="Export project bundle",
             initialdir=os.path.dirname(self.project_path),
@@ -2081,6 +2162,7 @@ class CameraWireTool:
         revert to any revision."""
         # Make sure the current state is in the backlog before showing it.
         self._save_drawio()
+        self._flush_revision_commit()   # commit runs async — wait for it
         sidecar = self._bundle_sidecar_path()
         if not os.path.exists(sidecar):
             self._flash_status("No revision history yet — save once to start "
@@ -3419,7 +3501,9 @@ class CameraWireTool:
         Tooltip(self._dev_search_entry,
                 "Filter devices by ID, type, label, or effective cable "
                 "(Cat6 / Cat5e / …). Ctrl+F focuses.")
-        self._dev_search_var.trace_add("write", lambda *_: self._refresh_device_list())
+        self._dev_search_var.trace_add(
+            "write", lambda *_: self._debounced_search(
+                "dev", self._refresh_device_list))
 
         # Quick on-map visibility presets. Per-type toggles live on each
         # group header below (click the ● / ○ glyph). The buttons are
@@ -3511,7 +3595,9 @@ class CameraWireTool:
         Tooltip(self._wire_search_entry,
                 "Filter wires by device ID, type, label, or effective "
                 "cable (Cat6 / Cat5e / RG59 / …). Ctrl+F focuses.")
-        self._wire_search_var.trace_add("write", lambda *_: self._refresh_wire_list())
+        self._wire_search_var.trace_add(
+            "write", lambda *_: self._debounced_search(
+                "wire", self._refresh_wire_list))
 
         # Sort control — group-by-device is the default; the run-length and
         # type/cable orderings make it easy to find the longest pulls or
@@ -3614,7 +3700,9 @@ class CameraWireTool:
         Tooltip(self._sym_search_entry,
                 "Filter symbol types by code, label, or effective "
                 "cable. Ctrl+F focuses.")
-        self._sym_search_var.trace_add("write", lambda *_: self._refresh_symbol_list())
+        self._sym_search_var.trace_add(
+            "write", lambda *_: self._debounced_search(
+                "sym", self._refresh_symbol_list))
 
         sf = ttk.Frame(tab_sym)
         sf.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
@@ -3979,6 +4067,12 @@ class CameraWireTool:
             self._active_search_entry = self._sym_search_entry
         else:
             self._active_search_entry = None
+        # Lazy BOM refresh: edits that happened while the BOM tab was
+        # hidden marked it stale instead of recomputing the full BOM
+        # rollup on every keystroke/command. Catch up now it's visible.
+        if idx == 3 and getattr(self, "_bom_tab_stale", False):
+            self._bom_tab_stale = False
+            self._refresh_bom_tab(force=True)
 
     def _refresh_recent_menu(self) -> None:
         self._recent_menu.delete(0, tk.END)
@@ -4445,6 +4539,9 @@ class CameraWireTool:
             return cls
 
     def _post_command_refresh(self) -> None:
+        # Devices may have been added/removed/replaced — refresh the
+        # id->device lookup cache the render paths rely on.
+        self._invalidate_devices_cache()
         self._recalc_all_wires()
         self._refresh_symbol_list()
         self._refresh_device_list()
@@ -4540,6 +4637,9 @@ class CameraWireTool:
         if not self._can_navigate_away():
             return
         self._flush_pending_settings()
+        # Daemon thread would be killed mid-zip on interpreter exit,
+        # corrupting the bundle's atomic-rename dance — wait for it.
+        self._flush_revision_commit()
         self.root.quit()
 
     def _can_navigate_away(self) -> bool:
@@ -6985,8 +7085,7 @@ class CameraWireTool:
         did = route.get("device_id")
         if not did:
             return False
-        dev = next((d for d in self.devices
-                    if isinstance(d, dict) and d.get("id") == did), None)
+        dev = self._devices_by_id().get(did)
         if dev is None:
             return False
         if dev.get("type") in getattr(self, "_hidden_types", ()):
@@ -7037,21 +7136,20 @@ class CameraWireTool:
         did = route.get("device_id")
         wire_color = "#00BFFF"
         # Priority: explicit cable on the route → device's symbol cable → device color
+        # Cached id→device map: this runs per wire per redraw, so the
+        # old linear scans were O(wires × devices) per frame.
         cable_id = route.get("cable_type")
-        if not cable_id and did:
-            dev = next((d for d in self.devices if d["id"] == did), None)
-            if dev:
-                sym = self._safe_sym(dev["type"])
-                cable_id = sym.get("cable_type") or bom_mod.default_cable_for(sym)
+        dev = self._devices_by_id().get(did) if did else None
+        if not cable_id and dev:
+            sym = self._safe_sym(dev["type"])
+            cable_id = sym.get("cable_type") or bom_mod.default_cable_for(sym)
         if cable_id and cable_id in self.cable_types:
             ct = self.cable_types[cable_id]
             if isinstance(ct, dict):
                 wire_color = ct.get("color", wire_color)
-        elif did:
-            dev = next((d for d in self.devices if d["id"] == did), None)
-            if dev:
-                info = self._safe_sym(dev["type"])
-                wire_color = info.get("color", "#00BFFF")
+        elif dev:
+            info = self._safe_sym(dev["type"])
+            wire_color = info.get("color", "#00BFFF")
 
         color = "#FF4444" if is_selected else wire_color
         width = 4 if is_selected else 2
@@ -11884,9 +11982,22 @@ class CameraWireTool:
             project_default=self._proj_default_cable(),
         )
 
-    def _refresh_bom_tab(self) -> None:
+    def _refresh_bom_tab(self, force: bool = False) -> None:
         if not hasattr(self, "_bom_tree"):
             return
+        # Lazy refresh: the full BOM rollup (every wire × cable resolve
+        # + model inventory) is the most expensive list refresh, and
+        # _post_command_refresh calls it after EVERY mutation. When the
+        # BOM tab isn't the visible tab, mark it stale and skip — the
+        # tab-change handler catches up when the user actually looks.
+        if not force:
+            try:
+                if (hasattr(self, "_notebook")
+                        and self._notebook.index("current") != 3):
+                    self._bom_tab_stale = True
+                    return
+            except tk.TclError:
+                pass
         # Preserve scroll across the rebuild (same as the listboxes).
         try:
             _yv = self._bom_tree.yview()
