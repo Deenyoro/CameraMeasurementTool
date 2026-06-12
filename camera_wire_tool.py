@@ -15390,7 +15390,10 @@ class CameraWireTool:
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.title("Manage floors"); dlg.geometry("620x400")
+        dlg.title("Manage floors"); dlg.geometry("700x400")
+        # Resizable: the Drawio column shows file paths that easily
+        # exceed any fixed width — let the user stretch the dialog.
+        dlg.minsize(620, 320)
         ttk.Label(dlg, text="Double-click a row to switch to that floor. "
                               "Use the Delete button below to remove one.",
                   foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
@@ -15400,7 +15403,7 @@ class CameraWireTool:
         for c, w, h in (("id", 60, "ID"), ("name", 140, "Name"),
                          ("elevation", 80, "Elev. (ft)"),
                          ("align", 90, "Aligned"),
-                         ("drawio", 220, "Drawio")):
+                         ("drawio", 290, "Drawio")):
             tree.heading(c, text=h); tree.column(c, width=w)
 
         def _align_summary(al):
@@ -16141,6 +16144,8 @@ class CameraWireTool:
                 cv.trace_add("write", _on_cat)
                 return cv
             cat_vars: dict[str, tk.BooleanVar] = {}
+            # Wrap category toggles 3 per row — one long row clipped
+            # past the dialog edge with 4+ categories.
             for n, cat_name in enumerate(sorted(cats_present)):
                 codes = cats_present[cat_name]
                 cv = _make_cat_toggle(cat_name, codes)
@@ -16148,20 +16153,43 @@ class CameraWireTool:
                 ttk.Checkbutton(
                     cf_inner,
                     text=f"{cat_name} ({len(codes)})",
-                    variable=cv).grid(row=0, column=n, sticky=tk.W, padx=6)
+                    variable=cv).grid(row=n // 3, column=n % 3,
+                                      sticky=tk.W, padx=6)
 
-        # Per-type include checkboxes (unchecked = hidden on every map page).
+        # Per-type include checkboxes (unchecked = hidden on every map
+        # page). Scrollable beyond 8 rows so a 20-type project doesn't
+        # push the dialog's action buttons off-screen.
         if types_present:
             tf = ttk.LabelFrame(opt_frame, text="Device types to show on map")
             tf.pack(fill=tk.X, padx=8, pady=(2, 8))
-            inner = ttk.Frame(tf)
-            inner.pack(fill=tk.X, padx=4, pady=4)
+            n_rows = (len(types_present) + 1) // 2
+            if n_rows > 8:
+                type_canvas = tk.Canvas(tf, height=180, highlightthickness=0)
+                tsb = ttk.Scrollbar(tf, orient=tk.VERTICAL,
+                                    command=type_canvas.yview)
+                type_canvas.configure(yscrollcommand=tsb.set)
+                type_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                 padx=4, pady=4)
+                tsb.pack(side=tk.RIGHT, fill=tk.Y)
+                inner = ttk.Frame(type_canvas)
+                type_canvas.create_window((0, 0), window=inner, anchor="nw")
+                inner.bind("<Configure>", lambda _e: type_canvas.configure(
+                    scrollregion=type_canvas.bbox("all")))
+                type_canvas.bind(
+                    "<MouseWheel>",
+                    lambda e: type_canvas.yview_scroll(
+                        -1 if e.delta > 0 else 1, "units"))
+            else:
+                inner = ttk.Frame(tf)
+                inner.pack(fill=tk.X, padx=4, pady=4)
             for n, tc in enumerate(types_present):
                 v = tk.BooleanVar(value=True)
                 type_vars[tc] = v
                 label = self._safe_sym(tc).get("label", tc)
                 cat = self._category_of(tc)
-                ttk.Checkbutton(inner, text=f"{tc} — {label} [{cat}]"[:34],
+                # 44-char budget (was 34 — truncated meaningful label
+                # text like 'Door Position Swit').
+                ttk.Checkbutton(inner, text=f"{tc} — {label} [{cat}]"[:44],
                                 variable=v).grid(row=n // 2, column=n % 2,
                                                  sticky=tk.W, padx=4, pady=1)
 
