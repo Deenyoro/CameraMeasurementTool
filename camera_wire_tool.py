@@ -3124,9 +3124,16 @@ class CameraWireTool:
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
-        # Toolbar
-        toolbar = ttk.Frame(self.root)
+        # Toolbar — TWO permanent rows. One row needed ~1600px and
+        # clipped the scale/zoom/totals readouts off-screen on 1280-1440
+        # wide windows (most laptops). Row 1: actions + mode + floor.
+        # Row 2: view toggles + units + live readouts.
+        toolbar_wrap = ttk.Frame(self.root)
+        toolbar_wrap.pack(side=tk.TOP, fill=tk.X)
+        toolbar = ttk.Frame(toolbar_wrap)
         toolbar.pack(side=tk.TOP, fill=tk.X)
+        toolbar2 = ttk.Frame(toolbar_wrap)
+        toolbar2.pack(side=tk.TOP, fill=tk.X)
 
         # Text-labelled buttons render reliably on Windows where emoji glyphs
         # in ttk.Button silently fall back to empty squares. Width=None lets
@@ -3158,11 +3165,11 @@ class CameraWireTool:
         _ttkbtn("Zoom −", lambda: self._zoom_button(-1), "Zoom out (-)", width=8)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
-        # Quick toggles
+        # Quick toggles — ROW 2 of the toolbar.
         # Master layer-visibility toggles — quick way to declutter the
         # canvas for a screenshot or focus on just one layer.
         devs_btn = ttk.Checkbutton(
-            toolbar, text="Devices", variable=self._show_devices,
+            toolbar2, text="Devices", variable=self._show_devices,
             style="Toolbutton", command=self._redraw,
         )
         devs_btn.pack(side=tk.LEFT, padx=2, pady=2)
@@ -3171,7 +3178,7 @@ class CameraWireTool:
                 "plan + wires only — useful for screenshots that focus "
                 "on cable runs.")
         wires_btn = ttk.Checkbutton(
-            toolbar, text="Wires", variable=self._show_wires,
+            toolbar2, text="Wires", variable=self._show_wires,
             style="Toolbutton", command=self._redraw,
         )
         wires_btn.pack(side=tk.LEFT, padx=2, pady=2)
@@ -3180,30 +3187,30 @@ class CameraWireTool:
                 "device layout view, e.g. for verifying placement "
                 "without route clutter.")
         ids_btn = ttk.Checkbutton(
-            toolbar, text="IDs", variable=self._show_device_ids,
+            toolbar2, text="IDs", variable=self._show_device_ids,
             style="Toolbutton", command=self._redraw,
         )
         ids_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(ids_btn, "Show device-ID labels above each icon on the map")
         grid_btn = ttk.Checkbutton(
-            toolbar, text="Grid", variable=self._show_grid,
+            toolbar2, text="Grid", variable=self._show_grid,
             style="Toolbutton", command=self._redraw,
         )
         grid_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(grid_btn, "Show alignment grid (5 ft / 1 m intervals)")
         legend_btn = ttk.Checkbutton(
-            toolbar, text="Legend", variable=self._show_legend,
+            toolbar2, text="Legend", variable=self._show_legend,
             style="Toolbutton", command=self._redraw,
         )
         legend_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(legend_btn, "Show / hide the auto-generated legend on the map")
         fov_btn = ttk.Checkbutton(
-            toolbar, text="FOV", variable=self._show_fov,
+            toolbar2, text="FOV", variable=self._show_fov,
             style="Toolbutton", command=self._redraw,
         )
         fov_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
-        fov_gear = ttk.Button(toolbar, text="⚙", width=2,
+        fov_gear = ttk.Button(toolbar2, text="⚙", width=2,
                               style="Toolbutton",
                               command=self._open_fov_settings_dialog)
         fov_gear.pack(side=tk.LEFT, padx=(0, 2), pady=2)
@@ -3211,14 +3218,14 @@ class CameraWireTool:
                 "FOV display settings — hide cones per camera type "
                 "(e.g. 360s), color, transparency, DORI detail.")
         drops_btn = ttk.Checkbutton(
-            toolbar, text="Drops", variable=self._show_drops,
+            toolbar2, text="Drops", variable=self._show_drops,
             style="Toolbutton", command=self._redraw,
         )
         drops_btn.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(drops_btn,
                 "Show / hide cross-floor cable drop / riser points on the map.")
         cam_only_btn = ttk.Checkbutton(
-            toolbar, text="Cameras only", variable=self._cameras_only_var,
+            toolbar2, text="Cameras only", variable=self._cameras_only_var,
             style="Toolbutton", command=self._on_cameras_only_toggle,
         )
         cam_only_btn.pack(side=tk.LEFT, padx=2, pady=2)
@@ -3276,8 +3283,8 @@ class CameraWireTool:
             Tooltip(rb, tip)
             self._mode_buttons[m] = rb
 
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
-        ttk.Label(toolbar, text="Units:").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Separator(toolbar2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        ttk.Label(toolbar2, text="Units:").pack(side=tk.LEFT, padx=(4, 0))
         # Imperial + metric in a single dropdown — keeps the toolbar tidy.
         self._unit_choices = [
             ("Feet & Inches  (12'-6 1/2\")", "ft-in"),
@@ -3289,7 +3296,7 @@ class CameraWireTool:
         ]
         self._unit_label_var = tk.StringVar()
         self._unit_combo = ttk.Combobox(
-            toolbar, textvariable=self._unit_label_var,
+            toolbar2, textvariable=self._unit_label_var,
             values=[label for label, _val in self._unit_choices],
             state="readonly", width=22,
         )
@@ -3316,7 +3323,7 @@ class CameraWireTool:
         # clickable), plain label after calibration. Click jumps straight
         # into the calibration flow.
         self.scale_label = ttk.Button(
-            toolbar,
+            toolbar2,
             text="⚠ Scale not set — click to calibrate",
             command=self._start_calibration,
         )
@@ -3333,7 +3340,7 @@ class CameraWireTool:
         # Zoom percentage indicator — quietly tucked next to scale, useful
         # for orientation. Updates every redraw.
         self.zoom_indicator = ttk.Label(
-            toolbar, text="Zoom: 100%",
+            toolbar2, text="Zoom: 100%",
             font=("Consolas", 9), foreground="#888888",
         )
         self.zoom_indicator.pack(side=tk.LEFT, padx=8, pady=2)
@@ -3341,16 +3348,9 @@ class CameraWireTool:
                 "Current viewport zoom.\n"
                 "Mouse wheel zooms toward cursor; Home fits to view; Z zooms to selection.")
 
-        # Always-visible project metrics on the right side of the toolbar.
-        # Updated whenever wires / devices / cable types change.
-        self.total_toolbar_label = ttk.Label(
-            toolbar, text="—",
-            font=("Segoe UI", 10, "bold"))
-        self.total_toolbar_label.pack(side=tk.RIGHT, padx=10)
-        Tooltip(self.total_toolbar_label,
-                "Live project totals: device + camera count, "
-                "wire-run count, total cable footage, and grand-total cost "
-                "(from the BOM tab's waste/tax inputs).")
+        # Live project totals moved to the STATUS BAR's right side (see
+        # the statusbar block below) — they clipped off-screen when
+        # packed into the toolbar on 1280px windows.
 
         # Main split. Using legacy tk.PanedWindow (NOT ttk) specifically so
         # we can set opaqueresize=False — that turns sash drag into a fast
@@ -3942,6 +3942,17 @@ class CameraWireTool:
             font=("Segoe UI", 9), foreground="#888888",
         )
         self.save_indicator.pack(side=tk.RIGHT, padx=8, pady=2)
+        # Live project totals (device/camera/wire counts, footage, cost).
+        # Status bar right side: always visible, never fights the
+        # toolbar's action buttons for horizontal space.
+        self.total_toolbar_label = ttk.Label(
+            self._statusbar, text="—", anchor=tk.E,
+            font=("Segoe UI", 9, "bold"))
+        self.total_toolbar_label.pack(side=tk.RIGHT, padx=8, pady=2)
+        Tooltip(self.total_toolbar_label,
+                "Live project totals: device + camera count, "
+                "wire-run count, total cable footage, and grand-total cost "
+                "(from the BOM tab's waste/tax inputs).")
         self._last_save_time: float | None = None
         self._tick_save_indicator()
 
