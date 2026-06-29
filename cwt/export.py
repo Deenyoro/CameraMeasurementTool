@@ -370,6 +370,7 @@ def write_map_pdf(
     bom_report: BomReport,
     model_lines: list | None = None,
     include_summary: bool = True,
+    summary_options: dict | None = None,
     floor_label: str | None = None,
     scale_factor: float | None = None,
     format_length=lambda x: f"{x:.2f}\"" if x is not None else "--",
@@ -427,7 +428,10 @@ def write_map_pdf(
         c.drawImage(img_path, 0, 0, width=mw, height=mh,
                     preserveAspectRatio=True, anchor="c")
         if caption:
-            label = f"{project_name} — {caption}"
+            # Caption is drawn verbatim — the caller decides the exact text
+            # (and whether to include one at all), so the export dialog's
+            # editable caption field is what shows up here.
+            label = caption
             c.setFont("Helvetica-Bold", 11)
             tw = c.stringWidth(label, "Helvetica-Bold", 11)
             c.setFillColorRGB(1, 1, 1)
@@ -438,6 +442,12 @@ def write_map_pdf(
 
     # ---- Summary page (landscape letter, forced onto ONE page).
     if include_summary:
+        # Caller-controlled sections (the export dialog's "Advanced" box).
+        opts = summary_options or {}
+        show_breakdown = opts.get("device_breakdown", True)
+        show_cable = opts.get("cable_bom", True)
+        show_models = opts.get("camera_models", True)
+
         page = landscape(letter)
         LM = RM = TM = BM = 0.5 * inch
         avail_w = page[0] - LM - RM
@@ -454,6 +464,11 @@ def write_map_pdf(
         total_ft = sum(getattr(l, "total_ft", 0.0) for l in bom_report.lines)
         hw_total = sum(getattr(m, "subtotal", 0.0) for m in (model_lines or []))
         full_total = bom_report.grand_total + hw_total
+        # No wire on the sheet → every cable/footage figure is just zeros, so
+        # omit the wire stats AND the cable BOM rather than printing them.
+        has_wire = (len(wire_routes) > 0 or bool(bom_report.lines)
+                    or total_ft > 0.0)
+        show_cable = show_cable and has_wire
 
         content = []
         content.append(Paragraph(f"{project_name} — Summary", h2))
@@ -464,92 +479,141 @@ def write_map_pdf(
             small))
         content.append(Spacer(1, 8))
 
-        stats = [
-            ["Devices", str(len(devices)),
-             "Wire runs", str(len(wire_routes)),
-             "Total wire", f"{total_ft:,.1f} ft"],
-            ["Cameras", str(n_cam),
-             "Cable cost", f"{currency}{bom_report.grand_total:,.2f}",
-             "Hardware", f"{currency}{hw_total:,.2f}"],
-        ]
-        stats_tbl = Table(stats, colWidths=[1.1*inch, 1.4*inch, 1.1*inch,
-                                            1.4*inch, 1.1*inch, 1.5*inch])
-        stats_tbl.setStyle(TableStyle([
+        # Top stats — wire cells only appear when there's wire; hardware only
+        # when there's hardware cost. Pairs laid out 3-per-row (6 columns).
+        pairs = [("Devices", str(len(devices)))]
+        if n_cam > 0:
+            pairs.append(("Cameras", str(n_cam)))
+        if has_wire:
+            pairs += [("Wire runs", str(len(wire_routes))),
+                      ("Total wire", f"{total_ft:,.1f} ft"),
+                      ("Cable cost", f"{currency}{bom_report.grand_total:,.2f}")]
+        if hw_total > 0:
+            pairs.append(("Hardware", f"{currency}{hw_total:,.2f}"))
+        stat_rows = []
+        for i in range(0, len(pairs), 3):
+            row = []
+            for lbl, val in pairs[i:i + 3]:
+                row += [lbl, val]
+            while len(row) < 6:
+                row.append("")
+            stat_rows.append(row)
+        stats_tbl = Table(stat_rows, colWidths=[1.1*inch, 1.4*inch, 1.1*inch,
+                                                1.4*inch, 1.1*inch, 1.5*inch])
+        st_style = [
             ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
             ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
-            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f0f0f0")),
-            ("BACKGROUND", (4, 0), (4, -1), colors.HexColor("#f0f0f0")),
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
-            ("FONTNAME", (4, 0), (4, -1), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 9),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ]))
+        ]
+        for col in (0, 2, 4):
+            st_style.append(("BACKGROUND", (col, 0), (col, -1),
+                             colors.HexColor("#f0f0f0")))
+            st_style.append(("FONTNAME", (col, 0), (col, -1), "Helvetica-Bold"))
+        stats_tbl.setStyle(TableStyle(st_style))
         content.append(stats_tbl)
         content.append(Spacer(1, 10))
 
-        # Cable BOM table (left).
-        bom_data = [["Cable", "Runs", "Ft", f"Sub ({currency})"]]
-        for line in bom_report.lines:
-            bom_data.append([line.cable_id, str(line.runs),
-                             f"{line.total_ft:,.1f}", f"{line.subtotal:,.2f}"])
-        bom_data.append(["TOTAL", "", f"{total_ft:,.1f}",
-                         f"{bom_report.grand_total:,.2f}"])
-        bom_tbl = Table(bom_data,
-                        colWidths=[1.2*inch, 0.6*inch, 0.8*inch, 1.0*inch])
-        bom_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#202060")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e8e8f4")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-        ]))
+        # Detail tables shown side-by-side (only the enabled/relevant ones).
+        detail_tables = []
 
-        # Camera-model hardware table (right).
-        model_data = [["Model", "Model #", "Qty", f"Sub ({currency})"]]
-        for m in (model_lines or []):
-            model_data.append([str(getattr(m, "name", ""))[:24],
-                               str(getattr(m, "model_number", "")),
-                               str(getattr(m, "count", 0)),
-                               f"{getattr(m, 'subtotal', 0.0):,.2f}"])
-        if not (model_lines or []):
-            model_data.append(["(no models assigned)", "", "", ""])
-        else:
+        # Device breakdown by type (code, description, qty).
+        if show_breakdown:
+            counts: dict = {}
+            for d in devices:
+                if isinstance(d, dict) and "type" in d:
+                    counts[d["type"]] = counts.get(d["type"], 0) + 1
+            bd = [["Type", "Description", "Qty"]]
+            for code in sorted(counts):
+                sym = symbol_types.get(code, {})
+                lab = sym.get("label", code) if isinstance(sym, dict) else code
+                bd.append([str(code), str(lab)[:26], str(counts[code])])
+            bd.append(["TOTAL", "", str(sum(counts.values()))])
+            bd_tbl = Table(bd, colWidths=[0.7*inch, 1.8*inch, 0.5*inch])
+            bd_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#204020")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e8f4e8")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+            ]))
+            detail_tables.append(bd_tbl)
+
+        # Cable BOM — only when there's wire.
+        if show_cable:
+            bom_data = [["Cable", "Runs", "Ft", f"Sub ({currency})"]]
+            for line in bom_report.lines:
+                bom_data.append([line.cable_id, str(line.runs),
+                                 f"{line.total_ft:,.1f}", f"{line.subtotal:,.2f}"])
+            bom_data.append(["TOTAL", "", f"{total_ft:,.1f}",
+                             f"{bom_report.grand_total:,.2f}"])
+            bom_tbl = Table(bom_data,
+                            colWidths=[1.2*inch, 0.6*inch, 0.8*inch, 1.0*inch])
+            bom_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#202060")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e8e8f4")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ]))
+            detail_tables.append(bom_tbl)
+
+        # Camera-model hardware — only when models are assigned.
+        if show_models and (model_lines or []):
+            model_data = [["Model", "Model #", "Qty", f"Sub ({currency})"]]
+            for m in model_lines:
+                model_data.append([str(getattr(m, "name", ""))[:24],
+                                   str(getattr(m, "model_number", "")),
+                                   str(getattr(m, "count", 0)),
+                                   f"{getattr(m, 'subtotal', 0.0):,.2f}"])
             model_data.append(["HARDWARE TOTAL", "",
                                str(sum(getattr(m, "count", 0) for m in model_lines)),
                                f"{hw_total:,.2f}"])
-        model_tbl = Table(model_data,
-                          colWidths=[1.8*inch, 1.1*inch, 0.5*inch, 1.0*inch])
-        model_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#604020")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f4ece8")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-        ]))
+            model_tbl = Table(model_data,
+                              colWidths=[1.8*inch, 1.1*inch, 0.5*inch, 1.0*inch])
+            model_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#604020")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f4ece8")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#888888")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+            ]))
+            detail_tables.append(model_tbl)
 
-        side = Table([[bom_tbl, model_tbl]],
-                     colWidths=[avail_w * 0.42, avail_w * 0.58])
-        side.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (0, 0), 12),
-        ]))
-        content.append(side)
-        content.append(Spacer(1, 10))
-        content.append(Paragraph(
-            f"<b>FULL TOTAL (wiring + hardware): "
-            f"{currency}{full_total:,.2f}</b>", h2))
+        if detail_tables:
+            n = len(detail_tables)
+            side = Table([detail_tables], colWidths=[avail_w / n] * n)
+            side.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (max(0, n - 2), 0), 12),
+            ]))
+            content.append(side)
+            content.append(Spacer(1, 10))
+
+        # Cost total — only when there's actually a cost to report.
+        if full_total > 0:
+            if has_wire and hw_total > 0:
+                tlabel = "FULL TOTAL (wiring + hardware)"
+            elif hw_total > 0:
+                tlabel = "HARDWARE TOTAL"
+            else:
+                tlabel = "WIRING TOTAL"
+            content.append(Paragraph(
+                f"<b>{tlabel}: {currency}{full_total:,.2f}</b>", h2))
 
         # KeepInFrame(mode='shrink') guarantees the whole summary fits on one
         # page — it scales the content down rather than spilling over.

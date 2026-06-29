@@ -12,12 +12,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# DXF / SVG floor-plan import. Optional — the app runs without these and
+# only needs them when a user opens a .dxf or .svg drawing.
+cad = [
+    "ezdxf>=1.1",       # DXF parsing
+    "matplotlib>=3.7",  # DXF rendering backend for ezdxf
+    "pymupdf>=1.23",    # SVG rasterization
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
     "ruff>=0.5",
     "mypy>=1.10",
     "reportlab>=4.0",
+    "ezdxf>=1.1",
+    "matplotlib>=3.7",
+    "pymupdf>=1.23",
 ]
 
 [project.scripts]

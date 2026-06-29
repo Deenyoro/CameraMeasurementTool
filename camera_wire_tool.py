@@ -58,6 +58,7 @@ except ImportError:
 import cwt
 from cwt import bom as bom_mod
 from cwt import bundle as bundle_mod
+from cwt import import_cad as cad_mod
 from cwt import fov as fov_mod
 from cwt import lenses as lenses_mod
 from cwt import multifloor as mf_mod
@@ -212,6 +213,12 @@ HOME_DIR = Path.home()
 LOG_PATH = HOME_DIR / ".camera_wire_tool.log"
 RECENT_FILES_PATH = HOME_DIR / ".camera_wire_tool_recent.json"
 SETTINGS_PATH = HOME_DIR / ".camera_wire_tool_settings.json"
+
+
+# Default color for new map annotations. A dark blue reads cleanly on a
+# white architectural plan (it gets a white label box via _text_for_bg)
+# while staying distinct from the plan's own black room labels.
+ANNOTATION_DEFAULT_COLOR = "#1565C0"
 
 
 # ============================================================ Color helper
@@ -1133,6 +1140,25 @@ class EditAnnotationCmd(Command):
                 self.ann[k] = self.old_values[k]
 
 
+class MoveAnnotationCmd(Command):
+    """Reposition an annotation. Applied live during the drag (same dict
+    identity), so do() re-applies on redo and undo() restores the original
+    spot."""
+
+    def __init__(self, app: "CameraWireTool", ann: dict,
+                 old_xy: tuple, new_xy: tuple):
+        self.app = app
+        self.ann = ann
+        self.old_xy = old_xy
+        self.new_xy = new_xy
+
+    def do(self):
+        self.ann["x"], self.ann["y"] = self.new_xy
+
+    def undo(self):
+        self.ann["x"], self.ann["y"] = self.old_xy
+
+
 class EditFovCmd(Command):
     """Apply new FOV settings to one or many cameras. Each entry is
     (device, old_fov_or_None, new_fov). `None` for old_fov means the
@@ -1646,6 +1672,9 @@ class CameraWireTool:
         # Legend-drag state — set when the user clicks-and-drags the legend
         # rectangle on the canvas to reposition it.
         self._dragging_legend: dict | None = None    # {start_drawio, start_offset}
+        # Annotation-drag state — set when the user clicks-and-drags a
+        # text label on the canvas to reposition it.
+        self._dragging_annotation: dict | None = None  # {ann, off, old, moved}
         # Cable-drop-point interaction state.
         self._placing_drop: bool = False             # next click places a drop
         self._dragging_drop: dict | None = None      # {drop, off_wx, off_wy, moved}
@@ -2931,7 +2960,7 @@ class CameraWireTool:
             except tk.TclError:
                 pass
         file_menu.config(postcommand=_refresh_file_menu_state)
-        file_menu.add_command(label="Open… (.zsmt / .drawio)",
+        file_menu.add_command(label="Open… (.zsmt / .drawio / .dxf / .svg)",
                               command=self._file_open, accelerator="Ctrl+O")
         self._recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
@@ -3229,7 +3258,7 @@ class CameraWireTool:
             Tooltip(b, tip)
             return b
 
-        _ttkbtn("Open",  self._file_open,   "Open .drawio  (Ctrl+O)")
+        _ttkbtn("Open",  self._file_open,   "Open .zsmt / .drawio / .dxf / .svg  (Ctrl+O)")
         _ttkbtn("Save",  self._save_drawio, "Save  (Ctrl+S)")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
@@ -3345,6 +3374,15 @@ class CameraWireTool:
                 "Add a cross-floor cable drop / riser point: click here, "
                 "then click the map to place it. You'll pick which floors "
                 "it spans and its home floor.")
+        add_text_btn = ttk.Button(
+            toolbar, text="📝 Text", width=8,
+            command=self._start_place_annotation, style="Toolbutton")
+        add_text_btn.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(add_text_btn,
+                "Add a text label / note to the drawing: click here, set the "
+                "text, size and color, then click the map to place it. Labels "
+                "are per-floor, undoable, and right-click to edit. "
+                "(Also under Tools → Add Map Annotation.)")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         # Mode segmented control
@@ -7996,6 +8034,29 @@ class CameraWireTool:
                          f"Drag to move; right-click to edit.")
                 return
 
+            # 0a. Annotation drag — text labels render on top of everything,
+            # so grabbing one wins over the legend/wires/devices beneath it.
+            # Click-drag moves it; a click with no drag falls through to a
+            # no-op release (double-click still opens the editor).
+            ann_hit = self._annotation_at(ix, iy)
+            if ann_hit is not None:
+                cdx, cdy = self._img_to_drawio(ix, iy)
+                self._dragging_annotation = {
+                    "ann": ann_hit,
+                    "off": (float(ann_hit["x"]) - cdx,
+                            float(ann_hit["y"]) - cdy),
+                    "old": (float(ann_hit["x"]), float(ann_hit["y"])),
+                    "moved": False,
+                }
+                try:
+                    self.canvas.config(cursor="fleur")
+                except tk.TclError:
+                    pass
+                self.status_label.config(
+                    text=f"Annotation '{ann_hit.get('text','')}' — drag to "
+                         f"move; double-click to edit.")
+                return
+
             # 0. Legend drag — if the click is inside the legend rectangle
             # AND not on a device (devices on top win), start dragging the
             # legend. This lets users move the legend out of the way.
@@ -8291,6 +8352,20 @@ class CameraWireTool:
             self._schedule_redraw()
             return
 
+        # Annotation repositioning — follow the cursor, keeping the grab
+        # offset so the label doesn't jump to the pointer on first move.
+        if self._dragging_annotation is not None:
+            ix, iy = self._canvas_to_img(event.x, event.y)
+            cdx, cdy = self._img_to_drawio(ix, iy)
+            off = self._dragging_annotation["off"]
+            ann = self._dragging_annotation["ann"]
+            ann["x"] = cdx + off[0]
+            ann["y"] = cdy + off[1]
+            self._dragging_annotation["moved"] = True
+            self._maybe_autopan(event)
+            self._schedule_redraw()
+            return
+
         # FOV rotation: cursor position relative to camera apex sets azimuth
         if self._rotating_fov is not None:
             dev = self._rotating_fov["device"]
@@ -8508,6 +8583,28 @@ class CameraWireTool:
                     f"Camera {dev['id']} aimed {int(new_az)}° ({compass}).",
                     ttl_ms=2500)
             self._refresh_mode_ui()  # restore cursor
+            self._redraw()
+            return
+
+        # Annotation drag finished — push an undoable move if it actually moved.
+        if self._dragging_annotation is not None:
+            drag = self._dragging_annotation
+            self._dragging_annotation = None
+            ann = drag["ann"]
+            old_xy = drag["old"]
+            new_xy = (float(ann["x"]), float(ann["y"]))
+            if (drag.get("moved")
+                    and (abs(old_xy[0] - new_xy[0]) > 0.5
+                         or abs(old_xy[1] - new_xy[1]) > 0.5)):
+                cmd = MoveAnnotationCmd(self, ann, old_xy, new_xy)
+                self.history.append(cmd)   # already applied during drag
+                if len(self.history) > C.HISTORY_LIMIT:
+                    self.history.pop(0)
+                self.future.clear()
+                self._mark_dirty()
+                self._update_undo_redo_state()
+                self._flash_status("Annotation moved. Ctrl+Z to undo.", ttl_ms=2500)
+            self._refresh_mode_ui()  # restore default cursor
             self._redraw()
             return
 
@@ -10145,6 +10242,33 @@ class CameraWireTool:
         self.status_label.config(text="  •  ".join(parts))
 
     # ============================================================ File operations
+    def _convert_cad_drawing(self, src: str) -> str | None:
+        """Rasterize a DXF/SVG into a sibling .drawio and return its path.
+
+        Shows a busy cursor (rendering can take a few seconds on a dense
+        plan) and surfaces any failure as a dialog, returning None so the
+        caller aborts without disturbing the current project."""
+        kind = os.path.splitext(src)[1].lstrip(".").upper()
+        self._flash_status(f"Importing {kind} drawing — rendering…")
+        try:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            return cad_mod.convert_to_drawio(src)
+        except cad_mod.CadImportError as e:
+            log_error(f"CAD import failed: {src}", e)
+            messagebox.showerror(
+                "Couldn't import drawing",
+                f"{src}\n\n{e}\n\nThe current project is untouched.")
+            return None
+        finally:
+            try:
+                self.root.config(cursor="")
+            except tk.TclError:
+                pass
+
     def _file_open(self) -> None:
         if not self._can_navigate_away():
             return
@@ -10152,9 +10276,10 @@ class CameraWireTool:
             title="Open project or drawing",
             initialdir=os.path.dirname(self.project_path),
             filetypes=[("Project or drawing",
-                        f"*{bundle_mod.BUNDLE_EXT} *.drawio"),
+                        f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
                        ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
-                       ("Draw.io files", "*.drawio")])
+                       ("Draw.io files", "*.drawio"),
+                       ("CAD / vector drawing", "*.dxf *.svg")])
         if not path:
             return
         bundle_path: str | None = None
@@ -10172,6 +10297,15 @@ class CameraWireTool:
                 return
             bundle_path = path
             path = drawio
+        elif cad_mod.is_cad_drawing(path):
+            # A DXF/SVG vector drawing → rasterize it into a sibling
+            # .drawio background, then open that like any other drawing.
+            # Conversion doubles as the pre-flight: a failure leaves the
+            # current session intact.
+            converted = self._convert_cad_drawing(path)
+            if not converted:
+                return
+            path = converted
         else:
             # Sanity-check the .drawio BEFORE destroying the current root,
             # so a bad file leaves the session intact.
@@ -10881,7 +11015,7 @@ class CameraWireTool:
 
         ttk.Label(form, text="Color:", width=10).grid(row=2, column=0, sticky=tk.E, pady=4)
         color_row = ttk.Frame(form); color_row.grid(row=2, column=1, sticky=tk.W, padx=4)
-        color_var = tk.StringVar(value="#FFD060")
+        color_var = tk.StringVar(value=ANNOTATION_DEFAULT_COLOR)
         sw = tk.Label(color_row, bg=color_var.get(), width=4, height=1,
                       relief=tk.RAISED, cursor="hand2")
         sw.pack(side=tk.LEFT, padx=(0, 4))
@@ -10913,11 +11047,16 @@ class CameraWireTool:
                     "Invalid size",
                     "Size must be a whole number between 8 and 72.")
                 return
+            # Order matters: _set_mode() runs _reset_action_state(), which
+            # nulls _placing_annotation. So switch mode FIRST, then arm the
+            # pending annotation + sentinel — otherwise the pending state is
+            # wiped before the click and a bogus "__annotation__" *device*
+            # gets placed instead of a text label (and it isn't editable).
+            self._set_mode(Mode.PLACE_DEVICE)   # reuse the cursor / banner
             self._placing_annotation = {
                 "text": text, "color": color_var.get(),
                 "font_size": max(8, min(72, size)),
             }
-            self._set_mode(Mode.PLACE_DEVICE)   # reuse the cursor / banner
             self._place_type = "__annotation__"   # sentinel so _do_place_device knows
             self.status_label.config(
                 text=f"Click on the map to place '{text}' annotation. Esc cancels.")
@@ -10962,7 +11101,13 @@ class CameraWireTool:
             fs = max(8, int(base_fs
                              * self.zoom * self.dx_scale
                              * self._alignment_scale()))
-            color = ann.get("color", "#FFD060") or "#FFD060"
+            color = ann.get("color", ANNOTATION_DEFAULT_COLOR) or ANNOTATION_DEFAULT_COLOR
+            # The label box adapts to the text color so it reads on ANY
+            # background: a light/pale text gets a dark box, a dark text
+            # gets a white box (with the text color as a thin border so it
+            # still looks like a tag). Without this, the old hard-coded dark
+            # box looked wrong sitting on a white architectural plan.
+            box_fill = "#1a1a1a" if _text_for_bg(color) == "#000000" else "#FFFFFF"
             t_id = self.canvas.create_text(
                 cx, cy, text=text, fill=color,
                 font=("Segoe UI", fs, "bold"),
@@ -10971,7 +11116,7 @@ class CameraWireTool:
             if bbox:
                 self.canvas.create_rectangle(
                     bbox[0]-4, bbox[1]-2, bbox[2]+4, bbox[3]+2,
-                    fill="#1a1a1a", outline=color, width=1,
+                    fill=box_fill, outline=color, width=1,
                     tags=("annotation", "anno_bg"),
                 )
                 # Re-raise the text above the background
@@ -11044,7 +11189,7 @@ class CameraWireTool:
                     ).grid(row=1, column=1, sticky=tk.W, padx=4)
         ttk.Label(form, text="Color:", width=8).grid(row=2, column=0, sticky=tk.E, pady=4)
         color_row = ttk.Frame(form); color_row.grid(row=2, column=1, sticky=tk.W, padx=4)
-        color_var = tk.StringVar(value=ann.get("color", "#FFD060"))
+        color_var = tk.StringVar(value=ann.get("color", ANNOTATION_DEFAULT_COLOR))
         sw = tk.Label(color_row, bg=color_var.get(), width=4, height=1,
                       relief=tk.RAISED, cursor="hand2")
         sw.pack(side=tk.LEFT, padx=(0, 4))
@@ -11478,14 +11623,17 @@ class CameraWireTool:
         """Double-click → open the most-relevant editor for whatever's
         under the cursor. Falls through to single-click behavior on
         empty canvas."""
-        # Don't fight other modes — only act in MOVE mode
-        if self.mode != Mode.MOVE:
-            return
         ix, iy = self._canvas_to_img(event.x, event.y)
-        # 1) Annotation
+        # 1) Annotation — editable in ANY mode (a text label is an overlay;
+        # double-clicking it to tweak text/size/color shouldn't require
+        # being in Move mode, which is what tripped the user up).
         ann = self._annotation_at(ix, iy)
         if ann is not None:
             self._edit_annotation(ann)
+            return
+        # Device/wire editors stay MOVE-only so they don't fight the
+        # Wire/Calibrate interactions.
+        if self.mode != Mode.MOVE:
             return
         # 2) Device
         dev = self._device_at(ix, iy)
@@ -11921,7 +12069,7 @@ class CameraWireTool:
                     increment=2,
                     ).pack(side=tk.LEFT, padx=4)
         ttk.Label(opts, text="  Color:").pack(side=tk.LEFT)
-        color_var = tk.StringVar(value="#FFD060")
+        color_var = tk.StringVar(value=ANNOTATION_DEFAULT_COLOR)
         sw = tk.Label(opts, bg=color_var.get(), width=4, height=1,
                       relief=tk.RAISED, cursor="hand2")
         sw.pack(side=tk.LEFT, padx=4)
@@ -14224,6 +14372,7 @@ class CameraWireTool:
         self._multi_drag_starts = {}
         self._dragging_waypoint = None
         self._dragging_legend = None
+        self._dragging_annotation = None
         self._rotating_fov = None
         self._placing_drop = False
         self._dragging_drop = None
@@ -14433,6 +14582,34 @@ class CameraWireTool:
                  else dict(mf_mod.IDENTITY_ALIGNMENT))
         return self._ghost_bg_cache[floor.id], align
 
+    def _enable_dialog_maximize(self, win: tk.Toplevel) -> None:
+        """Re-add the native maximize box to a transient Toplevel.
+
+        On Windows, calling `.transient()` strips a dialog's minimize/
+        maximize boxes, so the user can't maximize it from the title bar.
+        Re-set the window style to include WS_MAXIMIZEBOX and refresh the
+        frame so the button reappears (and double-click-to-maximize +
+        Aero Snap start working). No-op off Windows — those WMs already
+        allow maximizing a transient — and a best-effort no-op if the
+        style poke fails for any reason."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            GWL_STYLE = -16
+            WS_MAXIMIZEBOX = 0x00010000
+            win.update_idletasks()
+            user32 = ctypes.windll.user32
+            # Tk's caption window is the PARENT of the widget HWND.
+            hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_MAXIMIZEBOX)
+            # SWP_NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED — repaint the caption
+            # with the new button without resizing/moving the window.
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+        except Exception as e:   # platform/ctypes quirks must not break the dialog
+            log_error("Could not enable dialog maximize box", e)
+
     def _open_drag_align_dialog(self) -> None:
         """Visual drag-and-scale alignment. Shows the reference floor as
         a grey ghosted underlay and the floor-being-aligned as an
@@ -14508,6 +14685,18 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.title(f"Drag-align {active.id} to reference")
         dlg.geometry("1100x780")
+        dlg.minsize(720, 520)
+        # transient() above removed the maximize box on Windows — put it
+        # back so the user can maximize / Aero-Snap the dialog. F11 also
+        # toggles, as a keyboard fallback.
+        self._enable_dialog_maximize(dlg)
+
+        def _toggle_maximize(_e=None):
+            try:
+                dlg.state("normal" if dlg.state() == "zoomed" else "zoomed")
+            except tk.TclError:
+                pass
+        dlg.bind("<F11>", _toggle_maximize)
 
         # Two explicit selectors so the user always knows which floor
         # will be transformed and which stays as the fixed background.
@@ -14551,9 +14740,10 @@ class CameraWireTool:
         help_lbl = ttk.Label(dlg, text=
             "Only the ORANGE floor gets transformed — the grey reference "
             "stays as the fixed coordinate frame. LEFT drag: move orange. "
-            "RIGHT drag: pan the view. WHEEL: zoom workspace. SHIFT/CTRL + "
-            "wheel: resize the orange floor. Spinboxes on the right give "
-            "precise values. Hit Apply to save.",
+            "RIGHT drag (or the scrollbars): pan the view. WHEEL: zoom "
+            "workspace. SHIFT/CTRL + wheel: resize the orange floor. "
+            "Spinboxes on the right give precise values. Maximize the "
+            "window (or F11) for more room. Hit Apply to save.",
             font=("Segoe UI", 9), foreground="#888888",
             wraplength=1060, justify=tk.LEFT)
         help_lbl.pack(anchor=tk.W, padx=10, pady=(2, 4))
@@ -14566,8 +14756,18 @@ class CameraWireTool:
         canvas = tk.Canvas(body, bg="#202020", highlightthickness=0,
                            cursor="fleur")
         canvas.grid(row=0, column=0, sticky="nsew")
+        # Drag scrollbars to pan the (often huge) floor-plan preview — an
+        # alternative to right-drag panning. The canvas is hand-painted
+        # (no Tk scrollregion), so these are wired to the custom paint via
+        # _on_xscroll/_on_yscroll (drive view.ox/oy) and kept in sync each
+        # frame by _update_scrollbars(). Commands are attached lower down,
+        # once those handlers exist.
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL)
+        xscroll.grid(row=1, column=0, sticky="ew")
         panel = ttk.Frame(body)
-        panel.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        panel.grid(row=0, column=2, rowspan=2, sticky="ns", padx=(8, 0))
 
         # The dialog operates on the floor chosen in target_combo —
         # captured here as a mutable state so the combo callback can
@@ -14753,6 +14953,42 @@ class CameraWireTool:
                                 fill="#ff5050", width=1)
             canvas.create_line(ox, oy - 8, ox, oy + 8,
                                 fill="#ff5050", width=1)
+            _update_scrollbars()
+
+        def _scroll_world_bounds():
+            """Pan-independent extents (canvas pixels, ignoring ox/oy) of
+            both layers at the current zoom + draft transform, padded by
+            one viewport on every side so content can always be scrolled
+            fully into view. Returns (X0, Y0, X1, Y1)."""
+            z = view["zoom"]
+            s = draft["scale"]
+            rw = held["ref_raw"].width * z
+            rh = held["ref_raw"].height * z
+            ax0 = draft["tx"] * z
+            ay0 = draft["ty"] * z
+            ax1 = ax0 + held["act_raw"].width * s * z
+            ay1 = ay0 + held["act_raw"].height * s * z
+            x0 = min(0.0, ax0); y0 = min(0.0, ay0)
+            x1 = max(rw, ax1);  y1 = max(rh, ay1)
+            cw = canvas.winfo_width() or 900
+            ch = canvas.winfo_height() or 640
+            return x0 - cw, y0 - ch, x1 + cw, y1 + ch
+
+        def _update_scrollbars():
+            """Reflect the current pan (view.ox/oy) in the scrollbar thumbs.
+            Viewport in world coords is [-ox, -ox+cw] × [-oy, -oy+ch]."""
+            X0, Y0, X1, Y1 = _scroll_world_bounds()
+            cw = canvas.winfo_width() or 900
+            ch = canvas.winfo_height() or 640
+            ox2, oy2 = view["ox"], view["oy"]
+            xr = max(1.0, X1 - X0); yr = max(1.0, Y1 - Y0)
+            fx0 = (-ox2 - X0) / xr; fx1 = (-ox2 + cw - X0) / xr
+            fy0 = (-oy2 - Y0) / yr; fy1 = (-oy2 + ch - Y0) / yr
+            try:
+                xscroll.set(max(0.0, min(1.0, fx0)), max(0.0, min(1.0, fx1)))
+                yscroll.set(max(0.0, min(1.0, fy0)), max(0.0, min(1.0, fy1)))
+            except tk.TclError:
+                pass
 
         def _schedule_redraw(interactive=True):
             """Coalesce rapid wheel/drag events into one redraw via
@@ -14869,6 +15105,40 @@ class CameraWireTool:
         canvas.bind("<Configure>",
                     lambda _e: (view.__setitem__("_initialized", False),
                                  _schedule_redraw(interactive=False)))
+
+        # ---- Scrollbar handlers (Tk scroll protocol: ("moveto", frac) or
+        # ("scroll", n, "units"|"pages")). Both drive the preview pan
+        # offset and redraw. ----
+        def _on_xscroll(*args):
+            if not args:
+                return
+            X0, _Y0, X1, _Y1 = _scroll_world_bounds()
+            cw = canvas.winfo_width() or 900
+            xr = max(1.0, X1 - X0)
+            if args[0] == "moveto":
+                view["ox"] = -(X0 + float(args[1]) * xr)
+            elif args[0] == "scroll":
+                unit = args[2] if len(args) > 2 else "units"
+                step = cw * 0.9 if unit == "pages" else 60.0
+                view["ox"] -= float(args[1]) * step
+            _schedule_redraw(interactive=False)
+
+        def _on_yscroll(*args):
+            if not args:
+                return
+            _X0, Y0, _X1, Y1 = _scroll_world_bounds()
+            ch = canvas.winfo_height() or 640
+            yr = max(1.0, Y1 - Y0)
+            if args[0] == "moveto":
+                view["oy"] = -(Y0 + float(args[1]) * yr)
+            elif args[0] == "scroll":
+                unit = args[2] if len(args) > 2 else "units"
+                step = ch * 0.9 if unit == "pages" else 60.0
+                view["oy"] -= float(args[1]) * step
+            _schedule_redraw(interactive=False)
+
+        xscroll.config(command=_on_xscroll)
+        yscroll.config(command=_on_yscroll)
 
         # ---- Control panel ----
         ttk.Label(panel, text="Alignment", font=("Segoe UI", 10, "bold"),
@@ -15656,13 +15926,21 @@ class CameraWireTool:
                     pass
             self._redraw()
 
-    def _render_map_image(self):
+    def _render_map_image(self, *, symbol_scale: float = 1.0):
         """Render the whole map OFF-SCREEN onto a copy of the full-resolution
         floor-plan image, independent of the on-screen viewport — so the
         export is as detailed as the source drawing (symbols stay readable
         when zoomed). Honors the current visibility flags (_hidden_types,
         _show_wires, _show_fov, _show_legend, _show_drops, _show_device_ids).
-        Returns a PIL.Image (RGB) or None if there's no background image."""
+
+        `symbol_scale` enlarges (or shrinks) the device symbols + their
+        labels about their own centers without moving the devices — used by
+        the PDF export so symbols read well on a printed page. Returns a
+        PIL.Image (RGB) or None if there's no background image."""
+        try:
+            symbol_scale = max(0.25, min(6.0, float(symbol_scale)))
+        except (TypeError, ValueError):
+            symbol_scale = 1.0
         if self.bg_image is None:
             return None
         from PIL import Image, ImageDraw, ImageFont, ImageColor
@@ -15741,6 +16019,44 @@ class CameraWireTool:
                 dr.ellipse([cx - r, cy - r, cx + r, cy + r],
                            fill=fill, outline=oc, width=ow)
 
+        # ---- If the Symbols/legend box sits partly or fully outside the
+        # floor-plan image, grow the canvas with white space so the legend
+        # isn't clipped at the page edge. The PDF export nudges the legend
+        # down (+250) which, on a tightly-cropped plan, can push it off the
+        # bottom — and an imported PDF/DXF/SVG has no spare margin at all.
+        # Pad only the sides that overflow, paste the original plan at the
+        # resulting offset, and shift every drawn coordinate by (OX, OY).
+        OX = OY = 0
+        if self._show_legend.get() and self.legend_box:
+            _lb = self.legend_box
+            _lbx, _lby = self._drawio_to_img(_lb["x"], _lb["y"])
+            _lbw = _lb["w"] * self.dx_scale
+            _lcodes = [c for c in sorted(self.symbol_types.keys())
+                       if c not in self._hidden_types]
+            _lneed_h = (len(_lcodes) * C.LEGEND_ROW_H + 50) * self.dy_scale
+            _m = max(8, round(W / 200))   # breathing room on padded sides
+            _pl = int(math.ceil(-_lbx + _m)) if _lbx < 0 else 0
+            _pt = int(math.ceil(-_lby + _m)) if _lby < 0 else 0
+            _pr = int(math.ceil((_lbx + _lbw) - W + _m)) if (_lbx + _lbw) > W else 0
+            _pb = int(math.ceil((_lby + _lneed_h) - H + _m)) if (_lby + _lneed_h) > H else 0
+            if _pl or _pt or _pr or _pb:
+                _nw, _nh = W + _pl + _pr, H + _pt + _pb
+                _expanded = Image.new("RGBA", (_nw, _nh), (255, 255, 255, 255))
+                _expanded.paste(base, (_pl, _pt))
+                base = _expanded
+                W, H = _nw, _nh
+                OX, OY = _pl, _pt
+
+        def d2i(dx, dy):
+            """drawio→image, shifted by any white-space padding added above."""
+            ix, iy = self._drawio_to_img(dx, dy)
+            return ix + OX, iy + OY
+
+        def w2i(wx, wy):
+            """world→image, shifted by any white-space padding added above."""
+            ix, iy = self._world_to_img(wx, wy)
+            return ix + OX, iy + OY
+
         # ---- FOV cones first (semi-transparent, UNDER everything else).
         if self._show_fov.get():
             eff = self._effective_scale_factor()
@@ -15765,7 +16081,7 @@ class CameraWireTool:
                     f = self._model_fov_for_device(d) or default_fov_for_type(d["type"])
                 elif not f.get("show", True):
                     continue
-                apex_ix, apex_iy = self._drawio_to_img(
+                apex_ix, apex_iy = d2i(
                     d["x"] + d["w"] / 2, d["y"] + d["h"] / 2)
                 channels = self._device_channels(d, f)
                 n_ch = len(channels)
@@ -15841,7 +16157,7 @@ class CameraWireTool:
                 if isinstance(ct, dict):
                     col = ct.get("color", col)
                 try:
-                    draw.line([(float(p[0]), float(p[1])) for p in pts],
+                    draw.line([(float(p[0]) + OX, float(p[1]) + OY) for p in pts],
                               fill=rgb(col), width=wlw, joint="curve")
                 except (TypeError, ValueError, IndexError):
                     continue
@@ -15849,7 +16165,7 @@ class CameraWireTool:
         # ---- Legend (under devices), only the shown types.
         if self._show_legend.get() and self.legend_box:
             box = self.legend_box
-            bx, by = self._drawio_to_img(box["x"], box["y"])
+            bx, by = d2i(box["x"], box["y"])
             bw = box["w"] * self.dx_scale
             codes = [c for c in sorted(self.symbol_types.keys())
                      if c not in self._hidden_types]
@@ -15863,7 +16179,7 @@ class CameraWireTool:
                       font=font(int(row_px * 0.7), bold=True), anchor="ma")
             for i, code in enumerate(codes):
                 info = self._safe_sym(code)
-                icx, icy = self._drawio_to_img(
+                icx, icy = d2i(
                     box["x"] + 20, box["y"] + 38 + i * C.LEGEND_ROW_H)
                 iwi = 22 * self.dx_scale; ihi = 22 * self.dy_scale
                 ccx, ccy = icx + iwi / 2, icy + ihi / 2
@@ -15872,7 +16188,7 @@ class CameraWireTool:
                           "#0000FF", max(1, round(W / 2500)))
                 draw.text((ccx, ccy), code, fill=(0, 0, 0),
                           font=font(int(iwi * 0.5), bold=True), anchor="mm")
-                tcx, tcy = self._drawio_to_img(
+                tcx, tcy = d2i(
                     box["x"] + 55, box["y"] + 38 + i * C.LEGEND_ROW_H)
                 count = sum(1 for dd in self.devices
                             if isinstance(dd, dict) and dd.get("type") == code)
@@ -15893,9 +16209,13 @@ class CameraWireTool:
             if dtype in self._hidden_types or self._hidden_by_unwired_filter(d):
                 continue
             info = self._safe_sym(dtype)
-            ix, iy = self._drawio_to_img(dx_, dy_)
-            iwi = dw_ * self.dx_scale; ihi = dh_ * self.dy_scale
-            ccx, ccy = ix + iwi / 2, iy + ihi / 2
+            # Center first, then size — so symbol_scale enlarges the symbol
+            # about the device's true center instead of shifting it by the
+            # top-left corner.
+            ccx, ccy = d2i(dx_ + dw_ / 2, dy_ + dh_ / 2)
+            iwi = dw_ * self.dx_scale * symbol_scale
+            ihi = dh_ * self.dy_scale * symbol_scale
+            ix, iy = ccx - iwi / 2, ccy - ihi / 2
             try:
                 rot = float(d.get("rotation", 0) or 0)
             except (TypeError, ValueError):
@@ -15915,12 +16235,44 @@ class CameraWireTool:
             rr = max(8, round(W / 250))
             for dp in self._drops_on_active_floor():
                 try:
-                    px, py = self._world_to_img(float(dp["x"]), float(dp["y"]))
+                    px, py = w2i(float(dp["x"]), float(dp["y"]))
                 except (KeyError, TypeError, ValueError):
                     continue
                 fill = "#23c6c6" if dp.get("home_floor") == active else "#f0a830"
                 draw.polygon([(px, py - rr), (px + rr, py), (px, py + rr),
                               (px - rr, py)], fill=rgb(fill), outline=(6, 48, 58))
+
+        # ---- Map annotations (text labels) — on top of everything, mirroring
+        # the on-screen styling (text color + contrasting label box) so the
+        # labels the user placed actually appear on the exported page. Sized
+        # proportionally via dx_scale (same basis as the device symbols).
+        for ann in self.annotations:
+            if not isinstance(ann, dict):
+                continue
+            atext = ann.get("text", "")
+            if not isinstance(atext, str) or not atext.strip():
+                continue
+            try:
+                aax = float(ann["x"]); aay = float(ann["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            acx, acy = d2i(aax, aay)
+            try:
+                a_base = float(ann.get("font_size", 16))
+            except (TypeError, ValueError):
+                a_base = 16.0
+            afs = max(10, int(a_base * self.dx_scale))
+            acolor = ann.get("color", ANNOTATION_DEFAULT_COLOR) or ANNOTATION_DEFAULT_COLOR
+            afont = font(afs, bold=True)
+            tb = draw.textbbox((acx, acy), atext, font=afont, anchor="mm")
+            # Light text → dark box; dark text → white box (matches canvas).
+            box_fill = ((26, 26, 26) if _text_for_bg(acolor) == "#000000"
+                        else (255, 255, 255))
+            pad_x = max(2, afs // 5); pad_y = max(1, afs // 8)
+            draw.rectangle([tb[0] - pad_x, tb[1] - pad_y, tb[2] + pad_x, tb[3] + pad_y],
+                           fill=box_fill, outline=rgb(acolor),
+                           width=max(1, round(W / 2500)))
+            draw.text((acx, acy), atext, fill=rgb(acolor), font=afont, anchor="mm")
 
         return base.convert("RGB")
 
@@ -16110,6 +16462,22 @@ class CameraWireTool:
             ttk.Checkbutton(mp_frame, text=label, variable=v).pack(
                 anchor=tk.W, padx=8, pady=1)
 
+        # --- Floors to export. Each checked floor renders the full set of
+        # checked map views above, so you can export several floors at once.
+        # Only shown for multi-floor projects; default = current floor only.
+        floor_vars: list[tuple] = []   # (BooleanVar, floor_id, floor_name)
+        if self._project and len(self._project.floors) > 1:
+            ff = ttk.LabelFrame(dlg, text="Floors to export")
+            ff.pack(fill=tk.X, padx=12, pady=4)
+            active_id = self._project.active_floor
+            fr = ttk.Frame(ff); fr.pack(fill=tk.X, padx=4, pady=4)
+            for n, fl in enumerate(self._project.floors):
+                fv = tk.BooleanVar(value=(fl.id == active_id))
+                floor_vars.append((fv, fl.id, fl.name))
+                ttk.Checkbutton(fr, text=f"{fl.id} — {fl.name}",
+                                variable=fv).grid(row=n // 2, column=n % 2,
+                                                  sticky=tk.W, padx=6, pady=1)
+
         opt_frame = ttk.LabelFrame(dlg, text="Shared map options")
         opt_frame.pack(fill=tk.X, padx=12, pady=4)
         hide_legend = tk.BooleanVar(value=False)
@@ -16193,13 +16561,64 @@ class CameraWireTool:
                                 variable=v).grid(row=n // 2, column=n % 2,
                                                  sticky=tk.W, padx=4, pady=1)
 
+        # --- Render options: symbol size + the page caption (toggle + edit).
+        ro = ttk.LabelFrame(dlg, text="Render options")
+        ro.pack(fill=tk.X, padx=12, pady=4)
+        srow = ttk.Frame(ro); srow.pack(fill=tk.X, padx=8, pady=(6, 2))
+        ttk.Label(srow, text="Symbol size:").pack(side=tk.LEFT)
+        symbol_scale_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(srow, textvariable=symbol_scale_var, from_=0.5, to=4.0,
+                    increment=0.25, width=6, format="%.2f").pack(
+            side=tk.LEFT, padx=(6, 4))
+        ttk.Label(srow, text="×   (1.0 = original; raise to enlarge symbols)",
+                  foreground="#888888").pack(side=tk.LEFT)
+        crow = ttk.Frame(ro); crow.pack(fill=tk.X, padx=8, pady=(2, 6))
+        caption_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(crow, text="Page caption (top-left):",
+                        variable=caption_on).pack(side=tk.LEFT)
+        default_caption = ((self._project.project_name
+                            if self._project and self._project.project_name else "")
+                           or os.path.splitext(os.path.basename(self.drawio_path))[0])
+        caption_var = tk.StringVar(value=default_caption)
+        cap_entry = ttk.Entry(crow, textvariable=caption_var, width=34)
+        cap_entry.pack(side=tk.LEFT, padx=(6, 0))
+        def _sync_cap_state(*_):
+            cap_entry.configure(
+                state=("normal" if caption_on.get() else "disabled"))
+        caption_on.trace_add("write", _sync_cap_state)
+
         inc_summary = tk.BooleanVar(value=True)
-        rep_frame = ttk.LabelFrame(dlg, text="Summary report")
+        rep_frame = ttk.LabelFrame(dlg, text="Summary report (last page)")
         rep_frame.pack(fill=tk.X, padx=12, pady=4)
         ttk.Checkbutton(
             rep_frame,
-            text="Append one-page summary (BOM, camera models, wire footage)",
-            variable=inc_summary).pack(anchor=tk.W, padx=8, pady=6)
+            text="Append one-page summary",
+            variable=inc_summary).pack(anchor=tk.W, padx=8, pady=(6, 0))
+        # Advanced: choose what goes on the summary. The cable BOM is also
+        # auto-skipped when the sheet has no wire, regardless of this toggle.
+        sum_breakdown = tk.BooleanVar(value=True)
+        sum_cable = tk.BooleanVar(value=True)
+        sum_models = tk.BooleanVar(value=True)
+        adv = ttk.Frame(rep_frame); adv.pack(fill=tk.X, padx=26, pady=(0, 6))
+        ttk.Label(adv, text="Include on summary:",
+                  foreground="#888888").grid(row=0, column=0, columnspan=3,
+                                             sticky=tk.W, pady=(0, 1))
+        adv_cbs = [
+            ttk.Checkbutton(adv, text="Device breakdown by type",
+                            variable=sum_breakdown),
+            ttk.Checkbutton(adv, text="Cable / wire BOM (only if wired)",
+                            variable=sum_cable),
+            ttk.Checkbutton(adv, text="Camera model hardware",
+                            variable=sum_models),
+        ]
+        for i, cb in enumerate(adv_cbs):
+            cb.grid(row=1, column=i, sticky=tk.W, padx=(0, 10), pady=1)
+
+        def _sync_summary_opts(*_):
+            st = "normal" if inc_summary.get() else "disabled"
+            for cb in adv_cbs:
+                cb.configure(state=st)
+        inc_summary.trace_add("write", _sync_summary_opts)
 
         btns = ttk.Frame(dlg)
         btns.pack(fill=tk.X, padx=12, pady=(6, 12))
@@ -16213,11 +16632,44 @@ class CameraWireTool:
                     "Pick at least one map view, the summary, or both.")
                 return
             hide_types = {tc for tc, v in type_vars.items() if not v.get()}
+            # Floors to export — default to the active floor when the project
+            # is single-floor (no checkboxes shown) or nothing was ticked.
+            floor_ids = [fid for (fv, fid, _n) in floor_vars if fv.get()]
+            if not floor_ids and self._project:
+                floor_ids = [self._project.active_floor]
+            try:
+                sym_scale = float(symbol_scale_var.get())
+            except (tk.TclError, ValueError):
+                sym_scale = 1.0
+            cap_text = caption_var.get().strip() if caption_on.get() else ""
+            summary_options = {
+                "device_breakdown": sum_breakdown.get(),
+                "cable_bom": sum_cable.get(),
+                "camera_models": sum_models.get(),
+            }
             dlg.destroy()
-            base = os.path.splitext(os.path.basename(self.drawio_path))[0]
+            # Default filename: project base + a floor tag that reflects the
+            # selection (all / multiple / the single floor id) — instead of
+            # the active floor's drawio name, which always read "Floor1".
+            if self._bundle_path:
+                proj_base = os.path.splitext(
+                    os.path.basename(self._bundle_path))[0]
+            elif self._project and self._project.project_name:
+                proj_base = self._project.project_name
+            else:
+                proj_base = os.path.splitext(
+                    os.path.basename(self.drawio_path))[0]
+            total_floors = len(self._project.floors) if self._project else 1
+            if len(floor_ids) <= 1:
+                floor_tag = floor_ids[0] if floor_ids else "floor"
+            elif len(floor_ids) >= total_floors:
+                floor_tag = "all"
+            else:
+                floor_tag = "multiple"
+            initial = f"{proj_base}_{floor_tag}_export.pdf"
             path = filedialog.asksaveasfilename(
                 title="Export to PDF", defaultextension=".pdf",
-                initialfile=f"{base}_export.pdf",
+                initialfile=initial,
                 filetypes=[("PDF", "*.pdf")])
             if not path:
                 return
@@ -16228,6 +16680,10 @@ class CameraWireTool:
                 hide_types=hide_types,
                 hide_legend=hide_legend.get(),
                 hide_drops=hide_drops.get(),
+                floor_ids=floor_ids,
+                symbol_scale=sym_scale,
+                caption_text=cap_text,
+                summary_options=summary_options,
             )
 
         ttk.Button(btns, text="Export PDF", command=_do_export).pack(side=tk.LEFT)
@@ -16237,10 +16693,16 @@ class CameraWireTool:
 
     def _run_pdf_map_export(self, path: str, *, page_specs: list,
                             include_summary: bool, hide_types: set,
-                            hide_legend: bool, hide_drops: bool) -> None:
+                            hide_legend: bool, hide_drops: bool,
+                            floor_ids: list | None = None,
+                            symbol_scale: float = 1.0,
+                            caption_text: str = "",
+                            summary_options: dict | None = None) -> None:
         # Each page is rendered OFF-SCREEN at the floor-plan's native
-        # resolution (see _render_map_image) — no viewport/window juggling, so
-        # the only state we touch is the visibility flags, restored in finally.
+        # resolution (see _render_map_image). For a multi-floor export we
+        # walk the selected floors with _switch_floor (which swaps the whole
+        # drawing state in place), render each one's pages, then switch back
+        # to where the user was. Visibility flags are restored in finally.
         saved = {
             "hidden": set(self._hidden_types),
             "wires": self._show_wires.get(),
@@ -16250,6 +16712,24 @@ class CameraWireTool:
             "only_sel_fov": self._show_only_selected_fov.get(),
             "legend_box": dict(self.legend_box) if self.legend_box else None,
         }
+        orig_active = self._project.active_floor if self._project else None
+        # Resolve the floor list (de-duped, order preserved); default to the
+        # floor the user is on.
+        if not floor_ids:
+            floor_ids = [orig_active] if orig_active else [None]
+        _seen: set = set()
+        floor_ids = [f for f in floor_ids if not (f in _seen or _seen.add(f))]
+        multi = len([f for f in floor_ids if f]) > 1
+
+        def _floor_name(fid):
+            if self._project and fid:
+                fl = self._project.get_floor(fid)
+                if fl is not None:
+                    return fl.name or fid
+            return fid or ""
+
+        # Clear any wire-in-progress so _switch_floor doesn't prompt mid-export.
+        self.current_wire_points = []
 
         map_pages: list[dict] = []
         try:
@@ -16258,23 +16738,58 @@ class CameraWireTool:
                 self._show_legend.set(not hide_legend)
                 self._show_drops.set(not hide_drops)
                 self._show_only_selected_fov.set(False)  # export ALL cones
-                # Nudge the (now-shorter) legend down so it isn't floating high
-                # with empty space beneath it. Export-only; restored after.
-                if self.legend_box:
-                    self.legend_box = {**self.legend_box,
-                                       "y": self.legend_box.get("y", 0) + 250}
-
-                for spec in page_specs:
-                    self._show_wires.set(bool(spec["show_wires"]))
-                    self._show_fov.set(bool(spec["show_fov"]))
-                    img = self._render_map_image()
-                    if img is None:
-                        raise RuntimeError(
-                            "No floor-plan image is loaded to render.")
-                    fd, p = tempfile.mkstemp(suffix=".png", prefix="cwt_map_")
-                    os.close(fd)
-                    img.save(p)
-                    map_pages.append({"image": p, "caption": spec["label"]})
+                for fid in floor_ids:
+                    if (self._project and fid
+                            and fid != self._project.active_floor):
+                        self._switch_floor(fid)
+                    # Per-page caption: the user's editable text, with the
+                    # floor name appended when exporting more than one floor
+                    # so the pages stay identifiable.
+                    if caption_text and multi:
+                        page_caption = f"{caption_text} — {_floor_name(fid)}"
+                    else:
+                        page_caption = caption_text
+                    # Nudge THIS floor's legend down so it isn't floating high
+                    # with empty space beneath it. Restored after this floor.
+                    floor_legend = dict(self.legend_box) if self.legend_box else None
+                    if self.legend_box:
+                        self.legend_box = {**self.legend_box,
+                                           "y": self.legend_box.get("y", 0) + 250}
+                    # Collapse views that would render IDENTICALLY for this
+                    # floor — e.g. with no wire, "Devices + wires" and
+                    # "Devices only (no wires)" look the same, so don't emit
+                    # the same page twice. A view's effective look depends on
+                    # whether the wire/FOV it toggles actually exists here.
+                    floor_has_wire = any(
+                        isinstance(w, dict) and w.get("points")
+                        for w in self.wire_routes)
+                    floor_has_cam = any(
+                        isinstance(d, dict) and self._is_camera_type(d.get("type"))
+                        for d in self.devices)
+                    seen_sig: set = set()
+                    floor_specs = []
+                    for spec in page_specs:
+                        sig = (bool(spec["show_wires"]) and floor_has_wire,
+                               bool(spec["show_fov"]) and floor_has_cam)
+                        if sig in seen_sig:
+                            continue
+                        seen_sig.add(sig)
+                        floor_specs.append(spec)
+                    try:
+                        for spec in floor_specs:
+                            self._show_wires.set(bool(spec["show_wires"]))
+                            self._show_fov.set(bool(spec["show_fov"]))
+                            img = self._render_map_image(symbol_scale=symbol_scale)
+                            if img is None:
+                                raise RuntimeError(
+                                    "No floor-plan image is loaded to render.")
+                            fd, p = tempfile.mkstemp(suffix=".png", prefix="cwt_map_")
+                            os.close(fd)
+                            img.save(p)
+                            map_pages.append({"image": p, "caption": page_caption})
+                    finally:
+                        if floor_legend is not None:
+                            self.legend_box = floor_legend
         finally:
             self._hidden_types = saved["hidden"]
             self._show_wires.set(saved["wires"])
@@ -16282,6 +16797,10 @@ class CameraWireTool:
             self._show_drops.set(saved["drops"])
             self._show_fov.set(saved["fov"])
             self._show_only_selected_fov.set(saved["only_sel_fov"])
+            # Return to the floor the user started on.
+            if (self._project and orig_active
+                    and self._project.active_floor != orig_active):
+                self._switch_floor(orig_active)
             if saved["legend_box"] is not None:
                 self.legend_box = saved["legend_box"]
             self._redraw()
@@ -16301,6 +16820,7 @@ class CameraWireTool:
                 bom_report=self._build_bom_report(),
                 model_lines=self._model_inventory(),
                 include_summary=include_summary,
+                summary_options=summary_options,
                 floor_label=(self._project.active_floor if self._project else None),
                 scale_factor=self.scale_factor,
                 format_length=self._format_length,
@@ -16804,13 +17324,22 @@ def main() -> None:
         chosen = filedialog.askopenfilename(
             title="Open Camera Measurement project",
             initialdir=initial,
-            filetypes=[("Project or drawing", f"*{bundle_mod.BUNDLE_EXT} *.drawio"),
+            filetypes=[("Project or drawing",
+                        f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
                        ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
-                       ("Draw.io files", "*.drawio")])
+                       ("Draw.io files", "*.drawio"),
+                       ("CAD / vector drawing", "*.dxf *.svg")])
         if not chosen:
             sys.exit(0)
         if chosen.lower().endswith(bundle_mod.BUNDLE_EXT):
             bundle_path = chosen
+        elif cad_mod.is_cad_drawing(chosen):
+            try:
+                drawio_path = cad_mod.convert_to_drawio(chosen)
+            except cad_mod.CadImportError as e:
+                messagebox.showerror("Couldn't import drawing",
+                                     f"{chosen}\n\n{e}")
+                sys.exit(1)
         else:
             drawio_path = chosen
 

@@ -1,0 +1,8 @@
+# Treat project binaries as binary so Git never applies line-ending
+# conversion to them (CRLF normalization would corrupt these).
+*.pdf  binary
+*.zsmt binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.drawio -text
