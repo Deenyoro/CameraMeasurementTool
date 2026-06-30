@@ -16019,14 +16019,15 @@ class CameraWireTool:
                 dr.ellipse([cx - r, cy - r, cx + r, cy + r],
                            fill=fill, outline=oc, width=ow)
 
-        # ---- If the Symbols/legend box sits partly or fully outside the
-        # floor-plan image, grow the canvas with white space so the legend
-        # isn't clipped at the page edge. The PDF export nudges the legend
-        # down (+250) which, on a tightly-cropped plan, can push it off the
-        # bottom — and an imported PDF/DXF/SVG has no spare margin at all.
-        # Pad only the sides that overflow, paste the original plan at the
-        # resulting offset, and shift every drawn coordinate by (OX, OY).
+        # ---- If the Symbols/legend box OR any annotation sits partly/fully
+        # outside the floor-plan image, grow the canvas with white space so
+        # nothing is clipped at the page edge. (The PDF export nudges the
+        # legend down +250 and labels are often parked off the plan — e.g. a
+        # 'Missing:' list to the left of the legend.) We union every must-show
+        # element's image-space bounds, pad the overflowing sides, paste the
+        # plan at the offset, and shift every drawn coordinate by (OX, OY).
         OX = OY = 0
+        _x0, _y0, _x1, _y1 = 0.0, 0.0, float(W), float(H)
         if self._show_legend.get() and self.legend_box:
             _lb = self.legend_box
             _lbx, _lby = self._drawio_to_img(_lb["x"], _lb["y"])
@@ -16034,18 +16035,45 @@ class CameraWireTool:
             _lcodes = [c for c in sorted(self.symbol_types.keys())
                        if c not in self._hidden_types]
             _lneed_h = (len(_lcodes) * C.LEGEND_ROW_H + 50) * self.dy_scale
-            _m = max(8, round(W / 200))   # breathing room on padded sides
-            _pl = int(math.ceil(-_lbx + _m)) if _lbx < 0 else 0
-            _pt = int(math.ceil(-_lby + _m)) if _lby < 0 else 0
-            _pr = int(math.ceil((_lbx + _lbw) - W + _m)) if (_lbx + _lbw) > W else 0
-            _pb = int(math.ceil((_lby + _lneed_h) - H + _m)) if (_lby + _lneed_h) > H else 0
-            if _pl or _pt or _pr or _pb:
-                _nw, _nh = W + _pl + _pr, H + _pt + _pb
-                _expanded = Image.new("RGBA", (_nw, _nh), (255, 255, 255, 255))
-                _expanded.paste(base, (_pl, _pt))
-                base = _expanded
-                W, H = _nw, _nh
-                OX, OY = _pl, _pt
+            _x0 = min(_x0, _lbx); _y0 = min(_y0, _lby)
+            _x1 = max(_x1, _lbx + _lbw); _y1 = max(_y1, _lby + _lneed_h)
+        # Measure each annotation's label box (at the export font size, which
+        # tracks symbol_scale) so a note off the plan still expands the canvas.
+        if self.annotations:
+            _md = ImageDraw.Draw(base)
+            for _a in self.annotations:
+                if not isinstance(_a, dict):
+                    continue
+                _at = _a.get("text", "")
+                if not isinstance(_at, str) or not _at.strip():
+                    continue
+                try:
+                    _ax, _ay = float(_a["x"]), float(_a["y"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                _acx, _acy = self._drawio_to_img(_ax, _ay)
+                try:
+                    _abase = float(_a.get("font_size", 16))
+                except (TypeError, ValueError):
+                    _abase = 16.0
+                _afs = max(10, int(_abase * self.dx_scale * symbol_scale))
+                _tb = _md.textbbox((_acx, _acy), _at,
+                                   font=font(_afs, bold=True), anchor="mm")
+                _apad = max(2, _afs // 4)
+                _x0 = min(_x0, _tb[0] - _apad); _y0 = min(_y0, _tb[1] - _apad)
+                _x1 = max(_x1, _tb[2] + _apad); _y1 = max(_y1, _tb[3] + _apad)
+        _m = max(8, round(W / 200))   # breathing room on padded sides
+        _pl = int(math.ceil(-_x0 + _m)) if _x0 < 0 else 0
+        _pt = int(math.ceil(-_y0 + _m)) if _y0 < 0 else 0
+        _pr = int(math.ceil(_x1 - W + _m)) if _x1 > W else 0
+        _pb = int(math.ceil(_y1 - H + _m)) if _y1 > H else 0
+        if _pl or _pt or _pr or _pb:
+            _nw, _nh = W + _pl + _pr, H + _pt + _pb
+            _expanded = Image.new("RGBA", (_nw, _nh), (255, 255, 255, 255))
+            _expanded.paste(base, (_pl, _pt))
+            base = _expanded
+            W, H = _nw, _nh
+            OX, OY = _pl, _pt
 
         def d2i(dx, dy):
             """drawio→image, shifted by any white-space padding added above."""
@@ -16261,7 +16289,7 @@ class CameraWireTool:
                 a_base = float(ann.get("font_size", 16))
             except (TypeError, ValueError):
                 a_base = 16.0
-            afs = max(10, int(a_base * self.dx_scale))
+            afs = max(10, int(a_base * self.dx_scale * symbol_scale))
             acolor = ann.get("color", ANNOTATION_DEFAULT_COLOR) or ANNOTATION_DEFAULT_COLOR
             afont = font(afs, bold=True)
             tb = draw.textbbox((acx, acy), atext, font=afont, anchor="mm")
@@ -16805,6 +16833,26 @@ class CameraWireTool:
                 self.legend_box = saved["legend_box"]
             self._redraw()
 
+        # The summary must reflect ONLY what was exported — if the user hid
+        # some device types (e.g. exported "IT only"), the breakdown, counts,
+        # cable BOM and hardware all filter to the visible types. Compute the
+        # filtered BOM/model rollups by temporarily swapping in the visible
+        # devices/wires (both helpers read self.devices/self.wire_routes).
+        export_hidden = set(saved["hidden"]) | set(hide_types)
+        vis_devices = [d for d in self.devices
+                       if isinstance(d, dict) and d.get("type") not in export_hidden]
+        vis_ids = {d.get("id") for d in vis_devices}
+        vis_wires = [w for w in self.wire_routes
+                     if isinstance(w, dict)
+                     and (not w.get("device_id") or w.get("device_id") in vis_ids)]
+        _sd, _sw = self.devices, self.wire_routes
+        self.devices, self.wire_routes = vis_devices, vis_wires
+        try:
+            vis_bom = self._build_bom_report()
+            vis_models = self._model_inventory()
+        finally:
+            self.devices, self.wire_routes = _sd, _sw
+
         tmp_pdf = path + ".tmp"
         try:
             project_name = (self._project.project_name if self._project else "")
@@ -16814,11 +16862,11 @@ class CameraWireTool:
                 tmp_pdf,
                 project_name=project_name,
                 map_pages=map_pages,
-                devices=self.devices,
+                devices=vis_devices,
                 symbol_types=self.symbol_types,
-                wire_routes=self.wire_routes,
-                bom_report=self._build_bom_report(),
-                model_lines=self._model_inventory(),
+                wire_routes=vis_wires,
+                bom_report=vis_bom,
+                model_lines=vis_models,
                 include_summary=include_summary,
                 summary_options=summary_options,
                 floor_label=(self._project.active_floor if self._project else None),

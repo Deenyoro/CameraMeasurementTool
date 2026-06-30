@@ -593,15 +593,14 @@ def write_map_pdf(
             ]))
             detail_tables.append(model_tbl)
 
-        if detail_tables:
-            n = len(detail_tables)
-            side = Table([detail_tables], colWidths=[avail_w / n] * n)
-            side.setStyle(TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (max(0, n - 2), 0), 12),
-            ]))
-            content.append(side)
+        # Stack the detail tables vertically. Their natural widths are all
+        # well under the page width, so this can NEVER run off the right edge
+        # — the old side-by-side layout did when model names were long, and
+        # KeepInFrame couldn't catch it (the overflow was inside a cell). There
+        # is ample vertical room on the landscape page, and KeepInFrame still
+        # shrinks the whole thing if a huge type list would overflow downward.
+        for dt in detail_tables:
+            content.append(dt)
             content.append(Spacer(1, 10))
 
         # Cost total — only when there's actually a cost to report.
