@@ -140,6 +140,66 @@ def test_extract_revision_writes_folder_project(tmp_path):
     assert f2_entry["alignment"]["scale"] == 1.886
 
 
+def test_extract_revision_uniquifies_colliding_basenames(tmp_path):
+    """Two floors whose drawio_file flattens to the same basename
+    (e.g. a/Plan.drawio + b/Plan.drawio) must NOT overwrite each other
+    on extract — the second gets a _2 suffix and its floor entry is
+    updated to the actual written name."""
+    f1 = _drawio(tmp_path, "one.drawio", "<floor1/>")
+    f2 = _drawio(tmp_path, "two.drawio", "<floor2/>")
+    wm = {
+        "version": 2, "active_floor": "F1",
+        "floors": [
+            {"id": "F1", "name": "First", "elevation_ft": 0.0,
+             "drawio_file": "a/Plan.drawio"},
+            {"id": "F2", "name": "Second", "elevation_ft": 12.0,
+             "drawio_file": "b/Plan.drawio"},
+        ],
+    }
+    bpath = str(tmp_path / "p.zsmt")
+    bundle.commit_revision(bpath, wm, {"F1": f1, "F2": f2})
+    dest = tmp_path / "extracted"
+    wmp, floor_paths, _rev = bundle.extract_revision(bpath, str(dest))
+    # Distinct files on disk, each with its own floor's content.
+    assert floor_paths["F1"] != floor_paths["F2"]
+    with open(floor_paths["F1"], encoding="utf-8") as fh:
+        assert fh.read() == "<floor1/>"
+    with open(floor_paths["F2"], encoding="utf-8") as fh:
+        assert fh.read() == "<floor2/>"
+    assert os.path.basename(floor_paths["F1"]) == "Plan.drawio"
+    assert os.path.basename(floor_paths["F2"]) == "Plan_2.drawio"
+    # The wiremap's drawio_file fields point at the names actually written.
+    with open(wmp, encoding="utf-8") as fh:
+        out = json.load(fh)
+    by_id = {f["id"]: f["drawio_file"] for f in out["floors"]}
+    assert by_id["F1"] == os.path.basename(floor_paths["F1"])
+    assert by_id["F2"] == os.path.basename(floor_paths["F2"])
+    # No staging leftovers from the atomic writes.
+    assert not [n for n in os.listdir(dest) if n.endswith(".tmp")]
+
+
+def test_extract_revision_atomic_no_partial_wiremap(tmp_path, monkeypatch):
+    """extract_revision writes via tmp+os.replace. If the replace blows
+    up, neither a half-written destination nor a stray .tmp survives."""
+    f1 = _drawio(tmp_path, "F1.drawio", "<floor/>")
+    bpath = str(tmp_path / "p.zsmt")
+    bundle.commit_revision(bpath, _wiremap(), {"F1": f1})
+    dest = tmp_path / "extracted"
+
+    def boom(_src, _dst):
+        raise OSError("simulated rename failure")
+    monkeypatch.setattr(bundle.os, "replace", boom)
+    raised = False
+    try:
+        bundle.extract_revision(bpath, str(dest))
+    except OSError:
+        raised = True
+    assert raised, "expected the simulated rename failure to surface"
+    assert not [n for n in os.listdir(dest)
+                if n.endswith(".tmp") or n.endswith(".drawio")
+                or n.endswith(".json")]
+
+
 def test_read_revision_missing_id_raises(tmp_path):
     bpath = str(tmp_path / "p.zsmt")
     f = tmp_path / "F1.drawio"

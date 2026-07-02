@@ -20,6 +20,11 @@ def _make_app(scale_factor=None):
         return sum(math.hypot(b[0]-a[0], b[1]-a[1])
                     for a, b in zip(pts, pts[1:], strict=False))
     app._calc_wire_length = _calc
+    # _recalc_route_length resolves the EFFECTIVE scale (project ×
+    # floor alignment) + riser inches; the stub has no project, so
+    # effective scale == the raw scale_factor and no vertical footage.
+    app._effective_scale_factor = lambda: app.scale_factor
+    app._route_vertical_in = lambda route: 0.0
     return app
 
 

@@ -312,7 +312,12 @@ def device_inventory(
         # avoid sym.get() crashing on the label/cable_type reads below.
         if not isinstance(sym, dict):
             sym = {}
-        cable_id = (sym.get("cable_type")
+        # Only honor the symbol's cable_type when it's still a valid
+        # catalog entry — same membership rule as cable_for_route, so
+        # the by-device-type view agrees with the rollup instead of
+        # showing a stale/deleted cable id as "—".
+        sym_cable = sym.get("cable_type")
+        cable_id = ((sym_cable if sym_cable in cable_types else None)
                     or (project_default if project_default in cable_types else None)
                     or default_cable_for(sym))
         if cable_id not in cable_types:
@@ -396,7 +401,9 @@ def write_csv(report: BomReport, path: str, currency: str = "$",
     mid-serialization can't leave a half-written file at the destination."""
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", newline="", encoding="utf-8") as f:
+        # utf-8-sig: the BOM makes Excel on Windows decode the file as
+        # UTF-8 (em-dashes / currency symbols would otherwise mojibake).
+        with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow([
                 "Cable", "Label", "Runs", "Total (ft)", "Total (inches)",

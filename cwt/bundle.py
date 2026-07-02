@@ -186,33 +186,64 @@ def read_revision(bundle_path: str, rev_id: str | None = None):
     return wiremap, floors, rev
 
 
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write bytes atomically (tmp + os.replace), cleaning up the staging
+    file on failure — same contract as the rest of the codebase."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def extract_revision(bundle_path: str, dest_dir: str,
                      rev_id: str | None = None):
     """Materialize a revision into `dest_dir` as a normal *flat* folder
     project: every floor's .drawio plus project.wiremap.json, all in the
     same directory (the layout the app's project-owner scan expects — it
     finds the wiremap by reading the drawios' sibling folder). Floor
-    drawio_file fields are normalized to the flat basenames. Returns
+    drawio_file fields are normalized to the flat basenames; colliding
+    basenames (two floors whose drawio_file flattens to the same name)
+    are uniquified with a _2/_3/… suffix so no floor overwrites another.
+    All writes are atomic (tmp + os.replace). Returns
     (wiremap_path, {floor_id: drawio_path}, rev_meta)."""
     wiremap, floors, rev = read_revision(bundle_path, rev_id)
     os.makedirs(dest_dir, exist_ok=True)
     wm = json.loads(json.dumps(wiremap))  # deep copy
-    # Decide each floor's flat filename from its drawio_file basename.
+    # Decide each floor's flat filename from its drawio_file basename,
+    # uniquifying collisions (case-insensitive — Windows filesystems).
+    used: set[str] = set()
+
+    def _unique(name: str) -> str:
+        base, ext = os.path.splitext(name)
+        candidate = name
+        n = 2
+        while candidate.lower() in used:
+            candidate = f"{base}_{n}{ext}"
+            n += 1
+        used.add(candidate.lower())
+        return candidate
+
     name_by_id: dict[str, str] = {}
     for f in wm.get("floors", []):
         fid = f.get("id")
         df = f.get("drawio_file") or f"{fid}.drawio"
-        name = os.path.basename(df) or f"{fid}.drawio"
+        name = _unique(os.path.basename(df) or f"{fid}.drawio")
         name_by_id[fid] = name
         f["drawio_file"] = name
     floor_paths: dict[str, str] = {}
     for fid, data in floors.items():
-        name = name_by_id.get(fid, f"{fid}.drawio")
+        name = name_by_id.get(fid) or _unique(f"{fid}.drawio")
         p = os.path.join(dest_dir, name)
-        with open(p, "wb") as fh:
-            fh.write(data)
+        _atomic_write_bytes(p, data)
         floor_paths[fid] = p
     wmp = os.path.join(dest_dir, "project.wiremap.json")
-    with open(wmp, "w", encoding="utf-8") as fh:
-        json.dump(wm, fh, indent=2)
+    _atomic_write_bytes(wmp, json.dumps(wm, indent=2).encode("utf-8"))
     return wmp, floor_paths, rev

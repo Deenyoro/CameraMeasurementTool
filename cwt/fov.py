@@ -3,9 +3,9 @@
 Implements the IEC EN 62676-4 DORI (Detection / Observation / Recognition /
 Identification) standard for visualizing camera coverage on a floor plan.
 
-DORI thresholds (pixels per meter on target):
+DORI thresholds (pixels per meter on target, per IEC EN 62676-4):
     Detection      ≥  25 ppm
-    Observation    ≥  62 ppm
+    Observation    ≥  62.5 ppm
     Recognition    ≥ 125 ppm
     Identification ≥ 250 ppm
 
@@ -31,7 +31,7 @@ from cwt.lenses import SENSORS
 # IEC EN 62676-4 thresholds (pixels per meter on target)
 DORI_PPM: dict[str, float] = {
     "D": 25,
-    "O": 62,
+    "O": 62.5,
     "R": 125,
     "I": 250,
 }
@@ -105,6 +105,22 @@ def project_to_floor(line_of_sight_m: float, mount_height_ft: float) -> float:
     return math.sqrt(line_of_sight_m ** 2 - height_m ** 2)
 
 
+def max_ground_distance(mount_height_ft: float, tilt_deg: float,
+                        aov_v_deg: float) -> float:
+    """Farthest visible ground distance (meters) for a downward-tilted camera.
+
+    With the camera tilted DOWN by `tilt_deg`, the upper edge of the
+    vertical FOV sits at (tilt_deg - aov_v/2) below horizontal. When that
+    angle is > 0 the view no longer reaches the horizon and the visible
+    ground is capped at height / tan(tilt_deg - aov_v/2). Returns
+    math.inf when the camera still sees the horizon (no cap)."""
+    upper_edge_deg = tilt_deg - aov_v_deg / 2.0
+    if upper_edge_deg <= 0:
+        return math.inf
+    height_m = mount_height_ft * 0.3048
+    return height_m / math.tan(math.radians(upper_edge_deg))
+
+
 def _safe_float(value, default: float) -> float:
     """Coerce `value` to float, falling back to `default` on failure.
     Legacy / hand-edited project files can carry "4mm" or "" or None
@@ -131,16 +147,24 @@ def compute_fov(fov: dict) -> FOVCone:
     except (TypeError, ValueError, IndexError):
         image_w = 1920
     mount_ft = _safe_float(fov.get("mount_height_ft"), 9.0)
+    tilt_deg = _safe_float(fov.get("tilt_deg"), 0.0)
+
+    aov_v_deg = vertical_aov(sensor_h_mm, lens_mm)
+    # Downward tilt caps how far along the ground the camera can see:
+    # once the UPPER edge of the vertical FOV dips below horizontal
+    # (tilt > vfov/2), the visible ground ends at max_ground_m.
+    max_ground_m = max_ground_distance(mount_ft, tilt_deg, aov_v_deg)
 
     distances_in: dict[str, float] = {}
     for ring, ppm in DORI_PPM.items():
         d_m = dori_distance_meters(image_w, sensor_w_mm, lens_mm, ppm)
         proj_m = project_to_floor(d_m, mount_ft)
+        proj_m = min(proj_m, max_ground_m)
         distances_in[ring] = proj_m * 39.3701  # m -> inches
 
     return FOVCone(
         aov_h_deg=horizontal_aov(sensor_w_mm, lens_mm),
-        aov_v_deg=vertical_aov(sensor_h_mm, lens_mm),
+        aov_v_deg=aov_v_deg,
         distances_in=distances_in,
         azimuth_deg=_safe_float(fov.get("azimuth_deg"), 0.0),
     )
@@ -158,9 +182,9 @@ def cone_polygon(
 ) -> list[tuple[float, float]]:
     """Build a polygon (in image-pixel coords) for a single DORI ring.
 
-    `inches_per_pixel` converts inches → image pixels (= 1 / scale_factor
-    if you've calibrated). `azimuth_deg` is plan-view rotation, 0 = up,
-    increasing clockwise.
+    `inches_per_pixel` converts inches → image pixels (= the project's
+    scale_factor, i.e. inches per raw image pixel). `azimuth_deg` is
+    plan-view rotation, 0 = up, increasing clockwise.
     """
     if inches_per_pixel <= 0 or radius_in <= 0:
         return []

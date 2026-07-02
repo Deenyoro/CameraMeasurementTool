@@ -6,6 +6,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cwt import multifloor as mf
@@ -204,6 +206,56 @@ def test_load_project_skips_malformed_floor_entries(tmp_path):
     assert {f.id for f in proj.floors} == {"F1", "F4"}
     f4 = next(f for f in proj.floors if f.id == "F4")
     assert f4.elevation_ft == 0.0
+
+
+def test_load_v2_zero_floors_raises_value_error():
+    """A v2 payload with no usable floors must raise ValueError from the
+    parser (rather than returning a ProjectState with floors=[] that
+    IndexErrors the app on floors[0])."""
+    with pytest.raises(ValueError):
+        mf._load_v2({"version": 2, "floors": []}, "p.wiremap.json")
+    with pytest.raises(ValueError):
+        # Every entry malformed → all skipped → zero floors.
+        mf._load_v2({"version": 2,
+                     "floors": ["garbage", {"id": "F1"}, {"name": "x"}]},
+                    "p.wiremap.json")
+
+
+def test_load_project_all_floors_malformed_falls_back(tmp_path):
+    """load_project catches the zero-floors ValueError and falls back to
+    a default single-floor empty project — the app always has at least
+    one floor to show."""
+    p = tmp_path / "corrupt.wiremap.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "active_floor": "F1",
+        "floors": [
+            {"id": "F1"},                    # missing drawio_file
+            {"drawio_file": "F2.drawio"},    # missing id
+            "garbage",                       # not even a dict
+        ],
+    }))
+    proj = mf.load_project(str(p), str(tmp_path / "Plan.drawio"))
+    assert len(proj.floors) == 1
+    assert proj.floors[0].id == "F1"
+    assert proj.floors[0].drawio_file == "Plan.drawio"
+    assert proj.active_floor == "F1"
+
+
+def test_load_project_empty_floors_list_falls_back(tmp_path):
+    p = tmp_path / "nofloors.wiremap.json"
+    p.write_text(json.dumps({"version": 2, "floors": []}))
+    proj = mf.load_project(str(p), str(tmp_path / "Plan.drawio"))
+    assert len(proj.floors) == 1
+    assert proj.floors[0].drawio_file == "Plan.drawio"
+
+
+def test_make_empty_project_has_a_floor():
+    """The corrupt-file fallback itself must produce >= 1 floor."""
+    proj = mf._make_empty_project("Some.drawio")
+    assert len(proj.floors) == 1
+    assert proj.floors[0].id == "F1"
+    assert proj.get_floor(proj.active_floor) is not None
 
 
 def test_load_project_handles_non_numeric_next_device_id(tmp_path):

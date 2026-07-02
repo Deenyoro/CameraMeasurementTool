@@ -26,7 +26,9 @@ def _atomic_csv_write(path: str, rows: list[list]) -> None:
     serialization doesn't leave a half-written CSV at the destination."""
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", newline="", encoding="utf-8") as f:
+        # utf-8-sig: the BOM makes Excel on Windows decode the file as
+        # UTF-8 (em-dashes / currency symbols would otherwise mojibake).
+        with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerows(rows)
         os.replace(tmp, path)
@@ -88,12 +90,15 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
                      *,
                      devices: list[dict] | None = None,
                      symbol_types: dict[str, dict] | None = None,
-                     cable_types: dict[str, dict] | None = None) -> None:
+                     cable_types: dict[str, dict] | None = None,
+                     project_default: str | None = None) -> None:
     """One row per wire: device, cable, segments, length.
 
     Cable column shows the EFFECTIVE cable (the one the BOM rolls up
     against) when devices/symbol_types/cable_types are supplied — same
-    resolution rule as `bom.cable_for_route`. An '(auto)' suffix marks
+    resolution rule as `bom.cable_for_route` (including the project-wide
+    `project_default`, so wires.csv agrees with bom.csv when the caller
+    threads it through). An '(auto)' suffix marks
     routes that fell back to a device/symbol default instead of an
     explicit override. When the dependencies are omitted (older callers),
     falls back to the explicit override only — preserves the prior
@@ -122,7 +127,8 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
             from cwt.bom import cable_for_route
             explicit = wr.get("cable_type")
             effective = cable_for_route(
-                wr, devices_by_id, symbol_types, cable_types)
+                wr, devices_by_id, symbol_types, cable_types,
+                project_default=project_default)
             cable_cell = effective + ("" if explicit else " (auto)")
         else:
             cable_cell = wr.get("cable_type") or ""
@@ -143,7 +149,8 @@ def write_wires_csv(wire_routes: list[dict], format_length, path: str,
 
 def write_bundle_csv(directory: str, *, devices, symbol_types, wire_routes,
                      bom_report, format_length, currency: str = "$",
-                     cable_types: dict[str, dict] | None = None) -> list[str]:
+                     cable_types: dict[str, dict] | None = None,
+                     project_default: str | None = None) -> list[str]:
     """Write all three CSVs into `directory`. Returns the list of paths."""
     os.makedirs(directory, exist_ok=True)
     paths = [
@@ -155,7 +162,7 @@ def write_bundle_csv(directory: str, *, devices, symbol_types, wire_routes,
     write_devices_csv(devices, symbol_types, wire_routes, format_length, paths[1])
     write_wires_csv(wire_routes, format_length, paths[2],
                      devices=devices, symbol_types=symbol_types,
-                     cable_types=cable_types)
+                     cable_types=cable_types, project_default=project_default)
     return paths
 
 

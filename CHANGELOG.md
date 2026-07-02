@@ -5,7 +5,131 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] - 2026-07-02
+
+Correctness release: a full-codebase audit (9 parallel review passes over
+the app + cwt package) surfaced ~35 real defects; everything confirmed
+was fixed. Highlights below.
+
+### Fixed — measurement & coverage correctness
+
+- **FOV cones were drawn at the wrong size on calibrated plans.** The
+  renderer passed `1/scale` where `cone_polygon` expects inches-per-pixel,
+  so every DORI cone was off by scale² — on this repo's own Floor 1
+  (0.6 in/px) cones drew at ~⅓ of their true radius, understating camera
+  coverage on screen AND in exported PDFs. Both call sites fixed.
+- **DORI Observation threshold corrected to 62.5 px/m** (was 62) per
+  IEC EN 62676-4.
+- **Camera tilt now affects coverage**: `compute_fov` caps the
+  ground-projected DORI distances at the geometric far edge of the
+  vertical FOV (`h / tan(tilt − vfov/2)`), as the docs always promised.
+  Untilted cameras are unchanged.
+- Waypoint edit commands recompute wire lengths with the effective
+  (alignment-aware) scale + riser verticals, matching `_recalc_all_wires`.
+- Grid snap used the X pixel scale on the Y axis — devices snapped off
+  the painted grid when the page/image aspect ratios differ.
+
+### Fixed — data loss & persistence
+
+- **Failed project-file writes no longer mark the app clean**: a locked
+  `.wiremap.json` (OneDrive/AV) used to clear the dirty flag and delete
+  the crash autosave — closing then lost every wire/scale/annotation
+  change silently.
+- **Undo/redo stacks are cleared on floor switch.** Undoing a Floor 1
+  command while on Floor 2 used to replay it against Floor 2's state
+  (`ClearWiresCmd.undo` could replace Floor 2's wires with Floor 1's).
+- **Deleted devices stay deleted**: the save-time sweep now removes any
+  parsed device cell, not just ids starting with "s" — devices that came
+  from the source .drawio no longer resurrect on reload.
+- Device resizes (transform gizmo) persist — width/height are written
+  back to the .drawio.
+- Autosave recovery refuses to overlay a snapshot from a different
+  floor/drawio (used to graft Floor 2's devices into Floor 1's file);
+  the autosave path now survives multi-floor project adoption; explicitly
+  discarding changes at close also discards the stale autosave.
+- Opening a floor's .drawio directly reconciles `active_floor`, so the
+  right floor's wires/annotations load onto the right plan.
+- Floor switch aborts when the pre-switch silent save didn't complete.
+- Opening a `.zsmt` salvages newer loose work files into a revision
+  instead of silently rolling the project back; revert waits for the
+  in-flight safety snapshot and writes restored files atomically.
+- Insert-waypoint undo no longer deletes a pre-existing endpoint when
+  the insert had no-opped on an exact-duplicate point.
+- Corrupt v2 project files with zero usable floors fall back to a fresh
+  single-floor project instead of crashing at startup.
+
+### Fixed — selection & interaction
+
+- **`_selected_wire` mapped listbox rows through the wrong table** in
+  grouped sorts (the default view): Simplify, Z-zoom, minimap highlight,
+  and waypoint dragging all acted on the WRONG wire (or none).
+- Canvas context menu / double-click on a wire filtered out of the Wires
+  list no longer acts on the previously-selected wire.
+- Hidden wires (hidden device type / unwired filter) no longer intercept
+  canvas clicks and hover; lasso selection skips hidden devices and works
+  on rotation-aligned floors (containment now tested in canvas space).
+- Del with a stale Wires-tab selection no longer silently deletes an
+  off-screen wire while the Devices tab is active.
+- "Center on Selected" preserves multi-selections.
+- Reassign-wire dialog no longer crashes on the "(no matches)" row.
+- Typing spaces in a search field no longer triggers full-canvas redraws.
+- Room-label text cells without a fillColor are no longer auto-classified
+  as cameras (they polluted camera counts, bulk-FOV actions, and the BOM).
+- "Assign model" works for non-camera devices (WAPs/readers) as the menu
+  always advertised, and no longer wipes hand-aimed FOV azimuths.
+- Camera-model prices like "$1,299" are validated instead of silently
+  saving as $0 and understating the BOM.
+
+### Fixed — rotated floor alignments (whole-pipeline)
+
+- Background placement under a rotated alignment: the expand-rotate
+  recentering used the un-rotated half-size, so the plan slid under the
+  device/wire overlays as you panned. Corrected placement algebra
+  (verified numerically to <1 px across rotations/scales/zooms).
+- The drag-align dialog previewed a center-pivot rotation but stored an
+  origin-pivot transform — Apply landed the floor thousands of pixels
+  from the previewed match at 90°. The preview now renders exactly the
+  stored transform (WYSIWYG), and spinning the rotation control keeps
+  the layer visually anchored.
+- Ghost floor overlay honors the ghost's alignment rotation; its
+  aspect-distorting size cap replaced with a proportional one.
+- Grid overlay draws alignment-transformed segments over the 4-corner
+  visible range (it previously vanished at 90–270° and painted a false
+  grid at other angles); viewport-size cap no longer shrinks the
+  background on >4000 px canvases.
+- Anchor alignment composes through an already-aligned reference floor,
+  so chained alignments keep scale (wire lengths / BOM were off by the
+  reference's scale factor).
+
+### Fixed — exports
+
+- **Multi-floor PDF summary was built from whichever floor the user was
+  viewing**, not the exported floors. It now aggregates the exported
+  floors' snapshots, labels them correctly, skips floors that fail to
+  switch (previously: the prior floor's map under the failed floor's
+  caption), surfaces render errors as dialogs, and cleans up temp PNGs.
+- Map PNG snapshot export always failed (`ValueError: unknown file
+  extension .tmp`) — format now derived from the real target path.
+- `wires.csv` resolves cable types with the project default, matching
+  `bom.csv` in the same bundle; BOM "by device type" panel applies the
+  same stale-cable validation as the rollup.
+- CSVs are written UTF-8 **with BOM** so Excel renders em-dashes and
+  currency correctly.
+- PDF export dialog warns when scale isn't calibrated, like the other
+  export paths.
+- `.zsmt` revision extraction uniquifies colliding floor basenames
+  (previously one floor's plan silently overwrote the other's) and
+  writes atomically.
+
+### Changed
+
+- Version 1.2.0 (pyproject + `cwt.__version__` now agree; they had
+  drifted since 1.1.0).
+- Test suite: 398 → 417 (+19 covering the DORI threshold, tilt capping,
+  CSV project-default threading, stale-cable inventory, bundle basename
+  collisions, and zero-floor project fallback).
+
+## [1.1.0] - 2026-06-12
 
 ### Changed
 

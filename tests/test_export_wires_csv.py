@@ -7,13 +7,14 @@ falling back to a default)."""
 
 from __future__ import annotations
 
+import codecs
 import csv
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cwt import export
+from cwt import bom, export
 
 
 SYMBOL_TYPES = {
@@ -30,7 +31,9 @@ CABLE_TYPES = {
 
 
 def _read(path):
-    with open(path, encoding="utf-8") as f:
+    # utf-8-sig: the writers emit a BOM for Excel; this also reads
+    # BOM-less files fine.
+    with open(path, encoding="utf-8-sig") as f:
         return list(csv.reader(f))
 
 
@@ -150,10 +153,70 @@ def test_write_devices_csv_skips_malformed_entries(tmp_path):
     assert rows[2][3] == "0.0"
 
 
+def test_wires_csv_honors_project_default(tmp_path):
+    """project_default threads through to cable_for_route — a wire with
+    no explicit override and no symbol cable_type resolves to the
+    project-wide default, exactly like the BOM rollup does."""
+    devices = [{"id": "s1", "type": "MD"}]
+    routes = [
+        # no override; MD has no symbol cable_type → project default wins
+        # over the per-category inference (camera → Cat6).
+        {"device_id": "s1", "points": [(0, 0), (1, 1)], "length_in": 12.0},
+        # explicit override still beats the project default
+        {"device_id": "s1", "cable_type": "Cat5e",
+         "points": [(0, 0), (1, 1)], "length_in": 12.0},
+    ]
+    path = tmp_path / "wires.csv"
+    export.write_wires_csv(
+        routes, lambda inches: f"{inches:.0f}in", str(path),
+        devices=devices, symbol_types=SYMBOL_TYPES, cable_types=CABLE_TYPES,
+        project_default="RG59")
+    rows = _read(path)
+    assert rows[1][2] == "RG59 (auto)"
+    assert rows[2][2] == "Cat5e"
+
+
+def test_bundle_csv_threads_project_default(tmp_path):
+    """write_bundle_csv forwards project_default so wires.csv agrees
+    with bom.csv when a project-wide default cable is set."""
+    devices = [{"id": "s1", "type": "MD", "x": 0, "y": 0, "w": 30, "h": 30}]
+    routes = [{"device_id": "s1", "points": [(0, 0), (1, 1)],
+               "length_in": 12.0}]
+    rep = bom.rollup(routes, devices, SYMBOL_TYPES, CABLE_TYPES,
+                     project_default="RG59")
+    paths = export.write_bundle_csv(
+        str(tmp_path / "bundle"),
+        devices=devices, symbol_types=SYMBOL_TYPES, wire_routes=routes,
+        bom_report=rep, format_length=lambda i: f"{i:.0f}in",
+        cable_types=CABLE_TYPES, project_default="RG59",
+    )
+    wires_path = next(p for p in paths if p.endswith("wires.csv"))
+    rows = _read(wires_path)
+    assert rows[1][2] == "RG59 (auto)"
+    # And the BOM in the same bundle rolled the run up under RG59 too.
+    bom_path = next(p for p in paths if p.endswith("bom.csv"))
+    bom_rows = _read(bom_path)
+    assert any(r and r[0] == "RG59" for r in bom_rows)
+    assert not any(r and r[0] == "Cat6" for r in bom_rows[1:])
+
+
+def test_csvs_written_with_utf8_bom_for_excel(tmp_path):
+    """CSV writers must emit a UTF-8 BOM (utf-8-sig) so Excel on Windows
+    doesn't mangle em-dashes / currency symbols."""
+    devs = [{"id": "s1", "type": "MD", "x": "ten", "y": None}]  # renders '—'
+    path = tmp_path / "devices.csv"
+    export.write_devices_csv(devs, SYMBOL_TYPES, [],
+                             lambda i: f"{i:.0f}in", str(path))
+    raw = path.read_bytes()
+    assert raw.startswith(codecs.BOM_UTF8)
+    # The em-dash survives a utf-8-sig read.
+    rows = _read(path)
+    assert rows[1][3] == "—"
+
+
 def test_bundle_csv_wires_use_effective_cable(tmp_path):
     """write_bundle_csv now forwards cable_types so the wires.csv
     matches the BOM. Spot-check the wires file inside the bundle."""
-    from cwt import bom
     # write_devices_csv reads x/y/w/h — supply them so the bundle write
     # doesn't choke. cable resolution only needs id+type.
     devices = [{"id": "s1", "type": "MD", "x": 0, "y": 0, "w": 30, "h": 30}]

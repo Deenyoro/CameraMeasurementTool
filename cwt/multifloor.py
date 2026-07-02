@@ -372,13 +372,15 @@ def load_project(project_path: str, drawio_path: str) -> ProjectState:
     try:
         with open(project_path, encoding="utf-8") as f:
             data = json.load(f)
+        version = int(data.get("version", 1))
+        if version >= 2:
+            return _load_v2(data, project_path)
+        return _migrate_from_v1(data, drawio_path)
     except (OSError, ValueError):
+        # Unreadable / unparseable / zero-floors-after-parse (see
+        # _load_v2) — fall back to an empty single-floor project so the
+        # app always has at least one floor to show.
         return _make_empty_project(drawio_path)
-
-    version = int(data.get("version", 1))
-    if version >= 2:
-        return _load_v2(data, project_path)
-    return _migrate_from_v1(data, drawio_path)
 
 
 def _make_empty_project(drawio_path: str) -> ProjectState:
@@ -494,6 +496,13 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             wire_routes=list(raw_wires) if isinstance(raw_wires, list) else [],
             annotations=list(raw_anns) if isinstance(raw_anns, list) else [],
         ))
+    # A v2 file where EVERY floor entry was malformed (all skipped above)
+    # would yield a zero-floor project — downstream code indexes
+    # floors[0] and would IndexError. Treat it like any other corrupt
+    # file: raise so load_project falls back to a default single-floor
+    # empty project.
+    if not floors:
+        raise ValueError("v2 project file contains no usable floors")
     # next_device_id may be a hand-edited string in legacy files —
     # coerce safely instead of letting int() raise.
     try:

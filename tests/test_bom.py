@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import sys
 import csv
@@ -230,6 +231,60 @@ def test_device_inventory_cameras_only():
     assert codes == {"MD"}
 
 
+def test_device_inventory_ignores_stale_symbol_cable():
+    """A symbol's cable_type that no longer exists in the catalog must
+    be skipped (same membership rule as cable_for_route) — falling back
+    to project_default / category default so the by-device-type view
+    agrees with the rollup instead of showing the stale id or '—'."""
+    sym = {**SYMBOL_TYPES, "MD": {**SYMBOL_TYPES["MD"], "cable_type": "GHOST"}}
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 120.0}]
+    inv = bom.device_inventory(devs, sym, routes, CABLE_TYPES)
+    line = next(ln for ln in inv if ln.code == "MD")
+    # Falls through to the camera-category default, like cable_for_route.
+    assert line.cable_id == "Cat6"
+    rep = bom.rollup(routes, devs, sym, CABLE_TYPES)
+    assert rep.lines[0].cable_id == line.cable_id
+
+
+def test_device_inventory_stale_symbol_cable_uses_project_default():
+    """With a project default set, the stale symbol cable falls back to
+    it — matching cable_for_route's priority order."""
+    sym = {**SYMBOL_TYPES, "MD": {**SYMBOL_TYPES["MD"], "cable_type": "GHOST"}}
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 120.0}]
+    inv = bom.device_inventory(devs, sym, routes, CABLE_TYPES,
+                               project_default="RG59")
+    line = next(ln for ln in inv if ln.code == "MD")
+    assert line.cable_id == "RG59"
+    rep = bom.rollup(routes, devs, sym, CABLE_TYPES, project_default="RG59")
+    assert rep.lines[0].cable_id == "RG59"
+
+
+def test_device_inventory_valid_symbol_cable_still_wins():
+    """A symbol cable_type that IS in the catalog keeps beating the
+    project default (regression guard for the membership fix)."""
+    sym = {**SYMBOL_TYPES, "MD": {**SYMBOL_TYPES["MD"], "cable_type": "Cat5e"}}
+    devs = [{"id": "s1", "type": "MD"}]
+    inv = bom.device_inventory(devs, sym, [], CABLE_TYPES,
+                               project_default="RG59")
+    line = next(ln for ln in inv if ln.code == "MD")
+    assert line.cable_id == "Cat5e"
+
+
+def test_write_csv_emits_utf8_bom_for_excel(tmp_path):
+    """bom.write_csv must write utf-8-sig so Excel on Windows decodes
+    currency symbols / em-dashes correctly."""
+    devs = [{"id": "s1", "type": "MD"}]
+    routes = [{"device_id": "s1", "length_in": 1200.0}]
+    rep = bom.rollup(routes, devs, SYMBOL_TYPES, CABLE_TYPES)
+    p = tmp_path / "bom.csv"
+    bom.write_csv(rep, str(p), currency="€")
+    raw = p.read_bytes()
+    assert raw.startswith(codecs.BOM_UTF8)
+    assert "€" in p.read_text(encoding="utf-8-sig")
+
+
 def test_csv_roundtrip(tmp_path):
     devs = [{"id": "s1", "type": "MD"}]
     routes = [{"device_id": "s1", "length_in": 1200.0}]
@@ -237,7 +292,7 @@ def test_csv_roundtrip(tmp_path):
                       waste_factor=1.10, tax_rate=0.08)
     p = tmp_path / "bom.csv"
     bom.write_csv(rep, str(p))
-    rows = list(csv.reader(p.open(encoding="utf-8")))
+    rows = list(csv.reader(p.open(encoding="utf-8-sig")))
     assert rows[0][0] == "Cable"
     assert any("GRAND TOTAL" in r for r in (row for row in rows))
 

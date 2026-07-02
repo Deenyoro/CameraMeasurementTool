@@ -95,13 +95,15 @@ CameraMeasurementTool/
 ├── camera_wire_tool.py             # main app (Tk UI + command stack)
 ├── cwt/                            # pure-logic modules (no UI deps)
 │   ├── bom.py                      # cable catalog + BOM rollup + CSV writer
+│   ├── bundle.py                   # .zsmt revision bundle (zip backlog)
 │   ├── export.py                   # PDF + CSV bundle writers
 │   ├── fov.py                      # IEC 62676-4 DORI cone math
+│   ├── import_cad.py               # DXF / SVG floor-plan import
 │   ├── lenses.py                   # sensor + lens + install presets
 │   ├── multifloor.py               # v2 project file + anchor alignment
 │   ├── models.py                   # TypedDicts: Device / WireRoute / SymbolType
-│   └── routing.py                  # soft-A* (dormant — auto-route was removed)
-├── tests/                          # pytest suite (136 tests, run with `pytest`)
+│   └── raster_import.py            # PNG/JPG floor-plan import helpers
+├── tests/                          # pytest suite (417 tests, run with `pytest`)
 ├── PLAYBOOK.md                     # complete architecture + format docs
 ├── README.md / CHANGELOG.md / LICENSE
 ├── pyproject.toml / requirements*.txt

@@ -416,12 +416,21 @@ def parse_drawio(filepath: str):
     # Discover types from placed devices that aren't in legend
     for dev in devices:
         if dev["type"] not in symbol_types:
+            # Camera-by-yellow only counts when the style EXPLICITLY
+            # carries fillColor: detect_color falls back to #FFFF00 for
+            # styles without one (plain text labels like room numbers),
+            # which used to sweep every such cell into camera counts,
+            # bulk-FOV actions, and the BOM.
+            has_fill = bool(re.search(r"fillColor=#[0-9A-Fa-f]{6}",
+                                      dev["orig_style"]))
             symbol_types[dev["type"]] = {
                 "label": dev["type"],
                 "shape": detect_shape(dev["orig_style"]),
                 "color": detect_color(dev["orig_style"]),
                 "is_camera": dev["type"] in CAMERA_CODES
-                              or detect_color(dev["orig_style"]).upper() == "#FFFF00",
+                              or (has_fill and
+                                  detect_color(dev["orig_style"]).upper()
+                                  == "#FFFF00"),
             }
 
     return bg_image, page_w, page_h, devices, symbol_types, legend_box_info
@@ -736,6 +745,22 @@ class ClearWiresCmd(Command):
         self.app.wire_routes.extend(self.snapshot)
 
 
+def _recalc_route_length(app: "CameraWireTool", route: dict) -> None:
+    """Recompute one route's length_px/length_in the same way
+    _recalc_all_wires does: EFFECTIVE scale (project × floor alignment)
+    plus riser/drop vertical inches. The waypoint commands used the raw
+    project scale_factor, which was wrong on aligned floors — masked
+    only because _post_command_refresh happened to re-run
+    _recalc_all_wires afterwards."""
+    pts = route.get("points", [])
+    route["length_px"] = app._calc_wire_length(pts)
+    eff = app._effective_scale_factor()
+    route["length_in"] = (
+        route["length_px"] * eff + app._route_vertical_in(route)
+        if eff is not None else None
+    )
+
+
 class SimplifyWireCmd(Command):
     """Remove collinear interior waypoints from a wire. Reversible."""
 
@@ -747,9 +772,7 @@ class SimplifyWireCmd(Command):
 
     def _set(self, pts: list) -> None:
         self.route["points"] = list(pts)
-        self.route["length_px"] = self.app._calc_wire_length(pts)
-        sf = self.app.scale_factor
-        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+        _recalc_route_length(self.app, self.route)
 
     def do(self):  self._set(self.new_pts)
     def undo(self): self._set(self.old_pts)
@@ -774,9 +797,7 @@ class MoveWaypointCmd(Command):
             pts[self.point_idx] = xy
             self.route["points"] = pts
             # Recompute length now that geometry changed
-            self.route["length_px"] = self.app._calc_wire_length(pts)
-            sf = self.app.scale_factor
-            self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+            _recalc_route_length(self.app, self.route)
 
     def do(self):  self._set(self.new_xy)
     def undo(self): self._set(self.old_xy)
@@ -794,31 +815,38 @@ class InsertWaypointCmd(Command):
         self.route = route
         self.insert_idx = insert_idx
         self.xy = xy
-
-    def _recalc(self) -> None:
-        pts = self.route["points"]
-        self.route["length_px"] = self.app._calc_wire_length(pts)
-        sf = self.app.scale_factor
-        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+        # Set by do(): whether the point was actually inserted. Without
+        # it, a do() that no-ops on the idempotency guard (insert point
+        # exactly equals an existing waypoint — happens when the click
+        # projects onto an endpoint) was followed by an undo() that
+        # POPPED that pre-existing waypoint, silently deleting the
+        # wire's endpoint.
+        self._did_insert = False
 
     def do(self):
         pts = list(self.route.get("points", []))
         idx = max(0, min(self.insert_idx, len(pts)))
         # Idempotent: if the point's already at that index (a stray
-        # double-do from undo→redo), don't insert it twice.
+        # double-do, or the click projected exactly onto an existing
+        # waypoint), don't insert it twice. _did_insert stays as-is:
+        # False on a first-do that no-ops (point pre-existed — not
+        # ours to pop), True if we already inserted it earlier.
         if 0 <= idx < len(pts) and pts[idx] == self.xy:
             return
         pts.insert(idx, self.xy)
         self.route["points"] = pts
-        self._recalc()
+        self._did_insert = True
+        _recalc_route_length(self.app, self.route)
 
     def undo(self):
+        if not self._did_insert:
+            return
         pts = list(self.route.get("points", []))
         idx = self.insert_idx
         if 0 <= idx < len(pts) and pts[idx] == self.xy:
             pts.pop(idx)
             self.route["points"] = pts
-            self._recalc()
+            _recalc_route_length(self.app, self.route)
 
 
 class DeleteWaypointCmd(Command):
@@ -837,10 +865,7 @@ class DeleteWaypointCmd(Command):
                    if 0 <= point_idx < len(pts) else None)
 
     def _recalc(self) -> None:
-        pts = self.route["points"]
-        self.route["length_px"] = self.app._calc_wire_length(pts)
-        sf = self.app.scale_factor
-        self.route["length_in"] = (self.route["length_px"] * sf) if sf else None
+        _recalc_route_length(self.app, self.route)
 
     def do(self):
         if self.xy is None:
@@ -1480,9 +1505,14 @@ class CameraWireTool:
         try:
             (self.bg_image, self.page_w, self.page_h,
              self.devices, self.symbol_types, self.legend_box) = parse_drawio(drawio_path)
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             messagebox.showerror("Cannot open file", str(e))
             sys.exit(1)
+        # Ids of device cells that exist in the source XML. _save_drawio
+        # uses this to sweep DELETED devices out of the file regardless
+        # of id shape — the old "starts with 's'" heuristic resurrected
+        # any deleted device whose draw.io id didn't match it.
+        self._device_ids_at_parse = {d["id"] for d in self.devices}
 
         if self.bg_image is None:
             messagebox.showerror(
@@ -1716,6 +1746,12 @@ class CameraWireTool:
                 self._next_device_id = max(self._next_device_id, int(m.group(1)) + 1)
 
         self._load_project()
+        # _load_project may re-point self.project_path at the owning
+        # sibling project file (multi-floor adoption). Recompute the
+        # autosave path from the FINAL project path, otherwise a crash
+        # while a non-default floor was active writes the recovery file
+        # to a path nobody ever reads back.
+        self._autosave_path = self.project_path + ".autosave.json"
 
         # Recent files
         push_recent_file(drawio_path)
@@ -1882,7 +1918,12 @@ class CameraWireTool:
 
         proj = self._project
         self.scale_factor = proj.scale_factor
-        self._loaded_unit = proj.unit
+        # Only treat the project's unit as authoritative when a project
+        # file actually existed — a brand-new project reports the
+        # ProjectState DEFAULT ("ft-in"), which used to shadow the
+        # user's remembered unit preference on every new project.
+        if os.path.exists(self.project_path):
+            self._loaded_unit = proj.unit
         if proj.cable_types:
             self.cable_types = {**self.cable_types, **proj.cable_types}
         if proj.next_device_id:
@@ -1894,16 +1935,20 @@ class CameraWireTool:
         # were silently reset on every reload.
         self._apply_symbol_meta()
 
-        # If we adopted a sibling project file, override active_floor to
-        # the floor matching THIS drawio so the user lands on what they
-        # actually clicked instead of the project's last-saved active.
-        if getattr(self, "_adopt_as_active_after_load", False):
-            my_basename = os.path.basename(self.drawio_path)
-            for f in proj.floors:
-                if (isinstance(f.drawio_file, str)
-                        and os.path.basename(f.drawio_file) == my_basename):
+        # Reconcile active_floor with the .drawio we actually opened —
+        # ALWAYS, not only when a sibling project file was adopted. The
+        # devices/background come from self.drawio_path; if the saved
+        # active_floor points at a different floor, we'd load THAT
+        # floor's wires/annotations (with its alignment scale) on top of
+        # this floor's plan, and new wires would persist into the wrong
+        # floor's record.
+        my_basename = os.path.basename(self.drawio_path)
+        for f in proj.floors:
+            if (isinstance(f.drawio_file, str)
+                    and os.path.basename(f.drawio_file) == my_basename):
+                if proj.active_floor != f.id:
                     proj.active_floor = f.id
-                    break
+                break
 
         # Active floor's wire routes → self.wire_routes (recalc lengths now)
         active = proj.get_floor(proj.active_floor) or proj.floors[0]
@@ -2033,8 +2078,13 @@ class CameraWireTool:
             cats.add(self._category_of(code))
         return sorted(cats)
 
-    def _save_project(self) -> None:
-        """Persist as v2 project file. Captures cable types + active floor wires."""
+    def _save_project(self) -> bool:
+        """Persist as v2 project file. Captures cable types + active floor wires.
+
+        Returns True on success. Callers MUST check the result: a failed
+        project write with a True-looking outcome used to mark the app
+        clean and delete the crash autosave — silently losing every wire,
+        scale, and annotation change if the user then closed."""
         if self._project is None:
             self._project = mf_mod.ProjectState(
                 floors=[mf_mod.FloorState(
@@ -2070,10 +2120,11 @@ class CameraWireTool:
         except OSError as e:
             log_error(f"Could not write project file {self.project_path}", e)
             messagebox.showerror("Save failed", f"Could not write project file:\n{e}")
-            return
+            return False
         # Append a revision to the side-car .zsmt backlog so every save is
         # recoverable. Best-effort + content-deduped (no-op saves don't spam).
         self._commit_revision(note="save")
+        return True
 
     # ---------------- Project bundle (.zsmt) — revision backlog
     def _bundle_sidecar_path(self) -> str:
@@ -2257,6 +2308,12 @@ class CameraWireTool:
         sidecar = self._bundle_sidecar_path()
         # Snapshot current state first so the revert is reversible.
         self._commit_revision(note="before revert")
+        # The commit runs on a background thread that reads + hashes the
+        # same .drawio files this method is about to overwrite. Wait for
+        # it — otherwise the "before revert" safety snapshot can capture
+        # half-reverted/torn content, or race the relaunched instance's
+        # own .zsmt write and be dropped entirely.
+        self._flush_revision_commit()
         try:
             wm, floors, rev = bundle_mod.read_revision(sidecar, rev_id)
         except (OSError, ValueError, KeyError, zipfile.BadZipFile) as e:
@@ -2274,10 +2331,14 @@ class CameraWireTool:
                     continue
                 p = (df if os.path.isabs(df)
                      else os.path.normpath(os.path.join(base, df)))
-                with open(p, "wb") as fh:
+                # Atomic, like every other writer in the app — a crash
+                # mid-revert must not tear the working files.
+                with open(p + ".tmp", "wb") as fh:
                     fh.write(data)
-            with open(self.project_path, "w", encoding="utf-8") as fh:
+                os.replace(p + ".tmp", p)
+            with open(self.project_path + ".tmp", "w", encoding="utf-8") as fh:
                 json.dump(wm, fh, indent=2)
+            os.replace(self.project_path + ".tmp", self.project_path)
         except OSError as e:
             messagebox.showerror("Revert failed",
                                  f"Couldn't write restored files:\n{e}")
@@ -2618,6 +2679,12 @@ class CameraWireTool:
             and (now - prev["ts"]) <= self._NUDGE_COALESCE_S
             and self.history
             and self.history[-1] is prev["cmd"]
+            # Never mutate the command captured by _mark_clean as the
+            # saved-state marker: nudge → save → nudge-within-0.6s would
+            # otherwise edit the marker in place, so undo/redo would
+            # falsely report "back at saved state" and the close prompt
+            # would skip the save.
+            and prev["cmd"] is not getattr(self, "_saved_marker", None)
         )
 
         if len(self.selected_devices) == 1:
@@ -4334,7 +4401,12 @@ class CameraWireTool:
         except tk.TclError:
             pass
 
-    def _kbd_space_release(self, _event):
+    def _kbd_space_release(self, event):
+        if self._is_text_focus(event):
+            # Typing spaces into a search Entry must not trigger the
+            # status rewrite + full canvas redraw of _refresh_mode_ui
+            # (the press handler already guards; keep them paired).
+            return
         self._space_pan = False
         self._refresh_mode_ui()
 
@@ -4718,6 +4790,11 @@ class CameraWireTool:
                     "in memory. Close cancelled so you can fix the "
                     "issue and try again.")
                 return False
+        else:
+            # Explicit "No, discard" — drop the recovery snapshot too,
+            # otherwise the next launch re-offers the exact changes the
+            # user just chose to throw away.
+            self._cleanup_autosave()
         return True
 
     # ============================================================ Symbol list
@@ -6283,8 +6360,14 @@ class CameraWireTool:
         eff_scale = self.zoom * a_scale
         dst_w = max(1, int((src_x1 - src_x0) * eff_scale))
         dst_h = max(1, int((src_y1 - src_y0) * eff_scale))
-        if dst_w > C.VIEWPORT_MAX_DIM or dst_h > C.VIEWPORT_MAX_DIM:
-            sc = C.VIEWPORT_MAX_DIM / max(dst_w, dst_h)
+        # Perf guard against pathological sizes — but never below what
+        # the canvas actually needs: shrinking the resize without
+        # compensating the NW-anchored placement renders the background
+        # smaller than the region it represents (visible on >4000-px
+        # canvases and when rotation inflates the crop bbox).
+        max_dim = max(C.VIEWPORT_MAX_DIM, cw + ch)
+        if dst_w > max_dim or dst_h > max_dim:
+            sc = max_dim / max(dst_w, dst_h)
             dst_w = max(1, int(dst_w * sc))
             dst_h = max(1, int(dst_h * sc))
         # Two-tier resampling: BILINEAR during active interaction (panning,
@@ -6301,13 +6384,23 @@ class CameraWireTool:
         tk_img = ImageTk.PhotoImage(resized)
         place_x, place_y = self._img_to_canvas(src_x0, src_y0)
         if has_rot:
-            # After PIL's expand=True rotate, the image's origin shifted —
-            # offset the placement so the visible centre stays put.
-            # Compute the centre of the un-rotated dst rect mapped to
-            # canvas, then translate by half the rotated image size.
+            # Placement under rotation. _img_to_canvas gives M(c0) — where
+            # the crop's NW raw corner must land. PIL's expand=True rotate
+            # pivots about the image CENTER, so the NW corner of the
+            # rotated bitmap sits at M(c0) − rx/2·î − ry/2·ĵ + Rc·v where
+            # v = (dst_w/2, dst_h/2) is the half-size of the unrotated
+            # bitmap and Rc the same screen-space rotation the alignment
+            # applies. The old code shifted by the UN-rotated v, i.e.
+            # (I−Rc)·v of error — the plan slid under the overlays as you
+            # panned on any rotated floor.
             rx = tk_img.width(); ry = tk_img.height()
-            place_x -= (rx - dst_w) / 2
-            place_y -= (ry - dst_h) / 2
+            ar = math.radians(a_rot)
+            ca, sa = math.cos(ar), math.sin(ar)
+            vx, vy = dst_w / 2, dst_h / 2
+            rvx = ca * vx - sa * vy
+            rvy = sa * vx + ca * vy
+            place_x += rvx - rx / 2
+            place_y += rvy - ry / 2
         return tk_img, place_x, place_y
 
     def _schedule_redraw(self) -> None:
@@ -6410,9 +6503,21 @@ class CameraWireTool:
         eff = self.zoom * a_scale
         dst_w = max(1, int((gx1 - gx0) * eff))
         dst_h = max(1, int((gy1 - gy0) * eff))
-        # Cap so we don't burn time resizing to 8000+ pixels of canvas.
-        dst_w = min(dst_w, cw + 200)
-        dst_h = min(dst_h, ch + 200)
+        # Perf guard against pathological sizes — proportional (the old
+        # per-axis `min(dst, cw+200)` clamp distorted the aspect ratio
+        # AND rendered the ghost smaller than the region it covers) and
+        # never below what the canvas needs, same as _get_viewport_image.
+        max_dim = max(C.VIEWPORT_MAX_DIM, cw + ch)
+        if dst_w > max_dim or dst_h > max_dim:
+            sc = max_dim / max(dst_w, dst_h)
+            dst_w = max(1, int(dst_w * sc))
+            dst_h = max(1, int(dst_h * sc))
+        g_rot = 0.0
+        try:
+            g_rot = float(ghost_align.get("rotation_deg", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        has_rot = abs(g_rot) > 0.01
         try:
             resized = cropped.resize((dst_w, dst_h), Image.BILINEAR)
             # Apply 35% alpha
@@ -6422,12 +6527,26 @@ class CameraWireTool:
             # Tint cyan-ish so it visually contrasts with the active floor.
             b = b.point(lambda v: min(255, v + 30))
             rgba = Image.merge("RGBA", (r, g, b, a))
+            if has_rot:
+                # The ghost's alignment can carry rotation too — the old
+                # path ignored it entirely, rendering the ghost un-rotated
+                # at a rotated corner position (cross-floor comparison,
+                # the feature's whole point, was wrong).
+                rgba = rgba.rotate(-g_rot, resample=Image.BILINEAR,
+                                   expand=True)
         except Exception:
             return
         # Place the cropped piece at its aligned-canvas position.
         gax, gay = mf_mod.apply_alignment((gx0, gy0), ghost_align)
         place_x = gax * self.zoom + self.offset_x
         place_y = gay * self.zoom + self.offset_y
+        if has_rot:
+            # Same expand-rotate placement algebra as _get_viewport_image.
+            ar = math.radians(g_rot)
+            ca, sa = math.cos(ar), math.sin(ar)
+            vx, vy = dst_w / 2, dst_h / 2
+            place_x += (ca * vx - sa * vy) - rgba.width / 2
+            place_y += (sa * vx + ca * vy) - rgba.height / 2
         try:
             tk_img = ImageTk.PhotoImage(rgba)
         except Exception:
@@ -6572,37 +6691,44 @@ class CameraWireTool:
             draw_minor = self.zoom > 0.4
             label = "px"
 
-        # Visible image-pixel range
-        ix0, iy0 = self._canvas_to_img(0, 0)
-        ix1, iy1 = self._canvas_to_img(cw, ch)
+        # Visible image-pixel range. All FOUR corners: with a rotated
+        # alignment the inverse-mapped viewport isn't axis-aligned in
+        # raw space — the old two-corner version made ix1 < ix0 at
+        # 90–270° (grid vanished) and mis-ranged at moderate angles.
+        corners = [self._canvas_to_img(0, 0), self._canvas_to_img(cw, 0),
+                   self._canvas_to_img(0, ch), self._canvas_to_img(cw, ch)]
+        ix0 = min(c[0] for c in corners); ix1 = max(c[0] for c in corners)
+        iy0 = min(c[1] for c in corners); iy1 = max(c[1] for c in corners)
+
+        def _grid_line(p0, p1, **kw):
+            # Draw as a raw-space SEGMENT mapped through the alignment —
+            # a constant-raw-x line is not vertical on screen when the
+            # floor is rotated; full-height canvas lines would paint a
+            # false grid that devices then snap to.
+            c0 = self._img_to_canvas(*p0)
+            c1 = self._img_to_canvas(*p1)
+            self.canvas.create_line(c0[0], c0[1], c1[0], c1[1],
+                                     tags="grid", **kw)
 
         # Minor grid (very faint)
         if draw_minor:
             x = math.floor(ix0 / small_px) * small_px
             while x < ix1:
-                cx, _ = self._img_to_canvas(x, 0)
-                self.canvas.create_line(cx, 0, cx, ch,
-                                         fill="#222a33", tags="grid")
+                _grid_line((x, iy0), (x, iy1), fill="#222a33")
                 x += small_px
             y = math.floor(iy0 / small_px) * small_px
             while y < iy1:
-                _, cy = self._img_to_canvas(0, y)
-                self.canvas.create_line(0, cy, cw, cy,
-                                         fill="#222a33", tags="grid")
+                _grid_line((ix0, y), (ix1, y), fill="#222a33")
                 y += small_px
 
         # Major grid (slightly stronger)
         x = math.floor(ix0 / step_px) * step_px
         while x < ix1:
-            cx, _ = self._img_to_canvas(x, 0)
-            self.canvas.create_line(cx, 0, cx, ch,
-                                     fill="#3a4253", width=1, tags="grid")
+            _grid_line((x, iy0), (x, iy1), fill="#3a4253", width=1)
             x += step_px
         y = math.floor(iy0 / step_px) * step_px
         while y < iy1:
-            _, cy = self._img_to_canvas(0, y)
-            self.canvas.create_line(0, cy, cw, cy,
-                                     fill="#3a4253", width=1, tags="grid")
+            _grid_line((ix0, y), (ix1, y), fill="#3a4253", width=1)
             y += step_px
 
         # Label in the corner so user knows the spacing
@@ -6644,10 +6770,26 @@ class CameraWireTool:
         sel_ids = frozenset(d["id"] for d in self.selected_devices)
         sel_wire = self._selected_wire()
         sel_wire_id = id(sel_wire) if sel_wire is not None else 0
+        # Include the selected wire's GEOMETRY, not just its identity —
+        # dragging one of its waypoints must invalidate the cached path
+        # or the red minimap trace lags until an unrelated change.
+        sel_wire_geom = (tuple(map(tuple, sel_wire["points"]))
+                         if sel_wire is not None
+                         and isinstance(sel_wire.get("points"), list)
+                         else ())
+
+        def _num(v):
+            # Devices from hand-edited/imported files can carry non-
+            # numeric coords; _draw_device skips them — the minimap must
+            # not crash the whole redraw on them either.
+            try:
+                return round(float(v), 1)
+            except (TypeError, ValueError):
+                return 0.0
         token = (
             len(self.devices), len(self.wire_routes),
-            sel_ids, sel_wire_id,
-            tuple((d["id"], round(d["x"], 1), round(d["y"], 1))
+            sel_ids, sel_wire_id, sel_wire_geom,
+            tuple((d["id"], _num(d.get("x")), _num(d.get("y")))
                   for d in self.devices),
         )
         if token != getattr(self, "_minimap_state_token", None):
@@ -6695,8 +6837,11 @@ class CameraWireTool:
         # Tiny dots for placed devices. Selected ones bigger + red.
         sel_ids = {d["id"] for d in self.selected_devices}
         for d in self.devices:
-            cx = (d["x"] + d["w"]/2) * self.dx_scale
-            cy = (d["y"] + d["h"]/2) * self.dy_scale
+            try:
+                cx = (float(d["x"]) + float(d["w"])/2) * self.dx_scale
+                cy = (float(d["y"]) + float(d["h"])/2) * self.dy_scale
+            except (TypeError, ValueError, KeyError):
+                continue   # malformed device — skip, same as _draw_device
             mx = ox + cx * scale_x
             my = oy + cy * scale_y
             if d["id"] in sel_ids:
@@ -7421,14 +7566,17 @@ class CameraWireTool:
 
     # ============================================================ Hit testing
     def _selected_wire(self) -> dict | None:
-        """Return the route currently highlighted in the Wires listbox, if any."""
+        """Return the route currently highlighted in the Wires listbox, if any.
+
+        Rows must be mapped through _wire_index_for_listbox — the listbox
+        contains group-header rows in grouped sort modes, so a raw row
+        number indexed into the header-free filtered list returns the
+        WRONG wire (off by one per preceding header)."""
         sel = self.wire_listbox.curselection() if hasattr(self, "wire_listbox") else ()
-        if not sel or not hasattr(self, "_filtered_wire_indices"):
+        if not sel:
             return None
-        if sel[0] >= len(self._filtered_wire_indices):
-            return None
-        idx = self._filtered_wire_indices[sel[0]]
-        if 0 <= idx < len(self.wire_routes):
+        idx = self._wire_index_for_listbox(sel[0])
+        if idx is not None and 0 <= idx < len(self.wire_routes):
             return self.wire_routes[idx]
         return None
 
@@ -7497,6 +7645,10 @@ class CameraWireTool:
         for idx, route in enumerate(self.wire_routes):
             if not isinstance(route, dict):
                 continue
+            # Per-wire hiding (hidden device type / unwired filter) makes
+            # the wire invisible — it must not intercept clicks or hover.
+            if self._wire_hidden(route):
+                continue
             pts = route.get("points")
             if not isinstance(pts, list) or len(pts) < 2:
                 continue
@@ -7539,6 +7691,11 @@ class CameraWireTool:
             # for the group headers.
             list_pos = self._wire_listbox_rows.index(route_index)
         except ValueError:
+            # Wire isn't in the (possibly filtered) list. Clear any OLD
+            # selection: context-menu / double-click actions re-read
+            # curselection(), and leaving a stale row selected made
+            # "Delete wire" on canvas wire A delete listbox wire B.
+            self.wire_listbox.selection_clear(0, tk.END)
             return
         self.wire_listbox.selection_clear(0, tk.END)
         self.wire_listbox.selection_set(list_pos)
@@ -7899,7 +8056,16 @@ class CameraWireTool:
                 ref_pts = [tuple(p) for p in reference.anchor_points[:2]]
                 tgt_pts = [tuple(p) for p in target.anchor_points[:2]]
                 # compute_alignment(A, B) maps B → A; we want target drawn
-                # in reference's frame, so reference is A, target is B.
+                # in the WORLD frame. Anchor clicks are RAW pixels on the
+                # reference floor — if that floor is itself aligned, map
+                # its anchors through its own alignment first, otherwise
+                # the produced transform lands the target in the
+                # reference's raw frame and drops the reference's scale
+                # from every wire length on the target floor.
+                ref_align = getattr(reference, "alignment", None)
+                if isinstance(ref_align, dict):
+                    ref_pts = [mf_mod.apply_alignment(p, ref_align)
+                               for p in ref_pts]
                 target.alignment = mf_mod.compute_alignment(ref_pts, tgt_pts)
                 self._floor_align_target = None
                 self._mark_dirty()
@@ -8466,14 +8632,18 @@ class CameraWireTool:
                 step_in = (self._IN_PER_M if unit in ("meters", "cm", "m-cm")
                            else 12 * 5)   # 1 m or 5 ft
                 step_px = step_in / eff_grid     # raw image pixels per step
-                step_d = step_px / self.dx_scale            # drawio units per step
+                # The grid is painted at step_px intervals in IMAGE pixels
+                # on both axes; drawio-unit steps differ per axis when the
+                # page/image aspect ratios differ (dx_scale != dy_scale).
+                step_dx = step_px / self.dx_scale           # drawio units per step (x)
+                step_dy = step_px / self.dy_scale           # drawio units per step (y)
                 w_d = self.dragging_device["w"]
                 h_d = self.dragging_device["h"]
                 center_dx = new_dx + w_d / 2
                 center_dy = new_dy + h_d / 2
                 # Snap center to nearest grid point
-                snap_cx = round(center_dx / step_d) * step_d
-                snap_cy = round(center_dy / step_d) * step_d
+                snap_cx = round(center_dx / step_dx) * step_dx
+                snap_cy = round(center_dy / step_dy) * step_dy
                 new_dx = snap_cx - w_d / 2
                 new_dy = snap_cy - h_d / 2
             # If we're in a multi-device drag, move every selected device by
@@ -8505,16 +8675,29 @@ class CameraWireTool:
             self.canvas.delete("lasso")
             if self._lasso["moved"]:
                 # Real lasso drag — pick every device whose center sits
-                # inside the rectangle (image-coord box).
+                # inside the rectangle. Containment is tested in CANVAS
+                # space (device center mapped forward through zoom +
+                # alignment), not by inverse-mapping two corners: with a
+                # rotated floor alignment the inverse-mapped corners no
+                # longer bound an axis-aligned raw-image box, which made
+                # box selection match nothing (or the wrong region).
                 sx, sy = self._lasso["start"]
                 ex, ey = self._lasso["current"]
-                ix0, iy0 = self._canvas_to_img(min(sx, ex), min(sy, ey))
-                ix1, iy1 = self._canvas_to_img(max(sx, ex), max(sy, ey))
+                cx0, cx1 = min(sx, ex), max(sx, ex)
+                cy0, cy1 = min(sy, ey), max(sy, ey)
                 hits = []
                 for d in self.devices:
+                    # Invisible devices must not be lassoed — a hidden
+                    # device silently included in a Delete would be lost
+                    # without the user ever seeing it selected.
+                    if d.get("type") in self._hidden_types:
+                        continue
+                    if self._hidden_by_unwired_filter(d):
+                        continue
                     cx_img = (d["x"] + d["w"]/2) * self.dx_scale
                     cy_img = (d["y"] + d["h"]/2) * self.dy_scale
-                    if ix0 <= cx_img <= ix1 and iy0 <= cy_img <= iy1:
+                    ccx, ccy = self._img_to_canvas(cx_img, cy_img)
+                    if cx0 <= ccx <= cx1 and cy0 <= ccy <= cy1:
                         hits.append(d)
                 if self._lasso["shift"]:
                     # Shift-drag: ADD to existing selection
@@ -9247,7 +9430,16 @@ class CameraWireTool:
                                   ttk.Spinbox, ttk.Combobox)):
             return
         # Prefer wires if any wire-list rows are selected (supports multi)
-        if self.wire_listbox.curselection():
+        # — but ONLY while the Wires tab is showing. The wire listbox
+        # keeps its selection while other tabs are on top, so Del after
+        # e.g. Ctrl+A on the Devices tab used to silently delete an
+        # off-screen wire instead of prompting for the devices.
+        wires_tab_active = True
+        try:
+            wires_tab_active = self._notebook.index("current") == 1
+        except (AttributeError, tk.TclError):
+            pass
+        if wires_tab_active and self.wire_listbox.curselection():
             sels = list(self.wire_listbox.curselection())
             if len(sels) >= 2:
                 self._delete_selected_wires_multi(sels)
@@ -9443,13 +9635,18 @@ class CameraWireTool:
 
     def _center_on_selected(self) -> None:
         # Sync from the dev-listbox row in case the user invoked this
-        # from a single-click in the listbox (rather than a canvas click).
-        sel_idx = self.dev_listbox.curselection()
-        if (sel_idx and hasattr(self, "_dev_listbox_rows")
-                and sel_idx[0] < len(self._dev_listbox_rows)):
-            row = self._dev_listbox_rows[sel_idx[0]]
-            if isinstance(row, dict):   # skip headers and cross-floor entries
-                self.selected_device = row
+        # from a single-click in the listbox (rather than a canvas click)
+        # — but never at the cost of an existing MULTI-selection: the
+        # selected_device setter replaces the whole selection set, which
+        # collapsed a Ctrl-selected group to one device and made the
+        # group-bbox branch below unreachable.
+        if len(self.selected_devices) <= 1:
+            sel_idx = self.dev_listbox.curselection()
+            if (sel_idx and hasattr(self, "_dev_listbox_rows")
+                    and sel_idx[0] < len(self._dev_listbox_rows)):
+                row = self._dev_listbox_rows[sel_idx[0]]
+                if isinstance(row, dict):   # skip headers and cross-floor entries
+                    self.selected_device = row
         # If multiple devices are selected, center on the group's bbox
         # midpoint so all are at least in view — was just the primary
         # before, which could leave the rest off-screen.
@@ -10140,6 +10337,8 @@ class CameraWireTool:
             for disp, did in candidates:
                 if not q or q in disp.lower() or (did and q in did.lower()):
                     visible.append((disp, did))
+            if sel[0] >= len(visible):
+                return  # "(no matches)" placeholder row — not a device
             _, new_did = visible[sel[0]]
             if new_did == cur_did:
                 dlg.destroy(); return
@@ -10416,6 +10615,11 @@ class CameraWireTool:
                     if geom is not None:
                         geom.set("x", f"{dev['x']:.1f}")
                         geom.set("y", f"{dev['y']:.1f}")
+                        # Size too — the transform gizmo can resize a
+                        # device; writing only x/y silently reverted the
+                        # size on save→reload.
+                        geom.set("width", f"{dev['w']:.0f}")
+                        geom.set("height", f"{dev['h']:.0f}")
                 if parent == "legbox" or cid == "legbox":
                     cells_to_remove.append(cell)
 
@@ -10446,11 +10650,25 @@ class CameraWireTool:
                     geom.set("height", f"{dev['h']:.0f}")
                     geom.set("as", "geometry")
 
-            # Remove deleted device cells
+            # Remove deleted device cells. Two sweeps:
+            #   1. Any id we PARSED as a device this session that's no
+            #      longer in self.devices was deleted by the user —
+            #      remove it whatever its id looks like (source .drawio
+            #      cells have arbitrary draw.io ids; the old "starts
+            #      with 's'" heuristic resurrected them on reload).
+            #   2. Legacy heuristic kept as a fallback for sessions
+            #      where the parse-id set is missing (autosave recovery
+            #      edge cases).
             current_ids = {d["id"] for d in self.devices}
+            parsed_ids = getattr(self, "_device_ids_at_parse", set())
             for cell in list(root_elem.findall("mxCell")):
                 cid = cell.get("id", "")
-                if cid.startswith("s") and cid not in current_ids and cid not in ("0", "1"):
+                if cid in ("0", "1") or cid in current_ids:
+                    continue
+                if cid in parsed_ids:
+                    root_elem.remove(cell)
+                    continue
+                if cid.startswith("s"):
                     val = cell.get("value", "")
                     if val and len(val) <= 6:
                         root_elem.remove(cell)
@@ -10517,7 +10735,12 @@ class CameraWireTool:
             tmp_path = self.drawio_path + ".tmp"
             tree.write(tmp_path, xml_declaration=True, encoding="utf-8")
             os.replace(tmp_path, self.drawio_path)
-            self._save_project()
+            if not self._save_project():
+                # The .drawio was written but the project file (wires,
+                # scale, annotations, floors) was NOT. Do not mark clean
+                # and do not delete the autosave — the user has already
+                # seen _save_project's error dialog.
+                return
         except Exception as e:
             log_error(f"Failed to write {self.drawio_path}", e)
             # Best-effort cleanup of the staged tmp file
@@ -10529,6 +10752,10 @@ class CameraWireTool:
             messagebox.showerror("Save failed", f"Could not write file:\n{e}")
             return
 
+        # The XML now contains exactly the current device set — refresh
+        # the parse-id snapshot so the next save's deleted-cell sweep
+        # covers devices added this session too.
+        self._device_ids_at_parse = {d["id"] for d in self.devices}
         self._mark_clean()
         self._cleanup_autosave()    # autosave is no longer needed
         push_recent_file(self.drawio_path)
@@ -10806,6 +11033,10 @@ class CameraWireTool:
             "format": "camera-wire-tool/autosave/v1",
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "drawio_file": os.path.basename(self.drawio_path),
+            # Which floor the snapshot belongs to — recovery must refuse
+            # to overlay Floor 2's devices/wires onto Floor 1.
+            "active_floor": (self._project.active_floor
+                             if self._project is not None else None),
             "scale_factor": self.scale_factor,
             "unit": self.unit_var.get(),
             "next_device_id": self._next_device_id,
@@ -10859,6 +11090,26 @@ class CameraWireTool:
                 data = json.load(f)
         except (OSError, ValueError):
             self._cleanup_autosave()
+            return
+        # Floor mismatch guard: the snapshot captures ONE floor's state.
+        # Overlaying it onto a different floor grafts that floor's
+        # devices into this floor's .drawio — and the next save's
+        # deleted-cell sweep would then destroy this floor's real
+        # devices. Keep the autosave on disk so the user can reopen the
+        # right floor and recover there.
+        snap_file = data.get("drawio_file")
+        cur_file = os.path.basename(self.drawio_path)
+        snap_floor = data.get("active_floor")
+        cur_floor = (self._project.active_floor
+                     if self._project is not None else None)
+        if ((snap_file and snap_file != cur_file)
+                or (snap_floor and cur_floor and snap_floor != cur_floor)):
+            messagebox.showwarning(
+                "Unsaved changes on another floor",
+                f"A crash-recovery snapshot exists for "
+                f"{snap_file or snap_floor}, but you opened {cur_file}.\n\n"
+                f"Open that floor's plan to recover the changes (the "
+                f"snapshot has been kept).")
             return
         when = data.get("saved_at", "<unknown time>")
         # Surface a quick summary of what's in the autosave so users
@@ -13216,21 +13467,38 @@ class CameraWireTool:
     def _assign_model_to_devices(self, devices: list[dict], model_id: str) -> None:
         if self._project is None:
             return
-        cams = [d for d in devices
-                if isinstance(d, dict) and self._is_camera_type(d.get("type"))]
-        if not cams:
-            self._flash_status("Select one or more cameras first.", ttl_ms=3000)
+        # Models apply to EVERY device type — WAPs/readers carry a model
+        # + price into the BOM (see the context-menu comment) — so don't
+        # filter to cameras here; that silently skipped non-cameras.
+        targets = [d for d in devices if isinstance(d, dict) and d.get("id")]
+        if not targets:
+            self._flash_status("Select one or more devices first.", ttl_ms=3000)
             return
-        for d in cams:
+        for d in targets:
             self._project.device_models[d["id"]] = model_id
-            d.pop("fov", None)   # let the model's FOV apply
+            # Let the model's FOV preset apply — but keep the user's AIM:
+            # dropping dev['fov'] wholesale reset every hand-aimed cone
+            # back to the model default (pointing up), outside the undo
+            # stack. Mirror the azimuth into device_azimuths first.
+            f = d.get("fov")
+            if isinstance(f, dict) and "azimuth_deg" in f:
+                did = d["id"]
+                if did not in self._project.device_azimuths:
+                    try:
+                        self._project.device_azimuths[did] = (
+                            float(f["azimuth_deg"]) % 360)
+                    except (TypeError, ValueError):
+                        pass
+            d.pop("fov", None)
         self._mark_dirty()
         self._save_project_quiet()
         self._post_command_refresh()
         m = mf_mod.get_camera_model(self._project, model_id)
+        n_cams = sum(1 for d in targets if self._is_camera_type(d.get("type")))
         self._flash_status(
             f"Assigned '{m.get('name', model_id) if m else model_id}' to "
-            f"{self._plural(len(cams), 'camera')}.  (Turn on FOV to see cones.)",
+            f"{self._plural(len(targets), 'device')}."
+            + ("  (Turn on FOV to see cones.)" if n_cams else ""),
             ttl_ms=3500)
 
     def _set_type_default_model(self, type_code: str, model_id: str) -> None:
@@ -13385,6 +13653,23 @@ class CameraWireTool:
                     return float(v)
                 except (TypeError, ValueError):
                     return d
+            # Price gets real validation, not a silent 0.0 fallback:
+            # "1,299" or "$450" quietly saving as $0 understated the BOM
+            # hardware total with no warning. Strip common formatting,
+            # then reject anything that still doesn't parse.
+            price_raw = price_var.get().strip()
+            price_clean = (price_raw.replace(",", "").replace("$", "")
+                           .replace(" ", ""))
+            if price_raw and not price_clean:
+                price_clean = "0"
+            try:
+                price_val = float(price_clean) if price_clean else 0.0
+            except ValueError:
+                messagebox.showwarning(
+                    "Invalid price",
+                    f"'{price_raw}' is not a number. Use e.g. 1299 or "
+                    f"1299.50.", parent=dlg)
+                return
             new_fov = dict(fov)
             new_fov.update({
                 "lens_mm": _f(lens_var.get(), 4.0),
@@ -13404,7 +13689,7 @@ class CameraWireTool:
             entry = mf_mod.coerce_camera_model({
                 "id": mid, "name": name,
                 "model_number": modelno_var.get().strip(),
-                "price": _f(price_var.get(), 0.0),
+                "price": price_val,
                 "fov": new_fov,
             })
             # Replace existing or append.
@@ -14280,6 +14565,14 @@ class CameraWireTool:
                 # isn't moved off unsaved data.
                 log_error("Silent save before floor switch failed", e)
                 return
+            if self._dirty:
+                # _save_drawio handles its failures internally (dialog +
+                # return) without raising — it leaves the dirty flag set.
+                # Proceeding would swap self.devices out from under the
+                # user's unsaved edits and lose them permanently.
+                log_error("Silent save before floor switch did not complete; "
+                          "switch aborted")
+                return
 
         # Save active floor's wires + annotations back to its FloorState
         # so a subsequent switch back round-trips correctly. Defensive:
@@ -14345,6 +14638,7 @@ class CameraWireTool:
         self.dx_scale = self.img_w / self.page_w
         self.dy_scale = self.img_h / self.page_h
         self.devices = devs
+        self._device_ids_at_parse = {d["id"] for d in devs}
         # symbol_types is per-floor today (each .drawio carries its own
         # named styles). Merge new entries onto whatever the project
         # had so a previously-edited symbol on Floor 1 doesn't disappear
@@ -14387,6 +14681,14 @@ class CameraWireTool:
         self._ghost_bg_cache.clear()
         self._other_floor_devs.clear()
         self._lasso = None
+        # Undo/redo history holds commands whose captured refs point into
+        # the floor we just left — replaying them here would insert the
+        # old floor's wires/devices into this one (and ClearWiresCmd.undo
+        # would REPLACE this floor's wires with the other floor's). The
+        # old floor's state is already saved; drop the stacks.
+        self.history.clear()
+        self.future.clear()
+        self._saved_marker = None
         try:
             self.mode = Mode.MOVE
             if hasattr(self, "mode_var"):
@@ -14880,44 +15182,79 @@ class CameraWireTool:
             """Crop the visible portion of src_rgba (in source pixel
             space) and paste it onto dest (canvas-sized) at the right
             place. Bounds the resize output to canvas size so PIL
-            never works on a 4000+ pixel image just to show a slice."""
+            never works on a 4000+ pixel image just to show a slice.
+
+            The rotated branch renders EXACTLY the transform Apply
+            stores (canvas = origin + scale·R·p — rotation about the
+            SOURCE ORIGIN, same as mf_mod.apply_alignment). The old
+            version rotated the clipped crop about its own center, so
+            what the user registered on screen and what got written to
+            the alignment differed by scale·(I−R)·center — thousands of
+            pixels at 90° on a real plan."""
             cw, ch = dest.size
             sx, sy = src_origin_canvas
-            sw_c = src_rgba.width * src_to_canvas_scale
-            sh_c = src_rgba.height * src_to_canvas_scale
-            # Compute which canvas-rect the layer occupies, then clip
-            # to (0, 0, cw, ch). Anything outside is invisible.
-            x0 = max(0.0, sx)
-            y0 = max(0.0, sy)
-            x1 = min(float(cw), sx + sw_c)
-            y1 = min(float(ch), sy + sh_c)
-            if x1 <= x0 or y1 <= y0:
+            es = src_to_canvas_scale
+            if not es:
                 return
-            # Map the clipped canvas rect back to source pixel space.
-            inv = 1.0 / src_to_canvas_scale if src_to_canvas_scale else 1.0
-            src_x0 = max(0, int(math.floor((x0 - sx) * inv)))
-            src_y0 = max(0, int(math.floor((y0 - sy) * inv)))
-            src_x1 = min(src_rgba.width, int(math.ceil((x1 - sx) * inv)))
-            src_y1 = min(src_rgba.height, int(math.ceil((y1 - sy) * inv)))
+            resample = Image.NEAREST if held.get("interactive") else Image.BILINEAR
+            if abs(rotation_deg) <= 0.01:
+                sw_c = src_rgba.width * es
+                sh_c = src_rgba.height * es
+                # Compute which canvas-rect the layer occupies, then clip
+                # to (0, 0, cw, ch). Anything outside is invisible.
+                x0 = max(0.0, sx)
+                y0 = max(0.0, sy)
+                x1 = min(float(cw), sx + sw_c)
+                y1 = min(float(ch), sy + sh_c)
+                if x1 <= x0 or y1 <= y0:
+                    return
+                # Map the clipped canvas rect back to source pixel space.
+                inv = 1.0 / es
+                src_x0 = max(0, int(math.floor((x0 - sx) * inv)))
+                src_y0 = max(0, int(math.floor((y0 - sy) * inv)))
+                src_x1 = min(src_rgba.width, int(math.ceil((x1 - sx) * inv)))
+                src_y1 = min(src_rgba.height, int(math.ceil((y1 - sy) * inv)))
+                if src_x1 <= src_x0 or src_y1 <= src_y0:
+                    return
+                cropped = src_rgba.crop((src_x0, src_y0, src_x1, src_y1))
+                # Display size = the clipped canvas rect rounded out a hair.
+                dst_w = max(1, int(math.ceil(x1 - x0)))
+                dst_h = max(1, int(math.ceil(y1 - y0)))
+                scaled = cropped.resize((dst_w, dst_h), resample)
+                dest.paste(scaled, (int(x0), int(y0)), scaled)
+                return
+            # ---- Rotated: canvas = (sx,sy) + es·R·p, R about source origin.
+            ar = math.radians(rotation_deg)
+            ca, sa = math.cos(ar), math.sin(ar)
+            # Visible source rect: inverse-map the 4 canvas corners
+            # (p = Rᵀ·(c − origin)/es) and take the bbox — the un-rotated
+            # footprint clipped rotated content out of the preview.
+            pts = []
+            for ccx, ccy in ((0, 0), (cw, 0), (0, ch), (cw, ch)):
+                dx0, dy0 = (ccx - sx) / es, (ccy - sy) / es
+                pts.append((ca * dx0 + sa * dy0, -sa * dx0 + ca * dy0))
+            src_x0 = max(0, int(math.floor(min(p[0] for p in pts))))
+            src_y0 = max(0, int(math.floor(min(p[1] for p in pts))))
+            src_x1 = min(src_rgba.width, int(math.ceil(max(p[0] for p in pts))))
+            src_y1 = min(src_rgba.height, int(math.ceil(max(p[1] for p in pts))))
             if src_x1 <= src_x0 or src_y1 <= src_y0:
                 return
             cropped = src_rgba.crop((src_x0, src_y0, src_x1, src_y1))
-            # Display size = the clipped canvas rect rounded out a hair.
-            dst_w = max(1, int(math.ceil(x1 - x0)))
-            dst_h = max(1, int(math.ceil(y1 - y0)))
-            # NEAREST during interaction = ~10× faster than BILINEAR.
-            # Quality settles on idle via the schedule below.
-            resample = Image.NEAREST if held.get("interactive") else Image.BILINEAR
+            dst_w = max(1, int((src_x1 - src_x0) * es))
+            dst_h = max(1, int((src_y1 - src_y0) * es))
             scaled = cropped.resize((dst_w, dst_h), resample)
-            if abs(rotation_deg) > 0.01:
-                scaled = scaled.rotate(-rotation_deg, resample=resample,
-                                       expand=True)
-                dest.paste(scaled,
-                           (int(x0 - (scaled.width - dst_w) / 2),
-                            int(y0 - (scaled.height - dst_h) / 2)),
-                           scaled)
-            else:
-                dest.paste(scaled, (int(x0), int(y0)), scaled)
+            rotated = scaled.rotate(-rotation_deg, resample=resample,
+                                    expand=True)
+            # Same placement algebra as _get_viewport_image: the crop's
+            # NW corner c0 must land at origin + es·R·c0; PIL's expand-
+            # rotate pivots about the bitmap center, so shift by the
+            # ROTATED half-size minus the expanded half-size.
+            m0x = sx + es * (ca * src_x0 - sa * src_y0)
+            m0y = sy + es * (sa * src_x0 + ca * src_y0)
+            vx, vy = dst_w / 2, dst_h / 2
+            px = m0x + (ca * vx - sa * vy) - rotated.width / 2
+            py = m0y + (sa * vx + ca * vy) - rotated.height / 2
+            dest.paste(rotated, (int(px), int(py)), rotated)
 
         def _draw_unsafe():
             _ensure_view_fit()
@@ -15160,9 +15497,25 @@ class CameraWireTool:
             _schedule_redraw(interactive=False)
         def _on_rot_var(*_):
             try:
-                draft["rotation_deg"] = float(rot_var.get())
+                new_rot = float(rot_var.get())
             except (tk.TclError, ValueError):
                 return
+            old_rot = draft["rotation_deg"]
+            if abs(new_rot - old_rot) > 1e-9:
+                # The stored transform rotates about the SOURCE ORIGIN
+                # (top-left of the raw plan). Compensate tx/ty so the
+                # layer visually pivots about its own center instead of
+                # sweeping across the workspace when the user spins it.
+                s = draft["scale"]
+                pcx = held["act_raw"].width / 2
+                pcy = held["act_raw"].height / 2
+                r0, r1 = math.radians(old_rot), math.radians(new_rot)
+                dc = math.cos(r0) - math.cos(r1)
+                ds = math.sin(r0) - math.sin(r1)
+                draft["tx"] += s * (dc * pcx - ds * pcy)
+                draft["ty"] += s * (ds * pcx + dc * pcy)
+                draft["rotation_deg"] = new_rot
+                _sync_vars_from_draft()
             _schedule_redraw(interactive=False)
         def _on_tx_var(*_):
             try:
@@ -15876,6 +16229,10 @@ class CameraWireTool:
                 format_length=self._format_length,
                 currency=self._bom_currency_var.get() or "$",
                 cable_types=self.cable_types,
+                # Same resolution chain as the BOM report — without it,
+                # wires.csv could disagree with bom.csv in the same
+                # bundle about which cable an auto-resolved run uses.
+                project_default=self._proj_default_cable(),
             )
             messagebox.showinfo("Exported", "Wrote:\n" + "\n".join(paths))
         except OSError as e:
@@ -16088,7 +16445,11 @@ class CameraWireTool:
         # ---- FOV cones first (semi-transparent, UNDER everything else).
         if self._show_fov.get():
             eff = self._effective_scale_factor()
-            ipp = (1.0 / eff) if eff else 0.5
+            # eff is inches-per-raw-pixel (see _recalc_all_wires) and
+            # cone_polygon divides radius_in by inches_per_pixel, so eff
+            # is passed straight through. (Passing 1/eff here drew every
+            # cone at eff² of its true size.)
+            ipp = eff if eff else 0.5
             alpha_map = {"gray12": 40, "gray25": 70, "gray50": 120}
             fov_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             fd = ImageDraw.Draw(fov_layer)
@@ -16323,7 +16684,15 @@ class CameraWireTool:
             return
         try:
             tmp_path = path + ".tmp"
-            img.save(tmp_path)
+            # PIL infers the format from the extension; ".tmp" is not a
+            # registered format so the save raised ValueError on every
+            # snapshot. Derive the format from the REAL target path.
+            fmt = (os.path.splitext(path)[1].lstrip(".") or "png").upper()
+            if fmt in ("JPG", "JPEG"):
+                fmt = "JPEG"
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")   # JPEG has no alpha
+            img.save(tmp_path, format=fmt)
             os.replace(tmp_path, path)
         except Exception as e:
             log_error("Map snapshot failed", e)
@@ -16466,6 +16835,10 @@ class CameraWireTool:
                 "PDF unavailable",
                 "PDF export requires reportlab. `pip install reportlab` "
                 "then restart.")
+            return
+        # Same pre-flight as the other exports: an uncalibrated project
+        # exports a summary quoting 0 ft of wire with no hint why.
+        if not self._warn_if_no_scale("PDF export"):
             return
 
         dlg = tk.Toplevel(self.root)
@@ -16760,6 +17133,13 @@ class CameraWireTool:
         self.current_wire_points = []
 
         map_pages: list[dict] = []
+        # Snapshots of each exported floor's devices/wires, captured
+        # WHILE that floor is active. The summary is built from these —
+        # building it from self.devices after switching back rendered
+        # Floor 2's maps with Floor 1's totals.
+        exported_state: list[tuple[str | None, list, list]] = []
+        skipped_floors: list[str] = []
+        render_error: Exception | None = None
         try:
             if page_specs:
                 self._hidden_types = set(self._hidden_types) | set(hide_types)
@@ -16770,6 +17150,15 @@ class CameraWireTool:
                     if (self._project and fid
                             and fid != self._project.active_floor):
                         self._switch_floor(fid)
+                        if self._project.active_floor != fid:
+                            # Switch failed (missing/corrupt .drawio —
+                            # _switch_floor already showed its dialog).
+                            # Rendering now would emit the PREVIOUS
+                            # floor's map under this floor's caption.
+                            skipped_floors.append(_floor_name(fid))
+                            continue
+                    exported_state.append(
+                        (fid, list(self.devices), list(self.wire_routes)))
                     # Per-page caption: the user's editable text, with the
                     # floor name appended when exporting more than one floor
                     # so the pages stay identifiable.
@@ -16818,6 +17207,12 @@ class CameraWireTool:
                     finally:
                         if floor_legend is not None:
                             self.legend_box = floor_legend
+        except Exception as e:
+            # A render/disk failure must surface as a dialog (not a
+            # silent stderr traceback) and must clean up the already-
+            # rendered temp PNGs — the cleanup in the write block below
+            # was never reached when this path raised.
+            render_error = e
         finally:
             self._hidden_types = saved["hidden"]
             self._show_wires.set(saved["wires"])
@@ -16833,16 +17228,41 @@ class CameraWireTool:
                 self.legend_box = saved["legend_box"]
             self._redraw()
 
-        # The summary must reflect ONLY what was exported — if the user hid
-        # some device types (e.g. exported "IT only"), the breakdown, counts,
-        # cable BOM and hardware all filter to the visible types. Compute the
-        # filtered BOM/model rollups by temporarily swapping in the visible
-        # devices/wires (both helpers read self.devices/self.wire_routes).
+        if render_error is not None:
+            log_error("PDF map export failed while rendering pages",
+                      render_error)
+            for pg in map_pages:
+                ip = pg.get("image")
+                if ip and os.path.exists(ip):
+                    try:
+                        os.unlink(ip)
+                    except OSError:
+                        pass
+            messagebox.showerror("Export failed", str(render_error))
+            return
+        if skipped_floors and not map_pages:
+            messagebox.showerror(
+                "Export failed",
+                "None of the selected floors could be rendered:\n"
+                + "\n".join(skipped_floors))
+            return
+
+        # The summary must reflect ONLY what was exported — the EXPORTED
+        # floors' snapshots (captured while each floor was active), and,
+        # if the user hid some device types (e.g. exported "IT only"),
+        # filtered to the visible types. Compute the filtered BOM/model
+        # rollups by temporarily swapping in the visible devices/wires
+        # (both helpers read self.devices/self.wire_routes).
         export_hidden = set(saved["hidden"]) | set(hide_types)
-        vis_devices = [d for d in self.devices
+        if exported_state:
+            all_devices = [d for _fid, devs, _w in exported_state for d in devs]
+            all_wires = [w for _fid, _d, wires in exported_state for w in wires]
+        else:
+            all_devices, all_wires = self.devices, self.wire_routes
+        vis_devices = [d for d in all_devices
                        if isinstance(d, dict) and d.get("type") not in export_hidden]
         vis_ids = {d.get("id") for d in vis_devices}
-        vis_wires = [w for w in self.wire_routes
+        vis_wires = [w for w in all_wires
                      if isinstance(w, dict)
                      and (not w.get("device_id") or w.get("device_id") in vis_ids)]
         _sd, _sw = self.devices, self.wire_routes
@@ -16869,13 +17289,21 @@ class CameraWireTool:
                 model_lines=vis_models,
                 include_summary=include_summary,
                 summary_options=summary_options,
-                floor_label=(self._project.active_floor if self._project else None),
+                # Label the summary with what was actually exported, not
+                # whichever floor the user happened to be viewing.
+                floor_label=(", ".join(_floor_name(fid)
+                                       for fid, _d, _w in exported_state
+                                       if fid)
+                             or (self._project.active_floor
+                                 if self._project else None)),
                 scale_factor=self.scale_factor,
                 format_length=self._format_length,
                 currency=self._bom_currency_var.get() or "$",
             )
             os.replace(tmp_pdf, path)
-            messagebox.showinfo("Exported", f"PDF written:\n{path}")
+            note = ("\n\nSkipped (couldn't render): "
+                    + ", ".join(skipped_floors) if skipped_floors else "")
+            messagebox.showinfo("Exported", f"PDF written:\n{path}{note}")
         except Exception as e:
             log_error("PDF map export failed", e)
             try:
@@ -17096,10 +17524,11 @@ class CameraWireTool:
     def _draw_fov_cones(self) -> None:
         """Render DORI cones for any cameras with `fov` configured.
 
-        Uses inches_per_pixel = 1/effective_scale_factor to convert DORI
-        radii (inches) into RAW image-pixel coords. The cone polygon is
-        in raw image space; _img_to_canvas applies the floor's alignment
-        when painting it to canvas. Falls back to 0.5 if no scale set.
+        Uses inches_per_pixel = effective_scale_factor (inches per raw
+        pixel) to convert DORI radii (inches) into RAW image-pixel
+        coords. The cone polygon is in raw image space; _img_to_canvas
+        applies the floor's alignment when painting it to canvas. Falls
+        back to 0.5 in/px if no scale set.
         """
         # Skip only at extreme zoom-out. (Was 0.18, which hid cones at the
         # normal fit-view zoom ~0.14 — making FOV look broken.)
@@ -17112,9 +17541,11 @@ class CameraWireTool:
         # Without this, FOV cones on aligned floors were drawn at the
         # WRONG physical size (they used the reference-floor pixel
         # density, ignoring that this floor's raw pixels cover a
-        # different inches-per-pixel).
+        # different inches-per-pixel). eff is inches-per-raw-pixel and
+        # cone_polygon divides by it — pass it straight through (the old
+        # 1/eff here drew every cone at eff² of its true size).
         eff = self._effective_scale_factor()
-        ipp = (1.0 / eff) if eff else 0.5
+        ipp = eff if eff else 0.5
         # 'Only selected' filter: when active and there's a single primary
         # selection that's a camera, render only that one's cone.
         only_selected = self._show_only_selected_fov.get()
@@ -17314,6 +17745,33 @@ def _open_bundle_workdir(zsmt_path: str) -> str | None:
     return the active floor's drawio path (to hand to CameraWireTool)."""
     work = os.path.splitext(zsmt_path)[0] + "_work"
     os.makedirs(work, exist_ok=True)
+    # Salvage guard: revision commits run on a background thread whose
+    # failure is only logged — if the loose work files are NEWER than
+    # the bundle (commit failed / process died before it finished),
+    # blindly re-extracting would silently roll the project back.
+    # Commit the newer work state as a revision first; dedup makes this
+    # a no-op when the bundle already has identical content.
+    try:
+        wm_work = os.path.join(work, "project.wiremap.json")
+        if (os.path.exists(wm_work) and os.path.exists(zsmt_path)
+                and os.path.getmtime(wm_work)
+                    > os.path.getmtime(zsmt_path) + 1):
+            with open(wm_work, encoding="utf-8") as fh:
+                wm_data = json.load(fh)
+            floor_files = {}
+            for f in wm_data.get("floors", []) or []:
+                fid, df = f.get("id"), f.get("drawio_file")
+                if fid and isinstance(df, str):
+                    p = df if os.path.isabs(df) else os.path.join(work, df)
+                    if os.path.exists(p):
+                        floor_files[fid] = p
+            if floor_files:
+                bundle_mod.commit_revision(
+                    zsmt_path, wm_data, floor_files,
+                    note="salvaged newer work files on open",
+                    app_version=cwt.__version__)
+    except Exception as e:
+        log_error("Work-dir salvage before bundle open failed", e)
     wmp, floor_paths, _rev = bundle_mod.extract_revision(zsmt_path, work)
     return _active_drawio_for_wiremap(wmp) or next(iter(floor_paths.values()), None)
 

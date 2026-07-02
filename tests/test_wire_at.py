@@ -24,6 +24,9 @@ def _stub(routes):
         cwt.CameraWireTool._current_alignment(app))
     app._alignment_scale = lambda: (
         cwt.CameraWireTool._alignment_scale(app))
+    # _wire_at skips wires whose device is hidden by the type-visibility
+    # filter — the stub hides nothing.
+    app._wire_hidden = lambda route: False
     return app
 
 

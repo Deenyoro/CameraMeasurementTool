@@ -18,6 +18,11 @@ def _app(scale_factor=None):
         ((pts[i+1][0]-pts[i][0])**2 + (pts[i+1][1]-pts[i][1])**2) ** 0.5
         for i in range(len(pts) - 1)
     )
+    # _recalc_route_length resolves the EFFECTIVE scale (project ×
+    # floor alignment) + riser inches; the stub has no project, so
+    # effective scale == the raw scale_factor and no vertical footage.
+    app._effective_scale_factor = lambda: app.scale_factor
+    app._route_vertical_in = lambda route: 0.0
     return app
 
 
