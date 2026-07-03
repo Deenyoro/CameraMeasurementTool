@@ -1605,6 +1605,9 @@ class CameraWireTool:
         self._cameras_only_var = tk.BooleanVar(value=False)
         # Cross-floor cable drop points layer toggle.
         self._show_drops = tk.BooleanVar(value=True)
+        # Mini-map overlay (top-right of the canvas). Hideable via its
+        # own right-click menu or View → Show Mini-map.
+        self._show_minimap = tk.BooleanVar(value=True)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -1679,6 +1682,7 @@ class CameraWireTool:
             ("show_devices",    self._show_devices),
             ("show_wires",      self._show_wires),
             ("show_drops",      self._show_drops),
+            ("show_minimap",    self._show_minimap),
         ):
             if key in prefs:
                 try:
@@ -3184,6 +3188,9 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show Alignment Grid",
                                   variable=self._show_grid,
                                   command=self._redraw)
+        view_menu.add_checkbutton(label="Show Mini-map",
+                                  variable=self._show_minimap,
+                                  command=self._apply_minimap_visibility)
         view_menu.add_separator()
         view_menu.add_command(label="Toggle Fullscreen",
                               command=self._toggle_fullscreen,
@@ -3567,18 +3574,22 @@ class CameraWireTool:
             bg="#0e0e0e", highlightthickness=1, highlightbackground="#888888",
             cursor="hand2",
         )
-        # `place` instead of pack so it floats over the main canvas
-        self.minimap.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
+        # `place` instead of pack so it floats over the main canvas.
+        # Honor the persisted show/hide pref from the previous session.
+        if self._show_minimap.get():
+            self.minimap.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
         self.minimap.bind("<ButtonPress-1>", self._minimap_click)
         self.minimap.bind("<B1-Motion>", self._minimap_click)
         self.minimap.bind("<Double-Button-1>",
                            lambda _e: (self._fit_image(), self._redraw(),
                                         self._flash_status("Fit to view.",
                                                             ttl_ms=1500)))
+        self.minimap.bind("<Button-3>", self._minimap_context_menu)
         Tooltip(self.minimap,
                 "Mini-map\n"
                 "  · click to pan there\n"
-                "  · double-click to fit view")
+                "  · double-click to fit view\n"
+                "  · right-click to hide")
         self._minimap_photo: ImageTk.PhotoImage | None = None
         self._minimap_built = False
         main.add(canvas_frame, stretch="always", minsize=300)
@@ -6758,6 +6769,11 @@ class CameraWireTool:
         pan/zoom, the dots-and-path layer is cached and only rebuilt when
         the project content changes; the viewport rectangle gets refreshed
         every frame (cheap)."""
+        try:
+            if not self._show_minimap.get():
+                return   # hidden — skip the whole rebuild
+        except (AttributeError, tk.TclError):
+            pass
         self._build_minimap_image()
         if self._minimap_photo is None:
             return
@@ -6852,6 +6868,43 @@ class CameraWireTool:
                          else "#7FC4FF")
                 m.create_oval(mx-1.5, my-1.5, mx+1.5, my+1.5,
                                fill=color, outline="")
+
+    def _apply_minimap_visibility(self) -> None:
+        """Show/hide the floating mini-map per _show_minimap. Toggled by
+        the mini-map's right-click menu and View → Show Mini-map."""
+        if not hasattr(self, "minimap"):
+            return
+        try:
+            if self._show_minimap.get():
+                self.minimap.place(relx=1.0, rely=0.0, anchor="ne",
+                                   x=-10, y=10)
+                # Force a rebuild next redraw — its cached layer may be
+                # stale from everything that happened while hidden.
+                self._minimap_state_token = None
+                self._redraw()
+            else:
+                self.minimap.place_forget()
+        except tk.TclError:
+            pass
+
+    def _minimap_context_menu(self, event) -> None:
+        """Right-click on the mini-map: hide it (View → Show Mini-map or
+        the canvas right-click menu brings it back)."""
+        menu = tk.Menu(self.minimap, tearoff=0)
+        menu.add_command(
+            label="Hide mini-map",
+            command=lambda: (self._show_minimap.set(False),
+                             self._apply_minimap_visibility(),
+                             self._flash_status(
+                                 "Mini-map hidden — View → Show Mini-map "
+                                 "to bring it back.", ttl_ms=3500)))
+        menu.add_separator()
+        menu.add_command(label="Fit view",
+                         command=lambda: (self._fit_image(), self._redraw()))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _minimap_click(self, event) -> None:
         """Click anywhere on the mini-map to pan the main view to that
@@ -10021,6 +10074,7 @@ class CameraWireTool:
                 "show_devices":     bool(self._show_devices.get()),
                 "show_wires":       bool(self._show_wires.get()),
                 "show_drops":       bool(self._show_drops.get()),
+                "show_minimap":     bool(self._show_minimap.get()),
                 "hidden_types":     sorted(self._hidden_types),
                 "fov_hidden_types": sorted(self._fov_hidden_types),
                 "fov_opacity":      self._fov_opacity,
@@ -12240,6 +12294,11 @@ class CameraWireTool:
                 label=f"{'Hide' if fov_on else 'Show'} FOV overlays",
                 command=lambda: (self._show_fov.set(not fov_on),
                                   self._redraw()))
+            mm_on = self._show_minimap.get()
+            menu.add_command(
+                label=f"{'Hide' if mm_on else 'Show'} mini-map",
+                command=lambda: (self._show_minimap.set(not mm_on),
+                                  self._apply_minimap_visibility()))
 
         try:
             menu.tk_popup(event.x_root, event.y_root)
