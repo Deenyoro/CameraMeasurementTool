@@ -241,3 +241,24 @@ def test_extract_revision_cannot_escape_dest_dir(tmp_path):
     saved = json.loads((dest / "project.wiremap.json").read_text(encoding="utf-8"))
     assert {f["drawio_file"] for f in saved["floors"]} == {
         "idesc.drawio", "win.drawio", "F3.drawio"}
+
+
+def test_extract_revision_floor_cannot_clobber_wiremap(tmp_path):
+    """A floor whose drawio_file is 'project.wiremap.json' must not be
+    overwritten by the wiremap write (floor_paths would then point at the
+    JSON instead of the floor's drawio bytes)."""
+    src = _drawio(tmp_path, "src.drawio", "<mxfile>floor</mxfile>")
+    z = str(tmp_path / "clash.zsmt")
+    wm = {"version": 2, "active_floor": "F1", "floors": [
+        {"id": "F1", "drawio_file": "project.wiremap.json"},
+    ]}
+    bundle.commit_revision(z, wm, {"F1": src})
+    dest = tmp_path / "work"
+    wmp, floor_paths, _ = bundle.extract_revision(z, str(dest))
+    assert os.path.normcase(floor_paths["F1"]) != os.path.normcase(wmp)
+    with open(floor_paths["F1"], encoding="utf-8") as fh:
+        assert fh.read() == "<mxfile>floor</mxfile>"
+    with open(wmp, encoding="utf-8") as fh:
+        saved = json.load(fh)
+    assert saved["floors"][0]["drawio_file"] == os.path.basename(
+        floor_paths["F1"])

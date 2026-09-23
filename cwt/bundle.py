@@ -203,7 +203,7 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
         raise
 
 
-def _flat_name(name) -> str:
+def _flat_name(name: object) -> str:
     """Reduce a bundle-supplied name (floor id or drawio_file) to a bare
     filename that cannot escape the extraction folder. Both separators are
     treated as path breaks regardless of host OS, and "."/".." are
@@ -229,7 +229,9 @@ def extract_revision(bundle_path: str, dest_dir: str,
     wm = json.loads(json.dumps(wiremap))  # deep copy
     # Decide each floor's flat filename from its drawio_file basename,
     # uniquifying collisions (case-insensitive — Windows filesystems).
-    used: set[str] = set()
+    # The wiremap is written last under a fixed name; reserve it so a floor
+    # named "project.wiremap.json" can't be overwritten by it.
+    used: set[str] = {"project.wiremap.json"}
 
     def _unique(name: str) -> str:
         base, ext = os.path.splitext(name)
@@ -245,14 +247,14 @@ def extract_revision(bundle_path: str, dest_dir: str,
     for f in wm.get("floors", []):
         fid = f.get("id")
         df = f.get("drawio_file") or f"{fid}.drawio"
-        name = _unique(_flat_name(df) or _flat_name(f"{fid}.drawio")
-                       or "floor.drawio")
+        # _flat_name(f"{fid}.drawio") always ends in ".drawio", so it is
+        # never empty and needs no further fallback.
+        name = _unique(_flat_name(df) or _flat_name(f"{fid}.drawio"))
         name_by_id[fid] = name
         f["drawio_file"] = name
     floor_paths: dict[str, str] = {}
     for fid, data in floors.items():
-        name = name_by_id.get(fid) or _unique(
-            _flat_name(f"{fid}.drawio") or "floor.drawio")
+        name = name_by_id.get(fid) or _unique(_flat_name(f"{fid}.drawio"))
         p = os.path.join(dest_dir, name)
         _atomic_write_bytes(p, data)
         floor_paths[fid] = p
