@@ -1499,7 +1499,16 @@ class CameraWireTool:
         # a revision to it (rather than a folder side-car). See
         # _bundle_sidecar_path().
         self._bundle_path = bundle_path
-        self.root.state("zoomed")
+        # "zoomed" is a Windows/macOS-only wm state; X11 Tk rejects it with
+        # TclError, which crashed startup on Linux. There, maximise via the
+        # -zoomed window attribute instead (best effort: some WMs ignore it).
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            try:
+                self.root.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
 
         # Parse — show user-friendly error rather than stack trace
         try:
