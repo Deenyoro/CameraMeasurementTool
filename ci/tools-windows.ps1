@@ -22,19 +22,27 @@ $Downloads = Join-Path $Tools 'downloads'
 New-Item -ItemType Directory -Force $Tools, $Downloads | Out-Null
 
 # Download $Url to $Downloads\$Name (reused if already there) and fail unless
-# its SHA-256 matches. Returns the local path.
+# its SHA-256 matches. A cached copy that fails the check (truncated or
+# corrupt) is moved aside to <name>.bad-<timestamp> (kept for inspection,
+# never deleted) and downloaded once more; only a second mismatch fails.
+# Returns the local path.
 function Get-VerifiedDownload([string]$Url, [string]$Name, [string]$Sha256) {
   $out = Join-Path $Downloads $Name
-  if (-not (Test-Path $out)) {
-    Write-Host "Downloading $Url"
-    Invoke-WebRequest $Url -OutFile "$out.part" -UseBasicParsing
-    Move-Item "$out.part" $out -Force
+  foreach ($attempt in 1, 2) {
+    if (-not (Test-Path $out)) {
+      Write-Host "Downloading $Url"
+      Invoke-WebRequest $Url -OutFile "$out.part" -UseBasicParsing
+      Move-Item "$out.part" $out -Force
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 $out).Hash
+    if ($actual -eq $Sha256.ToUpperInvariant()) { return $out }
+    if ($attempt -eq 2) {
+      throw "SHA-256 mismatch for ${Name} after a fresh download: expected $Sha256, got $actual"
+    }
+    $bad = "$out.bad-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    Write-Warning "SHA-256 mismatch for cached ${Name} (got $actual); moving it to $bad and downloading again"
+    Move-Item $out $bad
   }
-  $actual = (Get-FileHash -Algorithm SHA256 $out).Hash
-  if ($actual -ne $Sha256.ToUpperInvariant()) {
-    throw "SHA-256 mismatch for ${Name}: expected $Sha256, got $actual"
-  }
-  return $out
 }
 
 # ---- Python + Tk ---------------------------------------------------------
@@ -52,6 +60,7 @@ function Get-VerifiedDownload([string]$Url, [string]$Name, [string]$Sha256) {
 $python = Join-Path $Tools "python-$PythonVersion-tk"
 $pythonReady = ((Test-Path (Join-Path $python 'python.exe')) -and
                 (Test-Path (Join-Path $python 'DLLs\_tkinter.pyd')) -and
+                (Test-Path (Join-Path $python 'Lib\tkinter\__init__.py')) -and
                 (Test-Path (Join-Path $python 'tcl\tk8.6')))
 if (-not $pythonReady) {
   Write-Host "Installing Python $PythonVersion with Tcl/Tk into $python"
