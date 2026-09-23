@@ -23,6 +23,8 @@ Thumbs.db
 dist/
 build/
 build_exe.log
+# Linux AppImage build output (packaging/linux/build_appimage.sh)
+packaging/linux/out/
 *.egg-info/
 *.egg
 *.spec
