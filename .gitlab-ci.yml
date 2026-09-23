@@ -66,32 +66,50 @@ test:
     key: pip-py312
     paths: [.cache/pip/]
   script:
+    - *version
+    # Release builds must carry the release's version inside the app too
+    # (About screen, PDF reports, bundle metadata read cwt.__version__).
+    # Untagged 0.0.0-<sha> builds are not checked.
+    - |
+      case "$VERSION" in
+        0.0.0-*) echo "untagged build; skipping version check" ;;
+        *) APP_VERSION=$(python -c "import cwt; print(cwt.__version__)")
+           [ "$APP_VERSION" = "$VERSION" ] || { echo "cwt.__version__ is $APP_VERSION but this release is $VERSION: bump cwt/__init__.py (and pyproject.toml) first"; exit 1; } ;;
+      esac
     - pip install -q -r requirements.txt pytest
     - python -m pytest -q
 
 # ───────────────────────────── Linux ─────────────────────────────
 
-# PyInstaller binary + AppImage. Built on Debian bullseye (glibc 2.31): a
-# PyInstaller binary only runs on systems whose glibc is at least as new as
-# the build machine's, so an old base keeps the AppImage working on Ubuntu
-# 20.04+, Debian 11+, RHEL 9 and friends (python:3.12 is bookworm, 2.36).
+# PyInstaller binary + AppImage, built on Ubuntu 22.04 (glibc 2.35). A
+# PyInstaller binary only runs where glibc is at least as new as on the
+# build machine, so this base keeps the AppImage running on Ubuntu 22.04+,
+# Debian 12+ and RHEL 9+ (same reasoning as SimpleReliableRecorder's Linux
+# build). Ubuntu 22.04 is supported until 2027 (standard) / 2032 (ESM), so
+# its apt mirror stays live. Python 3.12 + tkinter (Tk 8.6) come from the
+# deadsnakes PPA; libpython3.12 provides the shared library PyInstaller needs.
 build-linux:
   extends: .linux
   stage: build
-  image: python:3.12-bullseye
+  image: ubuntu:22.04
   needs: [test]
   variables:
+    DEBIAN_FRONTEND: noninteractive
     PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
   cache:
-    key: pip-py312-bullseye
+    key: pip-py312-jammy
     paths: [.cache/pip/]
   script:
     - *version
-    # PyInstaller needs objdump/objcopy (binutils) on Linux.
-    - apt-get update -qq && apt-get install -y -qq binutils file >/dev/null
-    # The official python images are built against Debian's Tk 8.6.
+    - apt-get update -qq && apt-get install -y -qq software-properties-common ca-certificates curl >/dev/null
+    - add-apt-repository -y ppa:deadsnakes/ppa >/dev/null
+    # binutils: PyInstaller needs objdump/objcopy on Linux. No libfuse2:
+    # appimagetool runs with --appimage-extract-and-run.
+    - apt-get update -qq && apt-get install -y -qq python3.12 python3.12-venv python3.12-dev python3.12-tk libpython3.12 binutils file >/dev/null
+    - python3.12 -m venv /opt/venv
+    - export PATH="/opt/venv/bin:$PATH" PYTHON=/opt/venv/bin/python
     - python -c "import tkinter, sys; print('Tk', tkinter.TkVersion); sys.exit(tkinter.TkVersion != 8.6)"
-    - pip install -q -r requirements.txt pyinstaller
+    - pip install -q -r requirements.txt -r packaging/requirements-build.txt
     # Fetches the pinned, sha256-verified appimagetool; runs it without FUSE.
     - bash packaging/linux/build_appimage.sh "$VERSION" "$CI_PROJECT_DIR/out"
     - |
@@ -123,7 +141,7 @@ build-linux-flatpak:
     DEBIAN_FRONTEND: noninteractive
     APP_ID: com.kawaconnect.CameraWireTool
   cache:
-    key: flatpak-runtimes-24.08
+    key: flatpak-runtimes-25.08
     paths: [.flatpak/]
   script:
     - *version
@@ -131,12 +149,15 @@ build-linux-flatpak:
     # Runtimes live in the project dir so GitLab's cache keeps them between runs.
     - export FLATPAK_USER_DIR="$CI_PROJECT_DIR/.flatpak"
     - flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-    - flatpak --user install -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08 2>&1 | tail -2
+    - flatpak --user install -y --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 2>&1 | tail -2
     - |
       set -e
       test -f linux-bin/CameraWireTool || { echo "FATAL: linux-bin/CameraWireTool missing"; exit 1; }
       mkdir -p _flatpak/src out
-      cp packaging/flatpak/$APP_ID.yml packaging/flatpak/$APP_ID.desktop packaging/flatpak/$APP_ID.metainfo.xml _flatpak/src/
+      cp "packaging/flatpak/$APP_ID.yml" "packaging/flatpak/$APP_ID.desktop" "packaging/flatpak/$APP_ID.metainfo.xml" _flatpak/src/
+      # Stamp this build's version/date into the metainfo <release> entry.
+      sed -i "s|<release version=\"[^\"]*\" date=\"[^\"]*\"/>|<release version=\"$VERSION\" date=\"$(date -u +%F)\"/>|" "_flatpak/src/$APP_ID.metainfo.xml"
+      grep -q "<release version=\"$VERSION\"" "_flatpak/src/$APP_ID.metainfo.xml" || { echo "metainfo release stamp failed"; exit 1; }
       cp packaging/icons/cameramtool.png _flatpak/src/
       install -m755 linux-bin/CameraWireTool _flatpak/src/CameraWireTool
       # No FUSE in the job container, so no rofiles-fuse.
@@ -158,7 +179,7 @@ build-windows:
   needs: [test]
   script:
     - python -m venv .venv-ci
-    - .\.venv-ci\Scripts\python.exe -m pip install -q -r requirements.txt pyinstaller pytest
+    - .\.venv-ci\Scripts\python.exe -m pip install -q -r requirements.txt -r packaging\requirements-build.txt pytest
     # Same test suite as the Linux gate, on the Python that builds the exe.
     - .\.venv-ci\Scripts\python.exe -m pytest -q
     - .\.venv-ci\Scripts\python.exe -m PyInstaller --noconfirm camera_wire_tool.spec
@@ -199,6 +220,8 @@ release:
   rules:
     - if: $CI_COMMIT_TAG =~ /^v/
     - if: $RELEASE_VERSION
+  # Never auto-cancel a half-finished publish.
+  interruptible: false
   variables:
     GIT_STRATEGY: none
   script:
@@ -208,7 +231,11 @@ release:
       VERSION="${RELEASE_VERSION:-$CI_COMMIT_TAG}"; VERSION="${VERSION#v}"; TAG="v$VERSION"
       API="$CI_API_V4_URL/projects/$CI_PROJECT_ID"; H="JOB-TOKEN: $CI_JOB_TOKEN"
       PKG="$API/packages/generic/CameraWireTool/$VERSION"
-      curl -fsS -H "$H" "$API/repository/tags/$TAG" >/dev/null || { echo "Tag $TAG does not exist in this project"; exit 1; }
+      TAG_JSON=$(curl -fsS -H "$H" "$API/repository/tags/$TAG") || { echo "Tag $TAG does not exist in this project"; exit 1; }
+      # A manual RELEASE_VERSION run must be started on the tag itself, or it
+      # would publish some other commit's builds under this tag.
+      TAG_SHA=$(printf '%s' "$TAG_JSON" | jq -r '.commit.id')
+      [ "$TAG_SHA" = "$CI_COMMIT_SHA" ] || { echo "Tag $TAG points at $TAG_SHA but this pipeline built $CI_COMMIT_SHA. Run the pipeline on the tag ref $TAG."; exit 1; }
       ls -la out/
       : > links.ndjson
       for f in out/*; do
@@ -221,7 +248,7 @@ release:
       done
       test -s links.ndjson || { echo "No builds to publish"; exit 1; }
       ASSETS=$(jq -s -c . links.ndjson)
-      NOTES=$(printf 'Camera Wire Tool %s\n\n- Windows: installer (setup.exe), portable zip, and the bare CameraWireTool.exe\n- Linux: AppImage (x86_64, glibc 2.31+) and Flatpak bundle\n\nBuilt on GitLab CI.' "$VERSION")
+      NOTES=$(printf 'Camera Wire Tool %s\n\n- Windows: installer (setup.exe), portable zip, and the bare CameraWireTool.exe\n- Linux: AppImage (x86_64, glibc 2.35+) and Flatpak bundle\n\nBuilt on GitLab CI.' "$VERSION")
       BODY=$(jq -cn --arg tag "$TAG" --arg name "Camera Wire Tool $VERSION" --arg desc "$NOTES" --argjson links "$ASSETS" '{tag_name:$tag, name:$name, description:$desc, assets:{links:$links}}')
       if curl -fsS -o /dev/null -H "$H" "$API/releases/$TAG" 2>/dev/null; then
         curl -fsS -H "$H" "$API/releases/$TAG/assets/links" | jq -r '.[].id' | while read -r id; do
