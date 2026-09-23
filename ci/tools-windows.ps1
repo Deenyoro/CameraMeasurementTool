@@ -4,9 +4,11 @@
 #   - CPython (NuGet package) + Tcl/Tk from python.org's tcltk.msi
 #   - Inno Setup 6 (per-user, silent)
 # and puts them on PATH / in $env:ISCC for the job. Later jobs find them
-# already present. Every download is pinned and SHA-256 checked. Nothing
-# already in the tools dir is modified or removed; in particular
-# Tagestry's plain python-<ver> dir is left alone (we use python-<ver>-tk).
+# already present. Every download is pinned and SHA-256 checked; a download
+# that fails the check is moved aside to <name>.bad-<timestamp> (never
+# deleted) and fetched once more. No other existing file in the tools dir is
+# modified, moved or removed; in particular Tagestry's plain python-<ver>
+# dir is left alone (we use python-<ver>-tk).
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -40,8 +42,8 @@ function Get-VerifiedDownload([string]$Url, [string]$Name, [string]$Sha256) {
       throw "SHA-256 mismatch for ${Name} after a fresh download: expected $Sha256, got $actual"
     }
     $bad = "$out.bad-$(Get-Date -Format 'yyyyMMddHHmmss')"
-    Write-Warning "SHA-256 mismatch for cached ${Name} (got $actual); moving it to $bad and downloading again"
     Move-Item $out $bad
+    Write-Warning "SHA-256 mismatch for ${Name} (got $actual, expected $Sha256); moved aside to $bad (not deleted), downloading once more"
   }
 }
 
