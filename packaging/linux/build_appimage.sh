@@ -11,8 +11,9 @@
 # Steps: PyInstaller (camera_wire_tool.spec -> single-file CameraWireTool
 # binary) -> AppDir (usr/bin binary, AppRun, .desktop, icon) -> appimagetool.
 #
-# Requirements: a Python with Tk 8.6 plus requirements.txt, pyinstaller and
-# (for PDF export in the bundle) reportlab installed. Set $PYTHON to pick the
+# Requirements: a Python with Tk 8.6 plus requirements.txt and
+# packaging/requirements-build.txt (the exact PyInstaller pin) installed; the
+# script refuses any other PyInstaller version. Set $PYTHON to pick the
 # interpreter (default: python3). Network is used only to fetch the pinned,
 # checksum-verified appimagetool below (cached in $OUT_DIR/tools).
 #
@@ -40,6 +41,7 @@ APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb3
 
 case "$VERSION" in
   *[!0-9A-Za-z.+-]*|"") echo "error: invalid version '$VERSION'" >&2; exit 2 ;;
+  *) ;;
 esac
 
 mkdir -p "$OUT_DIR"
@@ -77,6 +79,12 @@ if [ ! -f "$RUNTIME" ]; then
 fi
 
 # ---- PyInstaller -------------------------------------------------------- #
+want_pyi="$(sed -n 's/^pyinstaller==//p' "$REPO_ROOT/packaging/requirements-build.txt")"
+have_pyi="$("$PYTHON" -m PyInstaller --version)"
+if [ "$have_pyi" != "$want_pyi" ]; then
+  echo "error: PyInstaller $have_pyi installed, packaging/requirements-build.txt pins $want_pyi" >&2
+  exit 1
+fi
 WORK="$(mktemp -d "$OUT_DIR/run.XXXXXX")"
 echo "Work dir: $WORK"
 (
