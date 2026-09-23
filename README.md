@@ -45,15 +45,8 @@ pip install -r requirements.txt
 
 Python 3.10+ recommended.
 
-PDF report export is optional — install [`reportlab`](https://pypi.org/project/reportlab/)
-to enable the `File → Export → Project PDF Report…` menu item (greyed
-out when reportlab isn't found):
-
-```
-pip install reportlab
-```
-
-CSV exports + on-screen rendering work without it.
+This installs Pillow, sv-ttk and reportlab (PDF report export). The DXF/SVG
+importers are optional extras: `pip install ".[cad]"`.
 
 ## Run
 
@@ -71,6 +64,47 @@ For the simpler PNG-only measurement tool (kept for quick one-off measurements):
 ```
 python old/measure_tool.py
 ```
+
+## Downloads / Building
+
+Release builds come from the GitLab pipeline (`.gitlab-ci.yml`) and appear
+under **Deploy → Releases** of the GitLab project, with the files stored in
+its **Package Registry** (generic package `CameraWireTool`, one version per
+release):
+
+| File | What it is |
+|------|------------|
+| `CameraWireTool-<ver>-windows-x64-setup.exe` | Windows installer (per-user by default, no admin; Start menu + optional desktop shortcut) |
+| `CameraWireTool-<ver>-windows-x64-portable.zip` / `CameraWireTool.exe` | Portable Windows exe, no install; put it next to your floor plans and it opens them |
+| `CameraWireTool-<ver>-linux-x86_64.AppImage` | Linux, any distro with glibc 2.31+ (Ubuntu 20.04+, Debian 11+): `chmod +x` and run |
+| `CameraWireTool-<ver>-linux-x86_64.flatpak` | Linux Flatpak bundle: `flatpak install --user <file>` (pulls the freedesktop 24.08 runtime from Flathub) |
+
+**Cutting a release:** push a tag `vX.Y.Z` (for example `git tag v1.3.0 &&
+git push origin v1.3.0`). The pipeline runs the tests, builds every file above
+(Windows natively on the Windows runner, Linux in containers) and publishes
+the release for that tag. To rebuild or re-publish an existing tag, run the
+pipeline from the web UI (**Build → Pipelines → Run pipeline**) with the
+variable `RELEASE_VERSION=vX.Y.Z`. A web/API run without `RELEASE_VERSION`
+only builds; download the files from the job artifacts (kept 30 days). The
+pipeline does not run on ordinary pushes.
+
+The existing GitHub Actions workflow (`.github/workflows/build-exe.yml`) is
+unchanged and still builds `CameraWireTool.exe` on github.com.
+
+**Building locally**
+
+```
+pip install -r requirements.txt pyinstaller
+pyinstaller --noconfirm camera_wire_tool.spec     # dist/CameraWireTool(.exe)
+python packaging/check_bundle.py dist/CameraWireTool.exe   # or dist/CameraWireTool on Linux
+packaging/linux/build_appimage.sh 0.0.0-dev       # Linux: AppImage in packaging/linux/out/
+```
+
+The spec stops the build if sv-ttk or reportlab is missing, so a build can no
+longer ship without the theme or PDF export. The AppImage script downloads a
+pinned appimagetool and checks its SHA-256. The Windows installer is built
+with Inno Setup from `installer/windows.iss`. The app icon comes from
+`packaging/make_icon.py`.
 
 ## Controls (cheat sheet)
 
