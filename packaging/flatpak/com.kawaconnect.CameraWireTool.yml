@@ -1,7 +1,7 @@
 # Flatpak manifest for Camera Wire Tool.
 #
 # Packages the PyInstaller single-file Linux binary that the build-linux CI
-# job produces (built on Debian bullseye, glibc 2.31, so it runs on this
+# job produces (built on Ubuntu 22.04, glibc 2.35, so it runs on this
 # newer runtime). Nothing is compiled here; the one module just installs
 # the binary plus desktop integration files. CI stages everything into one
 # directory next to this manifest (see build-linux-flatpak in
@@ -12,17 +12,19 @@
 #   com.kawaconnect.CameraWireTool.metainfo.xml
 app-id: com.kawaconnect.CameraWireTool
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+# 25.08 is the current supported freedesktop runtime (24.08 reaches end of
+# life). Tagestry's flatpak is still on 24.08 and should move too.
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: CameraWireTool
 separate-locales: false
 
 finish-args:
-  # Tk draws through X11 (XWayland on Wayland sessions).
+  # Least privilege for a Tk app: Tk only speaks X11 (XWayland on Wayland
+  # sessions) and renders in software, so no --socket=wayland and no
+  # --device=dri. ipc is the shared-memory X11 extension.
   - --share=ipc
   - --socket=x11
-  - --socket=wayland
-  - --device=dri
   # Tk's own file dialogs do not use portals: projects, floor plans and
   # PDF/CSV exports live in the user's home, so the app needs to see it.
   - --filesystem=home

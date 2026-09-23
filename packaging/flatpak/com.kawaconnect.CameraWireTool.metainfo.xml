@@ -27,5 +27,9 @@
   <provides>
     <binary>CameraWireTool</binary>
   </provides>
+  <releases>
+    <!-- CI rewrites this entry with the version and date being built. -->
+    <release version="1.2.0" date="2026-07-02"/>
+  </releases>
   <launchable type="desktop-id">com.kawaconnect.CameraWireTool.desktop</launchable>
 </component>
