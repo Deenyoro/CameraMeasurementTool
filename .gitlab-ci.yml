@@ -67,14 +67,23 @@ test:
     paths: [.cache/pip/]
   script:
     - *version
+    # A manual RELEASE_VERSION run must be started on that tag; refuse here,
+    # before the Windows laptop spends a build on the wrong ref (the release
+    # job re-checks the tag's commit before publishing).
+    - |
+      if [ -n "$RELEASE_VERSION" ] && [ "$CI_COMMIT_TAG" != "v${RELEASE_VERSION#v}" ]; then
+        echo "RELEASE_VERSION=$RELEASE_VERSION but this pipeline runs on '${CI_COMMIT_TAG:-$CI_COMMIT_REF_NAME}'. Run it on the tag v${RELEASE_VERSION#v}."; exit 1
+      fi
     # Release builds must carry the release's version inside the app too
-    # (About screen, PDF reports, bundle metadata read cwt.__version__).
-    # Untagged 0.0.0-<sha> builds are not checked.
+    # (About screen, PDF reports, bundle metadata read cwt.__version__) and
+    # in pyproject.toml. Untagged 0.0.0-<sha> builds are not checked.
     - |
       case "$VERSION" in
         0.0.0-*) echo "untagged build; skipping version check" ;;
         *) APP_VERSION=$(python -c "import cwt; print(cwt.__version__)")
-           [ "$APP_VERSION" = "$VERSION" ] || { echo "cwt.__version__ is $APP_VERSION but this release is $VERSION: bump cwt/__init__.py (and pyproject.toml) first"; exit 1; } ;;
+           PROJ_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+           [ "$APP_VERSION" = "$VERSION" ] || { echo "cwt.__version__ is $APP_VERSION but this release is $VERSION: bump cwt/__init__.py and pyproject.toml first"; exit 1; }
+           [ "$PROJ_VERSION" = "$VERSION" ] || { echo "pyproject.toml version is $PROJ_VERSION but this release is $VERSION: bump it (and cwt/__init__.py) first"; exit 1; } ;;
       esac
     - pip install -q -r requirements.txt pytest
     - python -m pytest -q
@@ -83,10 +92,12 @@ test:
 
 # PyInstaller binary + AppImage, built on Ubuntu 22.04 (glibc 2.35). A
 # PyInstaller binary only runs where glibc is at least as new as on the
-# build machine, so this base keeps the AppImage running on Ubuntu 22.04+,
-# Debian 12+ and RHEL 9+ (same reasoning as SimpleReliableRecorder's Linux
-# build). Ubuntu 22.04 is supported until 2027 (standard) / 2032 (ESM), so
-# its apt mirror stays live. Python 3.12 + tkinter (Tk 8.6) come from the
+# build machine, so this base sets the floor at glibc 2.35: Ubuntu 22.04+,
+# Debian 12+, Fedora 36+ (not RHEL/Rocky/Alma 9, which ship 2.34). Same
+# reasoning as SimpleReliableRecorder's Linux build.
+# REVISIT before April 2027, when jammy leaves standard support (and
+# deadsnakes typically stops publishing for it): move to the next
+# still-supported base and update the floor in README/release notes. Python 3.12 + tkinter (Tk 8.6) come from the
 # deadsnakes PPA; libpython3.12 provides the shared library PyInstaller needs.
 build-linux:
   extends: .linux
@@ -108,6 +119,7 @@ build-linux:
     - apt-get update -qq && apt-get install -y -qq python3.12 python3.12-venv python3.12-dev python3.12-tk libpython3.12 binutils file >/dev/null
     - python3.12 -m venv /opt/venv
     - export PATH="/opt/venv/bin:$PATH" PYTHON=/opt/venv/bin/python
+    - python3.12 --version
     - python -c "import tkinter, sys; print('Tk', tkinter.TkVersion); sys.exit(tkinter.TkVersion != 8.6)"
     - pip install -q -r requirements.txt -r packaging/requirements-build.txt
     # Fetches the pinned, sha256-verified appimagetool; runs it without FUSE.

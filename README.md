@@ -76,20 +76,21 @@ release):
 |------|------------|
 | `CameraWireTool-<ver>-windows-x64-setup.exe` | Windows installer (per-user by default, no admin; Start menu + optional desktop shortcut) |
 | `CameraWireTool-<ver>-windows-x64-portable.zip` / `CameraWireTool.exe` | Portable Windows exe, no install; put it next to your floor plans and it opens them |
-| `CameraWireTool-<ver>-linux-x86_64.AppImage` | Linux, any distro with glibc 2.35+ (Ubuntu 22.04+, Debian 12+, RHEL 9+): `chmod +x` and run |
+| `CameraWireTool-<ver>-linux-x86_64.AppImage` | Linux, any distro with glibc 2.35+ (Ubuntu 22.04+, Debian 12+, Fedora 36+; not RHEL/Rocky/Alma 9, which have glibc 2.34): `chmod +x` and run |
 | `CameraWireTool-<ver>-linux-x86_64.flatpak` | Linux Flatpak bundle: `flatpak install --user <file>` (pulls the freedesktop 25.08 runtime from Flathub) |
 
 **Cutting a release:** first set the version in `cwt/__init__.py`
 (`__version__`) and `pyproject.toml` to `X.Y.Z` and commit. The pipeline
-fails if the tag and `cwt.__version__` differ, because the app shows that
-version in its About screen and reports. Then push a tag `vX.Y.Z` (for
+fails if the tag differs from `cwt.__version__` or the `pyproject.toml`
+version, because the app shows that version in its About screen and reports. Then push a tag `vX.Y.Z` (for
 example `git tag v1.3.0 && git push origin v1.3.0`). The pipeline runs the
 tests, builds every file above (Windows natively on the Windows runner, Linux
 in containers) and publishes the release for that tag. To rebuild or
 re-publish an existing tag, run the pipeline from the web UI (**Build →
 Pipelines → Run pipeline**) **on the tag `vX.Y.Z` as the ref** with the
-variable `RELEASE_VERSION=vX.Y.Z`. The release job refuses to publish if the
-tag points at a different commit from the one the pipeline built. A web/API run without `RELEASE_VERSION`
+variable `RELEASE_VERSION=vX.Y.Z`. The test stage refuses a run whose ref is
+not that tag, and the release job refuses to publish if the tag points at a
+different commit from the one the pipeline built. A web/API run without `RELEASE_VERSION`
 only builds; download the files from the job artifacts (kept 30 days). The
 pipeline does not run on ordinary pushes.
 
