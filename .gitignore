@@ -25,6 +25,8 @@ build/
 build_exe.log
 # Linux AppImage build output (packaging/linux/build_appimage.sh)
 packaging/linux/out/
+# Inno Setup output (installer/windows.iss)
+installer/installer_out/
 *.egg-info/
 *.egg
 *.spec
