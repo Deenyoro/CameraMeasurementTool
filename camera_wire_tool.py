@@ -17750,8 +17750,15 @@ def _app_base_dir() -> str:
     by PyInstaller this is the folder containing the .exe (so a user can
     drop the exe next to their floor plans); otherwise it's the script's
     own directory. Without this, a onefile exe would look inside its temp
-    extraction dir and never find the user's files."""
+    extraction dir and never find the user's files.
+
+    Inside a Linux AppImage sys.executable points into the AppImage's
+    private mount/extraction dir; the runtime exports $APPIMAGE (the path
+    of the .AppImage file the user placed), so use its folder instead."""
     if getattr(sys, "frozen", False):
+        appimage = os.environ.get("APPIMAGE")
+        if appimage:
+            return os.path.dirname(os.path.abspath(appimage))
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
