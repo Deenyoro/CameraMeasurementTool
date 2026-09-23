@@ -10,6 +10,7 @@
 # the Sun Valley look travels with the exe instead of silently falling
 # back to default ttk.
 
+import importlib.util
 import os
 
 from PyInstaller.utils.hooks import collect_all
@@ -23,18 +24,31 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# Bundle the Sun Valley theme's .tcl data files and reportlab (PDF export
-# needs its bundled fonts/data). Best-effort per package — the app still
-# launches if one is absent (sv_ttk falls back to ttk; PDF export just
-# reports "reportlab unavailable").
-for pkg in ("sv_ttk", "reportlab"):
-    try:
-        d, b, h = collect_all(pkg)
-        datas += d
-        binaries += b
-        hiddenimports += h
-    except Exception:
-        pass
+# Packages the app needs at runtime whose data files / submodules
+# PyInstaller's import analysis alone would miss:
+#   sv_ttk     - the Sun Valley theme's .tcl/.png files
+#   reportlab  - PDF export (fonts, lazily imported modules)
+# Both are REQUIRED: the build fails if either is not installed. (Before,
+# this was best-effort, and because collect_all() on a missing package
+# just returns empty lists, CI shipped an exe without reportlab and PDF
+# export only said "requires reportlab" at runtime.)
+#
+# Genuinely optional features are NOT collected here: the CAD importers
+# (ezdxf + matplotlib for DXF, PyMuPDF for SVG) are left out of the build
+# (PyMuPDF is excluded below) and the app reports them as unavailable.
+# packaging/check_bundle.py verifies the finished binary in CI.
+REQUIRED_PACKAGES = ("sv_ttk", "reportlab")
+for pkg in REQUIRED_PACKAGES:
+    if importlib.util.find_spec(pkg) is None:
+        raise SystemExit(
+            f"ERROR: required package {pkg!r} is not installed in the build "
+            f"environment; run: pip install -r requirements.txt")
+    d, b, h = collect_all(pkg)
+    if not (d or h):
+        raise SystemExit(f"ERROR: collect_all({pkg!r}) found nothing to bundle")
+    datas += d
+    binaries += b
+    hiddenimports += h
 
 # Pillow's ImageTk C extension imports PIL._tkinter_finder from C on
 # Linux/macOS (to locate the Tk library), which PyInstaller's static
