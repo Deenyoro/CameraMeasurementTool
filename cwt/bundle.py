@@ -203,6 +203,16 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
         raise
 
 
+def _flat_name(name) -> str:
+    """Reduce a bundle-supplied name (floor id or drawio_file) to a bare
+    filename that cannot escape the extraction folder. Both separators are
+    treated as path breaks regardless of host OS, and "."/".." are
+    rejected, so a crafted .zsmt can't write outside `dest_dir`.
+    Returns "" when nothing usable remains."""
+    base = os.path.basename(str(name).replace("\\", "/"))
+    return "" if base in (".", "..") else base
+
+
 def extract_revision(bundle_path: str, dest_dir: str,
                      rev_id: str | None = None):
     """Materialize a revision into `dest_dir` as a normal *flat* folder
@@ -235,12 +245,14 @@ def extract_revision(bundle_path: str, dest_dir: str,
     for f in wm.get("floors", []):
         fid = f.get("id")
         df = f.get("drawio_file") or f"{fid}.drawio"
-        name = _unique(os.path.basename(df) or f"{fid}.drawio")
+        name = _unique(_flat_name(df) or _flat_name(f"{fid}.drawio")
+                       or "floor.drawio")
         name_by_id[fid] = name
         f["drawio_file"] = name
     floor_paths: dict[str, str] = {}
     for fid, data in floors.items():
-        name = name_by_id.get(fid) or _unique(f"{fid}.drawio")
+        name = name_by_id.get(fid) or _unique(
+            _flat_name(f"{fid}.drawio") or "floor.drawio")
         p = os.path.join(dest_dir, name)
         _atomic_write_bytes(p, data)
         floor_paths[fid] = p

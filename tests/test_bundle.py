@@ -210,3 +210,34 @@ def test_read_revision_missing_id_raises(tmp_path):
         raise AssertionError("expected KeyError")
     except KeyError:
         pass
+
+
+def test_extract_revision_cannot_escape_dest_dir(tmp_path):
+    """A crafted bundle whose floor ids / drawio_file names contain path
+    components must not write outside the extraction folder."""
+    src = _drawio(tmp_path, "src.drawio", "<mxfile/>")
+    z = str(tmp_path / "evil.zsmt")
+    wm = {"version": 2, "active_floor": "F1", "floors": [
+        # drawio_file flattens to "" -> fallback name is built from the id
+        {"id": "../../idesc", "drawio_file": "sub/"},
+        {"id": "F2", "drawio_file": "..\\..\\win.drawio"},
+        {"id": "F3", "drawio_file": ".."},
+    ]}
+    bundle.commit_revision(z, wm, {
+        "../../idesc": src, "F2": src, "F3": src,
+        # blob with no matching floor entry in the wiremap
+        "../orphan": src,
+    })
+    dest = tmp_path / "work" / "inner"
+    wmp, floor_paths, _ = bundle.extract_revision(z, str(dest))
+    for p in list(floor_paths.values()) + [wmp]:
+        assert os.path.dirname(os.path.abspath(p)) == str(dest)
+        assert os.path.isfile(p)
+    assert not (tmp_path / "work" / "orphan.drawio").exists()
+    assert not (tmp_path / "idesc.drawio").exists()
+    names = {os.path.basename(p) for p in floor_paths.values()}
+    assert names == {"idesc.drawio", "win.drawio", "F3.drawio",
+                     "orphan.drawio"}
+    saved = json.loads((dest / "project.wiremap.json").read_text(encoding="utf-8"))
+    assert {f["drawio_file"] for f in saved["floors"]} == {
+        "idesc.drawio", "win.drawio", "F3.drawio"}
