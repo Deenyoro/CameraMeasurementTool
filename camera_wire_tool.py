@@ -1499,16 +1499,7 @@ class CameraWireTool:
         # a revision to it (rather than a folder side-car). See
         # _bundle_sidecar_path().
         self._bundle_path = bundle_path
-        # "zoomed" is a Windows/macOS-only wm state; X11 Tk rejects it with
-        # TclError, which crashed startup on Linux. There, maximise via the
-        # -zoomed window attribute instead (best effort: some WMs ignore it).
-        try:
-            self.root.state("zoomed")
-        except tk.TclError:
-            try:
-                self.root.attributes("-zoomed", True)
-            except tk.TclError:
-                pass
+        _maximize_window(self.root)
 
         # Parse — show user-friendly error rather than stack trace
         try:
@@ -17745,6 +17736,22 @@ class CameraWireTool:
 
 
 # ============================================================ Entry point
+def _maximize_window(win) -> None:
+    """Maximise a Tk window on every platform.
+
+    "zoomed" is a Windows/macOS-only wm state; X11 Tk rejects it with
+    TclError, which used to crash startup on Linux. There, fall back to the
+    X11 "-zoomed" window attribute (best effort: some WMs ignore it).
+    """
+    try:
+        win.state("zoomed")
+    except tk.TclError:
+        try:
+            win.attributes("-zoomed", True)
+        except tk.TclError:
+            pass
+
+
 def _app_base_dir() -> str:
     """Base directory for locating user data (drawio files). When frozen
     by PyInstaller this is the folder containing the .exe (so a user can
