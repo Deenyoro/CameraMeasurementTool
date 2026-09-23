@@ -1,0 +1,235 @@
+# GitLab CI for Camera Wire Tool (CameraMeasurementTool).
+#
+# Builds the desktop app on the self-hosted GitLab runners:
+#   linux    -> Kubernetes executor on the cluster (tests, AppImage, Flatpak)
+#   windows  -> shell runner on the Windows laptop (exe, portable zip,
+#               Inno Setup installer)
+#
+# Runs on version tags and when started from the web UI / API (never on
+# plain pushes, so the laptop runner is not woken for every commit). Set
+# RELEASE_VERSION=v1.2.3 on a manual run to stamp that version and publish
+# the release for that (existing) tag. The Windows job bootstraps its own
+# toolchain (Python + Tk, Inno Setup) the first time under the runner's
+# tools directory, so nothing has to be pre-installed.
+#
+# The GitHub Actions workflow (.github/workflows/build-exe.yml) is separate
+# and unchanged; it still builds the exe on github.com.
+
+stages: [test, build, release]
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+variables:
+  GIT_DEPTH: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_ROOT_USER_ACTION: ignore
+
+# ───────────────────────────── shared pieces ─────────────────────────────
+
+.version: &version
+  # v1.2.3 -> 1.2.3; untagged runs get a valid semver prerelease.
+  - |
+    if [ -n "$RELEASE_VERSION" ]; then VERSION="${RELEASE_VERSION#v}"; elif [ -n "$CI_COMMIT_TAG" ]; then VERSION="${CI_COMMIT_TAG#v}"; else VERSION="0.0.0-${CI_COMMIT_SHORT_SHA}"; fi
+    echo "App version: $VERSION"
+
+.version_ps: &version_ps
+  - |
+    if ($env:RELEASE_VERSION) { $env:VERSION = $env:RELEASE_VERSION -replace '^v','' } elseif ($env:CI_COMMIT_TAG) { $env:VERSION = $env:CI_COMMIT_TAG -replace '^v','' } else { $env:VERSION = "0.0.0-$env:CI_COMMIT_SHORT_SHA" }
+    Write-Host "App version: $env:VERSION"
+
+.linux:
+  tags: [linux]
+  interruptible: true
+
+.windows:
+  tags: [windows]
+  interruptible: true
+  variables:
+    GIT_STRATEGY: fetch
+  before_script:
+    - . .\ci\tools-windows.ps1
+    - *version_ps
+
+# ───────────────────────────── tests (gate) ─────────────────────────────
+
+test:
+  extends: .linux
+  stage: test
+  image: python:3.12
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key: pip-py312
+    paths: [.cache/pip/]
+  script:
+    - pip install -q -r requirements.txt pytest
+    - python -m pytest -q
+
+# ───────────────────────────── Linux ─────────────────────────────
+
+# PyInstaller binary + AppImage. Built on Debian bullseye (glibc 2.31): a
+# PyInstaller binary only runs on systems whose glibc is at least as new as
+# the build machine's, so an old base keeps the AppImage working on Ubuntu
+# 20.04+, Debian 11+, RHEL 9 and friends (python:3.12 is bookworm, 2.36).
+build-linux:
+  extends: .linux
+  stage: build
+  image: python:3.12-bullseye
+  needs: [test]
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key: pip-py312-bullseye
+    paths: [.cache/pip/]
+  script:
+    - *version
+    # PyInstaller needs objdump/objcopy (binutils) on Linux.
+    - apt-get update -qq && apt-get install -y -qq binutils file >/dev/null
+    # The official python images are built against Debian's Tk 8.6.
+    - python -c "import tkinter, sys; print('Tk', tkinter.TkVersion); sys.exit(tkinter.TkVersion != 8.6)"
+    - pip install -q -r requirements.txt pyinstaller
+    # Fetches the pinned, sha256-verified appimagetool; runs it without FUSE.
+    - bash packaging/linux/build_appimage.sh "$VERSION" "$CI_PROJECT_DIR/out"
+    - |
+      set -e
+      bin=$(find out -path '*/dist/CameraWireTool' -type f | head -n 1)
+      python packaging/check_bundle.py "$bin"
+      mkdir -p linux-bin && cp "$bin" linux-bin/CameraWireTool
+      ai="out/CameraWireTool-$VERSION-linux-x86_64.AppImage"
+      test -x "$ai" || { echo "AppImage not produced: $ai"; exit 1; }
+      size=$(stat -c%s "$ai"); [ "$size" -ge $((15*1024*1024)) ] || { echo "AppImage too small: $size"; exit 1; }
+      mkdir _ai && ( cd _ai && "../$ai" --appimage-extract >/dev/null )
+      test -x _ai/squashfs-root/usr/bin/CameraWireTool || { echo "AppImage payload missing"; exit 1; }
+      ls -la out/*.AppImage linux-bin/
+  artifacts:
+    name: camerawiretool-linux-$CI_COMMIT_SHORT_SHA
+    paths:
+      - out/*.AppImage
+      - linux-bin/CameraWireTool
+    expire_in: 30 days
+
+# Wraps build-linux's binary in a single-file Flatpak bundle (no compile
+# step; see packaging/flatpak/). Same approach as Tagestry's flatpak job.
+build-linux-flatpak:
+  extends: .linux
+  stage: build
+  image: ubuntu:24.04
+  needs: [build-linux]
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+    APP_ID: com.kawaconnect.CameraWireTool
+  cache:
+    key: flatpak-runtimes-24.08
+    paths: [.flatpak/]
+  script:
+    - *version
+    - apt-get update -qq && apt-get install -y -qq flatpak flatpak-builder ca-certificates >/dev/null
+    # Runtimes live in the project dir so GitLab's cache keeps them between runs.
+    - export FLATPAK_USER_DIR="$CI_PROJECT_DIR/.flatpak"
+    - flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    - flatpak --user install -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08 2>&1 | tail -2
+    - |
+      set -e
+      test -f linux-bin/CameraWireTool || { echo "FATAL: linux-bin/CameraWireTool missing"; exit 1; }
+      mkdir -p _flatpak/src out
+      cp packaging/flatpak/$APP_ID.yml packaging/flatpak/$APP_ID.desktop packaging/flatpak/$APP_ID.metainfo.xml _flatpak/src/
+      cp packaging/icons/cameramtool.png _flatpak/src/
+      install -m755 linux-bin/CameraWireTool _flatpak/src/CameraWireTool
+      # No FUSE in the job container, so no rofiles-fuse.
+      flatpak-builder --user --disable-rofiles-fuse --repo=_flatpak/repo _flatpak/build "_flatpak/src/$APP_ID.yml"
+      fp="out/CameraWireTool-$VERSION-linux-x86_64.flatpak"
+      flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo _flatpak/repo "$fp" "$APP_ID"
+      size=$(stat -c%s "$fp"); [ "$size" -ge $((15*1024*1024)) ] || { echo "flatpak too small: $size"; exit 1; }
+      ls -la out/
+  artifacts:
+    name: camerawiretool-flatpak-$CI_COMMIT_SHORT_SHA
+    paths: [out/*.flatpak]
+    expire_in: 30 days
+
+# ───────────────────────────── Windows ─────────────────────────────
+
+build-windows:
+  extends: .windows
+  stage: build
+  needs: [test]
+  script:
+    - python -m venv .venv-ci
+    - .\.venv-ci\Scripts\python.exe -m pip install -q -r requirements.txt pyinstaller pytest
+    # Same test suite as the Linux gate, on the Python that builds the exe.
+    - .\.venv-ci\Scripts\python.exe -m pytest -q
+    - .\.venv-ci\Scripts\python.exe -m PyInstaller --noconfirm camera_wire_tool.spec
+    - |
+      $exe = Get-Item dist\CameraWireTool.exe -ErrorAction SilentlyContinue
+      if (-not $exe) { throw "dist\CameraWireTool.exe was not produced" }
+      if ($exe.Length -lt 15MB) { throw "CameraWireTool.exe is $($exe.Length) bytes (< 15MB); bundle is incomplete" }
+      .\.venv-ci\Scripts\python.exe packaging\check_bundle.py dist\CameraWireTool.exe
+      if ($LASTEXITCODE -ne 0) { throw "bundle check failed" }
+    - |
+      New-Item -ItemType Directory -Force out | Out-Null
+      Copy-Item dist\CameraWireTool.exe out\ -Force
+      Compress-Archive -Path dist\CameraWireTool.exe -DestinationPath "out\CameraWireTool-$env:VERSION-windows-x64-portable.zip" -Force
+    - |
+      & $env:ISCC "/DMyAppVersion=$env:VERSION" installer\windows.iss
+      if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+      $setup = Get-Item "installer\installer_out\CameraWireTool-$env:VERSION-windows-x64-setup.exe" -ErrorAction SilentlyContinue
+      if (-not $setup) { throw "installer was not produced" }
+      Copy-Item $setup.FullName out\ -Force
+      Get-ChildItem out
+  artifacts:
+    name: camerawiretool-windows-$CI_COMMIT_SHORT_SHA
+    paths: [out/]
+    expire_in: 30 days
+
+# ───────────────────────────── release ─────────────────────────────
+
+# Uploads every build to the project's generic package registry and creates
+# (or updates) the GitLab release for the version's tag with links to them.
+release:
+  extends: .linux
+  stage: release
+  image: alpine:3.20
+  needs:
+    - build-linux
+    - build-linux-flatpak
+    - build-windows
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $RELEASE_VERSION
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - apk add --no-cache curl jq >/dev/null
+    - |
+      set -e
+      VERSION="${RELEASE_VERSION:-$CI_COMMIT_TAG}"; VERSION="${VERSION#v}"; TAG="v$VERSION"
+      API="$CI_API_V4_URL/projects/$CI_PROJECT_ID"; H="JOB-TOKEN: $CI_JOB_TOKEN"
+      PKG="$API/packages/generic/CameraWireTool/$VERSION"
+      curl -fsS -H "$H" "$API/repository/tags/$TAG" >/dev/null || { echo "Tag $TAG does not exist in this project"; exit 1; }
+      ls -la out/
+      : > links.ndjson
+      for f in out/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        echo "uploading $name ($(du -h "$f" | cut -f1))"
+        curl -fsS -H "$H" --upload-file "$f" "$PKG/$name" >/dev/null
+        # Link the API download URL (what the release mirror accepts), not the web one.
+        jq -cn --arg n "$name" --arg u "$PKG/$name" '{name:$n, url:$u, link_type:"package"}' >> links.ndjson
+      done
+      test -s links.ndjson || { echo "No builds to publish"; exit 1; }
+      ASSETS=$(jq -s -c . links.ndjson)
+      NOTES=$(printf 'Camera Wire Tool %s\n\n- Windows: installer (setup.exe), portable zip, and the bare CameraWireTool.exe\n- Linux: AppImage (x86_64, glibc 2.31+) and Flatpak bundle\n\nBuilt on GitLab CI.' "$VERSION")
+      BODY=$(jq -cn --arg tag "$TAG" --arg name "Camera Wire Tool $VERSION" --arg desc "$NOTES" --argjson links "$ASSETS" '{tag_name:$tag, name:$name, description:$desc, assets:{links:$links}}')
+      if curl -fsS -o /dev/null -H "$H" "$API/releases/$TAG" 2>/dev/null; then
+        curl -fsS -H "$H" "$API/releases/$TAG/assets/links" | jq -r '.[].id' | while read -r id; do
+          curl -fsS -X DELETE -H "$H" "$API/releases/$TAG/assets/links/$id" >/dev/null
+        done
+        curl -fsS -X PUT -H "$H" -H "Content-Type: application/json" "$API/releases/$TAG" -d "$BODY" | jq -r '"updated release " + .tag_name'
+        while read -r l; do curl -fsS -X POST -H "$H" -H "Content-Type: application/json" "$API/releases/$TAG/assets/links" -d "$l" >/dev/null; done < links.ndjson
+      else
+        curl -fsS -X POST -H "$H" -H "Content-Type: application/json" "$API/releases" -d "$BODY" | jq -r '"created release " + .tag_name'
+      fi
+      echo "Published $TAG with:"; jq -r '.name' links.ndjson | sed 's/^/  /'
