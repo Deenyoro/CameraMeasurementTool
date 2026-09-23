@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import sys
 
-from PyInstaller.archive.readers import CArchiveReader
-
 # Python modules that must be in the embedded PYZ.
 REQUIRED_MODULES = [
     "sv_ttk",
@@ -42,21 +40,41 @@ OPTIONAL_MODULES = {
 }
 
 
+def check(names: set[str] | list[str], modules: set[str] | list[str]) -> list[str]:
+    """Return the required entries missing from an archive listing.
+
+    `names` are the outer CArchive entry names, `modules` the dotted module
+    names in the embedded PYZ. PyInstaller stores entry names with the host
+    OS separator (backslashes in a Windows build, as the bootloader there
+    needs them), so separators are normalised to "/" before comparing.
+    """
+    norm = {n.replace("\\", "/") for n in names}
+    mods = set(modules)
+    missing = [m for m in REQUIRED_MODULES if m not in mods]
+    missing += [d for d in REQUIRED_DATA if d not in norm]
+    return missing
+
+
+def read_archive(path: str) -> tuple[set[str], set[str]]:
+    """(outer entry names, PYZ module names) of a single-file PyInstaller build."""
+    # Imported here so check() stays usable (and testable) without PyInstaller.
+    from PyInstaller.archive.readers import CArchiveReader
+
+    outer = CArchiveReader(path)
+    names = set(outer.toc)
+    pyz_name = next((n for n in names if n.endswith(".pyz")), None)
+    if pyz_name is None:
+        raise SystemExit(f"FAIL: no PYZ archive inside {path}")
+    return names, set(outer.open_embedded_archive(pyz_name).toc)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(__doc__)
         return 2
     path = argv[1]
-    outer = CArchiveReader(path)
-    names = set(outer.toc)
-    pyz_name = next((n for n in names if n.endswith(".pyz")), None)
-    if pyz_name is None:
-        print(f"FAIL: no PYZ archive inside {path}")
-        return 1
-    modules = set(outer.open_embedded_archive(pyz_name).toc)
-
-    missing = [m for m in REQUIRED_MODULES if m not in modules]
-    missing += [d for d in REQUIRED_DATA if d not in names]
+    names, modules = read_archive(path)
+    missing = check(names, modules)
     for m, what in OPTIONAL_MODULES.items():
         state = "bundled" if m in modules else "not bundled"
         print(f"optional  {m:<12} {state:<12} ({what})")
