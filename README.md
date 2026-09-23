@@ -76,15 +76,20 @@ release):
 |------|------------|
 | `CameraWireTool-<ver>-windows-x64-setup.exe` | Windows installer (per-user by default, no admin; Start menu + optional desktop shortcut) |
 | `CameraWireTool-<ver>-windows-x64-portable.zip` / `CameraWireTool.exe` | Portable Windows exe, no install; put it next to your floor plans and it opens them |
-| `CameraWireTool-<ver>-linux-x86_64.AppImage` | Linux, any distro with glibc 2.31+ (Ubuntu 20.04+, Debian 11+): `chmod +x` and run |
-| `CameraWireTool-<ver>-linux-x86_64.flatpak` | Linux Flatpak bundle: `flatpak install --user <file>` (pulls the freedesktop 24.08 runtime from Flathub) |
+| `CameraWireTool-<ver>-linux-x86_64.AppImage` | Linux, any distro with glibc 2.35+ (Ubuntu 22.04+, Debian 12+, RHEL 9+): `chmod +x` and run |
+| `CameraWireTool-<ver>-linux-x86_64.flatpak` | Linux Flatpak bundle: `flatpak install --user <file>` (pulls the freedesktop 25.08 runtime from Flathub) |
 
-**Cutting a release:** push a tag `vX.Y.Z` (for example `git tag v1.3.0 &&
-git push origin v1.3.0`). The pipeline runs the tests, builds every file above
-(Windows natively on the Windows runner, Linux in containers) and publishes
-the release for that tag. To rebuild or re-publish an existing tag, run the
-pipeline from the web UI (**Build → Pipelines → Run pipeline**) with the
-variable `RELEASE_VERSION=vX.Y.Z`. A web/API run without `RELEASE_VERSION`
+**Cutting a release:** first set the version in `cwt/__init__.py`
+(`__version__`) and `pyproject.toml` to `X.Y.Z` and commit. The pipeline
+fails if the tag and `cwt.__version__` differ, because the app shows that
+version in its About screen and reports. Then push a tag `vX.Y.Z` (for
+example `git tag v1.3.0 && git push origin v1.3.0`). The pipeline runs the
+tests, builds every file above (Windows natively on the Windows runner, Linux
+in containers) and publishes the release for that tag. To rebuild or
+re-publish an existing tag, run the pipeline from the web UI (**Build →
+Pipelines → Run pipeline**) **on the tag `vX.Y.Z` as the ref** with the
+variable `RELEASE_VERSION=vX.Y.Z`. The release job refuses to publish if the
+tag points at a different commit from the one the pipeline built. A web/API run without `RELEASE_VERSION`
 only builds; download the files from the job artifacts (kept 30 days). The
 pipeline does not run on ordinary pushes.
 
@@ -94,7 +99,7 @@ unchanged and still builds `CameraWireTool.exe` on github.com.
 **Building locally**
 
 ```
-pip install -r requirements.txt pyinstaller
+pip install -r requirements.txt -r packaging/requirements-build.txt
 pyinstaller --noconfirm camera_wire_tool.spec     # dist/CameraWireTool(.exe)
 python packaging/check_bundle.py dist/CameraWireTool.exe   # or dist/CameraWireTool on Linux
 packaging/linux/build_appimage.sh 0.0.0-dev       # Linux: AppImage in packaging/linux/out/
@@ -103,7 +108,9 @@ packaging/linux/build_appimage.sh 0.0.0-dev       # Linux: AppImage in packaging
 The spec stops the build if sv-ttk or reportlab is missing, so a build can no
 longer ship without the theme or PDF export. The AppImage script downloads a
 pinned appimagetool and checks its SHA-256. The Windows installer is built
-with Inno Setup from `installer/windows.iss`. The app icon comes from
+with Inno Setup from `installer/windows.iss`. Inno Setup's licence terms
+changed with recent releases: check them before using the installer
+commercially. The app icon comes from
 `packaging/make_icon.py`.
 
 ## Controls (cheat sheet)
