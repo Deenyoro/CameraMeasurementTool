@@ -1,0 +1,40 @@
+# Flatpak manifest for Camera Wire Tool.
+#
+# Packages the PyInstaller single-file Linux binary that the build-linux CI
+# job produces (built on Debian bullseye, glibc 2.31, so it runs on this
+# newer runtime). Nothing is compiled here; the one module just installs
+# the binary plus desktop integration files. CI stages everything into one
+# directory next to this manifest (see build-linux-flatpak in
+# .gitlab-ci.yml):
+#   CameraWireTool                              (from build-linux)
+#   cameramtool.png                             (packaging/icons/)
+#   com.kawaconnect.CameraWireTool.desktop
+#   com.kawaconnect.CameraWireTool.metainfo.xml
+app-id: com.kawaconnect.CameraWireTool
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: CameraWireTool
+separate-locales: false
+
+finish-args:
+  # Tk draws through X11 (XWayland on Wayland sessions).
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --device=dri
+  # Tk's own file dialogs do not use portals: projects, floor plans and
+  # PDF/CSV exports live in the user's home, so the app needs to see it.
+  - --filesystem=home
+
+modules:
+  - name: camera-wire-tool
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 CameraWireTool /app/bin/CameraWireTool
+      - install -Dm644 com.kawaconnect.CameraWireTool.desktop /app/share/applications/com.kawaconnect.CameraWireTool.desktop
+      - install -Dm644 com.kawaconnect.CameraWireTool.metainfo.xml /app/share/metainfo/com.kawaconnect.CameraWireTool.metainfo.xml
+      - install -Dm644 cameramtool.png /app/share/icons/hicolor/256x256/apps/com.kawaconnect.CameraWireTool.png
+    sources:
+      - type: dir
+        path: .

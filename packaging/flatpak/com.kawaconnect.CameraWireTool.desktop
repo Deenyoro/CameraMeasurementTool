@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Camera Wire Tool
+Comment=Plan security-camera placement and estimate cable runs on floor plans
+Exec=CameraWireTool
+Icon=com.kawaconnect.CameraWireTool
+Terminal=false
+Categories=Graphics;Engineering;
+Keywords=camera;cctv;security;wire;cable;floor plan;measurement;bom;

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.kawaconnect.CameraWireTool</id>
+  <name>Camera Wire Tool</name>
+  <summary>Plan security-camera placement and estimate cable runs</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      A desktop tool for security-camera installers: load a draw.io floor
+      plan, place devices, draw multi-point wire routes, calibrate the
+      real-world scale, and estimate the total cable per device plus a
+      project-wide bill of materials.
+    </p>
+    <ul>
+      <li>Cable types and BOM with waste, tax and CSV export</li>
+      <li>Camera field-of-view and DORI coverage overlays</li>
+      <li>Multi-floor projects with anchor-point alignment</li>
+      <li>PDF report and CSV exports</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/Deenyoro/CameraMeasurementTool</url>
+  <developer id="com.kawaconnect">
+    <name>Dean Thomas</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+  <provides>
+    <binary>CameraWireTool</binary>
+  </provides>
+  <launchable type="desktop-id">com.kawaconnect.CameraWireTool.desktop</launchable>
+</component>
