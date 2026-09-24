@@ -13,6 +13,7 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib import colors
     from reportlab.lib.units import inch
+    from reportlab.lib.utils import ImageReader
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
     )
@@ -384,7 +385,10 @@ def write_map_pdf(
     currency: str = "$",
 ) -> None:
     """Multi-page PDF: one full-view floor-plan page per entry in `map_pages`
-    (each {"image": path, "caption": str}) followed by an optional one-page
+    (each {"image": path, "caption": str}, or {"render": fn, "caption": str}
+    where fn() returns a PIL image, rendered only when its page is written
+    so a many-page export never holds every page in memory or on disk)
+    followed by an optional one-page
     summary (project stats, the cable BOM, and the per-camera-model hardware
     rollup). Each map page is sized to its image so the plan fills the page
     instead of being shrunk onto a letter sheet; the summary is force-fit onto
@@ -414,12 +418,21 @@ def write_map_pdf(
     # FOV …) without shrinking the image. Long side clamped to a sane range
     # so tiny/huge captures still produce a usable page.
     for pg in (map_pages or []):
-        img_path = pg.get("image") if isinstance(pg, dict) else None
-        if not img_path or not os.path.exists(img_path):
-            continue
+        render = pg.get("render") if isinstance(pg, dict) else None
+        if callable(render):
+            pil_img = render()
+            if pil_img is None:
+                continue
+            iw, ih = pil_img.size
+            img_src = ImageReader(pil_img)
+        else:
+            img_path = pg.get("image") if isinstance(pg, dict) else None
+            if not img_path or not os.path.exists(img_path):
+                continue
+            iw, ih = (PILImage.open(img_path).size
+                      if PILImage is not None else (1600, 900))
+            img_src = img_path
         caption = pg.get("caption", "") if isinstance(pg, dict) else ""
-        iw, ih = (PILImage.open(img_path).size
-                  if PILImage is not None else (1600, 900))
         iw = iw or 1600
         ih = ih or 900
         # Page sized to the image aspect; the full-resolution image is
@@ -432,7 +445,7 @@ def write_map_pdf(
         k = target / longside if longside else 1.0
         mw, mh = mw * k, mh * k
         c.setPageSize((mw, mh))
-        c.drawImage(img_path, 0, 0, width=mw, height=mh,
+        c.drawImage(img_src, 0, 0, width=mw, height=mh,
                     preserveAspectRatio=True, anchor="c")
         if caption:
             # Caption is drawn verbatim — the caller decides the exact text

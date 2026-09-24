@@ -30,12 +30,15 @@ import io
 import json
 import math
 import os
+import queue
 import re
 import shutil
+import subprocess
 import sys
-import tempfile
+import threading
 import time
 import traceback
+import types
 import xml.etree.ElementTree as ET
 import zipfile
 from abc import ABC, abstractmethod
@@ -1654,6 +1657,204 @@ def save_settings(settings: dict) -> None:
                 tmp.unlink()
         except OSError:
             pass
+
+
+# ============================================================ Off-thread map rendering
+class _FixedFlag:
+    """Stand-in for a tk.BooleanVar holding a value captured on the Tk
+    thread. Worker threads must never touch Tk variables."""
+
+    __slots__ = ("_v",)
+
+    def __init__(self, value) -> None:
+        self._v = bool(value)
+
+    def get(self) -> bool:
+        return self._v
+
+
+class MapRenderSnapshot:
+    """Everything CameraWireTool._render_map_image needs for ONE floor,
+    captured BY VALUE on the Tk thread so the page can be rendered on a
+    worker thread while the user keeps working (and while other floors
+    are switched in). Nothing here refers back to the live app: sharing
+    the live project made other floors render with the wrong scale and
+    alignment.
+
+    Render with `snapshot.render(symbol_scale=…, show_wires=…, show_fov=…)`.
+    """
+
+    def __init__(self, app, *, hide_types=(), hide_legend: bool = False,
+                 hide_drops: bool = False, legend_nudge: float = 0.0,
+                 live_layers: bool = True) -> None:
+        # live_layers=False: the legend and drop points follow ONLY the
+        # hide_* arguments (the PDF export dialog's own checkboxes), not the
+        # on-screen Legend/Drops toggles; that is what the export always did.
+        cp = copy.deepcopy
+        img = app.bg_image
+        if img is not None:
+            img.load()                       # decode now, on this thread
+        self.bg_image = img
+        self.dx_scale = app.dx_scale
+        self.dy_scale = app.dy_scale
+        self.devices = cp(app.devices)
+        self.wire_routes = cp(app.wire_routes)
+        self.symbol_types = cp(app.symbol_types)
+        self.cable_types = cp(app.cable_types)
+        self.annotations = cp(app.annotations)
+        lb = dict(app.legend_box) if app.legend_box else None
+        if lb is not None and legend_nudge:
+            lb["y"] = lb.get("y", 0) + legend_nudge
+        self.legend_box = lb
+        self._hidden_types = set(app._hidden_types) | set(hide_types)
+        self._fov_hidden_types = set(app._fov_hidden_types)
+        self._fov_opacity = app._fov_opacity
+        self._fov_opacity_by_type = dict(app._fov_opacity_by_type)
+        self._fov_color_mode = app._fov_color_mode
+        self._fov_color_by_type = dict(app._fov_color_by_type)
+        self._show_legend = _FixedFlag(
+            not hide_legend and (app._show_legend.get() or not live_layers))
+        self._show_dori = _FixedFlag(app._show_dori.get())
+        self._show_device_ids = _FixedFlag(app._show_device_ids.get())
+        self._show_wires = _FixedFlag(app._show_wires.get())
+        self._show_fov = _FixedFlag(app._show_fov.get())
+        proj = app._project
+        self._project = (None if proj is None else types.SimpleNamespace(
+            active_floor=proj.active_floor,
+            device_azimuths=cp(proj.device_azimuths)))
+        self.floor_id = proj.active_floor if proj is not None else None
+        self._alignment = cp(app._current_alignment())
+        self._eff_scale = app._effective_scale_factor()
+        self._drops = cp(app._drops_on_active_floor())
+        self._drops_visible = (not hide_drops) and (
+            app._show_drops_visible() or not live_layers)
+        self._proj_default = app._proj_default_cable()
+        self._unwired_on = bool(app._unwired_filter_on())
+        self._unwired_hidden = {d.get("id") for d in app.devices
+                                if isinstance(d, dict)
+                                and app._hidden_by_unwired_filter(d)}
+        self._model_fov = {}
+        for d in app.devices:
+            if isinstance(d, dict) and app._is_camera_type(d.get("type")):
+                self._model_fov[d.get("id")] = cp(app._model_fov_for_device(d))
+
+    # ---- the handful of app methods the renderer calls, answered from
+    # the captured values
+    def _world_to_img(self, wx, wy):
+        return mf_mod.apply_alignment(
+            (wx, wy), mf_mod.inverse_alignment(self._alignment))
+
+    def _effective_scale_factor(self):
+        return self._eff_scale
+
+    def _drops_on_active_floor(self):
+        return self._drops
+
+    def _show_drops_visible(self):
+        return self._drops_visible
+
+    def _proj_default_cable(self):
+        return self._proj_default
+
+    def _hidden_by_unwired_filter(self, dev) -> bool:
+        if not isinstance(dev, dict):
+            return self._unwired_on
+        return dev.get("id") in self._unwired_hidden
+
+    def _model_fov_for_device(self, dev):
+        f = self._model_fov.get(dev.get("id")) if isinstance(dev, dict) else None
+        return dict(f) if isinstance(f, dict) else None
+
+    def _wire_hidden(self, route) -> bool:
+        if not isinstance(route, dict):
+            return False
+        did = route.get("device_id")
+        if not did:
+            return False
+        dev = next((d for d in self.devices
+                    if isinstance(d, dict) and d.get("id") == did), None)
+        if dev is None:
+            return False
+        if dev.get("type") in self._hidden_types:
+            return True
+        return self._hidden_by_unwired_filter(dev)
+
+    def render(self, *, symbol_scale: float = 1.0, show_wires=None,
+               show_fov=None):
+        """Render this floor's map. Safe to call from a worker thread."""
+        view = copy.copy(self)
+        if show_wires is not None:
+            view._show_wires = _FixedFlag(show_wires)
+        if show_fov is not None:
+            view._show_fov = _FixedFlag(show_fov)
+        return view._render_map_image(symbol_scale=symbol_scale)
+
+
+class _ProgressDialog:
+    """Small modal progress window: message, determinate bar, Cancel.
+    Only ever touched from the Tk thread."""
+
+    def __init__(self, app, title: str, message: str, *, on_cancel) -> None:
+        self.app = app
+        root = app.root
+        self.top = dlg = tk.Toplevel(root)
+        dlg.withdraw()              # shown once it is sized and centred
+        dlg.title(title)
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=(16, 14, 16, 8))
+        body.pack(fill=tk.BOTH, expand=True)
+        self.msg = ttk.Label(body, text=message, font="AppHeading")
+        self.msg.pack(anchor=tk.W)
+        self.detail = ttk.Label(body, text="", style="Muted.TLabel")
+        self.detail.pack(anchor=tk.W, pady=(2, 8))
+        self.bar = ttk.Progressbar(body, mode="determinate",
+                                   length=app._px(380), maximum=1)
+        self.bar.pack(fill=tk.X)
+        self._cancel_cb = on_cancel
+        row = ttk.Frame(dlg, padding=(16, 8, 16, 14))
+        row.pack(fill=tk.X)
+        self.cancel_btn = ttk.Button(row, text="Cancel", command=self._cancel)
+        self.cancel_btn.pack(side=tk.RIGHT)
+        dlg.protocol("WM_DELETE_WINDOW", self._cancel)
+        dlg.bind("<Escape>", lambda _e: self._cancel())
+        app._autosize_dialog(dlg)
+        with contextlib.suppress(tk.TclError):
+            dlg.deiconify()
+        self._grab(tries=20)
+        with contextlib.suppress(tk.TclError):
+            root.config(cursor="watch")
+            dlg.config(cursor="watch")
+            self.cancel_btn.focus_set()
+
+    def _grab(self, tries: int) -> None:
+        # A grab needs the window mapped; retry briefly until it is.
+        try:
+            if self.top.winfo_exists():
+                self.top.grab_set()
+        except tk.TclError:
+            if tries > 0:
+                with contextlib.suppress(tk.TclError):
+                    self.top.after(25, lambda: self._grab(tries - 1))
+
+    def _cancel(self) -> None:
+        with contextlib.suppress(tk.TclError):
+            self.cancel_btn.state(["disabled"])
+            self.msg.config(text="Cancelling…")
+        self._cancel_cb()
+
+    def update(self, done: int, total: int, detail: str = "") -> None:
+        with contextlib.suppress(tk.TclError):
+            self.bar.config(maximum=max(1, total), value=done)
+            if detail:
+                self.detail.config(text=detail)
+
+    def close(self) -> None:
+        with contextlib.suppress(tk.TclError):
+            self.app.root.config(cursor="")
+        with contextlib.suppress(tk.TclError):
+            self.top.grab_release()
+            self.top.destroy()
 
 
 # ============================================================ Main app
@@ -16720,7 +16921,9 @@ class CameraWireTool:
         if not self._warn_if_no_scale("CSV"):
             return
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="Export BOM as CSV",
+            initialdir=self._export_initialdir(),
             defaultextension=".csv",
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_bom.csv",
             filetypes=[("CSV", "*.csv")])
@@ -16731,7 +16934,7 @@ class CameraWireTool:
             bom_mod.write_csv(self._build_bom_report(), path,
                               currency=self._bom_currency_var.get() or "$",
                               model_lines=self._model_inventory())
-            messagebox.showinfo("Exported", f"BOM written:\n{path}")
+            self._show_export_done(path, "BOM exported")
         except OSError as e:
             messagebox.showerror("Export failed", str(e))
 
@@ -16743,7 +16946,9 @@ class CameraWireTool:
         # only to cancel out on the scale warning.
         if not self._warn_if_no_scale("CSV bundle"):
             return
-        directory = filedialog.askdirectory(title="Export CSV bundle into folder")
+        directory = filedialog.askdirectory(
+            parent=self.root, title="Export CSV bundle into folder",
+            initialdir=self._export_initialdir())
         if not directory:
             return
         try:
@@ -16761,7 +16966,9 @@ class CameraWireTool:
                 # bundle about which cable an auto-resolved run uses.
                 project_default=self._proj_default_cable(),
             )
-            messagebox.showinfo("Exported", "Wrote:\n" + "\n".join(paths))
+            self._show_export_done(
+                paths[0] if paths else os.path.join(directory, "bom.csv"),
+                f"{self._plural(len(paths), 'CSV file')} exported")
         except OSError as e:
             messagebox.showerror("Export failed", str(e))
 
@@ -17189,45 +17396,70 @@ class CameraWireTool:
         return base.convert("RGB")
 
     def _export_map_png(self) -> None:
-        """Save a PNG snapshot of the canvas — what's currently visible
-        on the map (devices + wires + legend, but not the mode banner /
-        mini-map / hover popups)."""
+        """Save a PNG of the whole map (devices, wires, legend, labels, FOV
+        as currently shown) at the floor plan's full resolution.
+
+        Rendered off-screen from a snapshot on a worker thread. It used a
+        Win32 screen grab of the canvas, which failed on Linux every time
+        and on Windows captured overlapping windows and DPI quirks."""
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="Save map snapshot",
+            initialdir=self._export_initialdir(),
             defaultextension=".png",
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_map.png",
             filetypes=[("PNG", "*.png")],
         )
         if not path:
             return
-        img = self._capture_canvas_image()
-        if img is None:
-            messagebox.showerror("Export failed",
-                                 "Could not capture the map image.")
-            return
         try:
-            tmp_path = path + ".tmp"
-            # PIL infers the format from the extension; ".tmp" is not a
-            # registered format so the save raised ValueError on every
-            # snapshot. Derive the format from the REAL target path.
-            fmt = (os.path.splitext(path)[1].lstrip(".") or "png").upper()
-            if fmt in ("JPG", "JPEG"):
-                fmt = "JPEG"
-                if img.mode in ("RGBA", "P"):
-                    img = img.convert("RGB")   # JPEG has no alpha
-            img.save(tmp_path, format=fmt)
-            os.replace(tmp_path, path)
+            snap = MapRenderSnapshot(self)
         except Exception as e:
             log_error("Map snapshot failed", e)
-            try:
-                if os.path.exists(path + ".tmp"):
-                    os.unlink(path + ".tmp")
-            except OSError:
-                pass
             messagebox.showerror("Export failed", str(e))
             return
-        self._flash_status(f"✓ Saved map snapshot to {os.path.basename(path)}",
-                            ttl_ms=3500)
+        # PIL infers the format from the extension; derive it from the
+        # REAL target path (the staging name ends in .tmp).
+        fmt = (os.path.splitext(path)[1].lstrip(".") or "png").upper()
+        if fmt in ("JPG", "JPEG"):
+            fmt = "JPEG"
+        cancel = threading.Event()
+        prog = _ProgressDialog(self, "Map snapshot",
+                               f"Saving {os.path.basename(path)}",
+                               on_cancel=cancel.set)
+
+        def work(report, is_cancelled):
+            try:
+                report(0, 2, "Rendering the map…")
+                img = snap.render()
+                if img is None:
+                    raise RuntimeError("No floor-plan image is loaded.")
+                if fmt == "JPEG" and img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")   # JPEG has no alpha
+                if is_cancelled():
+                    return {"cancelled": True}
+                report(1, 2, "Saving…")
+                buf = io.BytesIO()
+                img.save(buf, format=fmt)
+                with open(path + ".tmp", "wb") as fh:
+                    fh.write(buf.getvalue())
+                os.replace(path + ".tmp", path)
+                return {"path": path}
+            except Exception as e:
+                return {"error": e}
+
+        def on_done(result):
+            prog.close()
+            if result.get("error") is not None:
+                log_error("Map snapshot failed", result["error"])
+                messagebox.showerror("Export failed", str(result["error"]))
+            elif result.get("cancelled"):
+                self._flash_status("Map snapshot cancelled — nothing was written.",
+                                   ttl_ms=3000)
+            else:
+                self._show_export_done(path, "Map snapshot saved")
+
+        self._run_in_background(work, on_done, progress=prog, cancel=cancel)
 
     @staticmethod
     def _win_rect(hwnd):
@@ -17301,7 +17533,9 @@ class CameraWireTool:
         if not self._warn_if_no_scale("PDF report"):
             return
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="Export PDF report",
+            initialdir=self._export_initialdir(),
             defaultextension=".pdf",
             initialfile=f"{os.path.splitext(os.path.basename(self.drawio_path))[0]}_report.pdf",
             filetypes=[("PDF", "*.pdf")])
@@ -17329,7 +17563,7 @@ class CameraWireTool:
                 currency=self._bom_currency_var.get() or "$",
             )
             os.replace(tmp_path, path)
-            messagebox.showinfo("Exported", f"PDF written:\n{path}")
+            self._show_export_done(path, "Report exported")
         except Exception as e:
             log_error("PDF export failed", e)
             try:
@@ -17366,7 +17600,8 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Export to PDF")
-        dlg.transient(self.root); dlg.grab_set()
+        dlg.transient(self.root)
+        dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text="Export to PDF",
@@ -17374,12 +17609,23 @@ class CameraWireTool:
         ttk.Label(dlg, text="Each checked map view becomes its own full-view "
                             "page (rendered at high resolution). Add a one-page "
                             "summary at the end if you like.",
-                  wraplength=440, foreground="#7fc4ff",
+                  wraplength=self._px(640), foreground="#7fc4ff",
                   font="AppBody").pack(anchor=tk.W, padx=12, pady=(0, 8))
+        # Two columns — what goes in the PDF on the left, what shows on the
+        # map on the right — so the dialog fits a 768 px-tall laptop (the
+        # single column was 792 px tall and pushed Export PDF off-screen).
+        body = ttk.Frame(dlg)
+        body.pack(fill=tk.BOTH, expand=True, padx=6)
+        col_l = ttk.Frame(body)
+        col_r = ttk.Frame(body)
+        col_l.grid(row=0, column=0, sticky="nsew")
+        col_r.grid(row=0, column=1, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
 
         view_vars: list[tuple] = []
-        mp_frame = ttk.LabelFrame(dlg, text="Map pages (one PDF page each)")
-        mp_frame.pack(fill=tk.X, padx=12, pady=4)
+        mp_frame = ttk.LabelFrame(col_l, text="Map pages (one PDF page each)")
+        mp_frame.pack(fill=tk.X, padx=6, pady=4)
         for label, show_wires, show_fov, default_on in self._EXPORT_VIEWS:
             v = tk.BooleanVar(value=default_on)
             view_vars.append((v, label, show_wires, show_fov))
@@ -17391,8 +17637,8 @@ class CameraWireTool:
         # Only shown for multi-floor projects; default = current floor only.
         floor_vars: list[tuple] = []   # (BooleanVar, floor_id, floor_name)
         if self._project and len(self._project.floors) > 1:
-            ff = ttk.LabelFrame(dlg, text="Floors to export")
-            ff.pack(fill=tk.X, padx=12, pady=4)
+            ff = ttk.LabelFrame(col_l, text="Floors to export")
+            ff.pack(fill=tk.X, padx=6, pady=4)
             active_id = self._project.active_floor
             fr = ttk.Frame(ff); fr.pack(fill=tk.X, padx=4, pady=4)
             for n, fl in enumerate(self._project.floors):
@@ -17402,8 +17648,8 @@ class CameraWireTool:
                                 variable=fv).grid(row=n // 2, column=n % 2,
                                                   sticky=tk.W, padx=6, pady=1)
 
-        opt_frame = ttk.LabelFrame(dlg, text="Shared map options")
-        opt_frame.pack(fill=tk.X, padx=12, pady=4)
+        opt_frame = ttk.LabelFrame(col_r, text="What shows on the map")
+        opt_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         hide_legend = tk.BooleanVar(value=False)
         hide_drops = tk.BooleanVar(value=False)
         o = ttk.Frame(opt_frame); o.pack(fill=tk.X, padx=8, pady=(4, 2))
@@ -17486,8 +17732,8 @@ class CameraWireTool:
                                                  sticky=tk.W, padx=4, pady=1)
 
         # --- Render options: symbol size + the page caption (toggle + edit).
-        ro = ttk.LabelFrame(dlg, text="Render options")
-        ro.pack(fill=tk.X, padx=12, pady=4)
+        ro = ttk.LabelFrame(col_l, text="Render options")
+        ro.pack(fill=tk.X, padx=6, pady=4)
         srow = ttk.Frame(ro); srow.pack(fill=tk.X, padx=8, pady=(6, 2))
         ttk.Label(srow, text="Symbol size:").pack(side=tk.LEFT)
         symbol_scale_var = tk.DoubleVar(value=1.0)
@@ -17512,8 +17758,8 @@ class CameraWireTool:
         caption_on.trace_add("write", _sync_cap_state)
 
         inc_summary = tk.BooleanVar(value=True)
-        rep_frame = ttk.LabelFrame(dlg, text="Summary report (last page)")
-        rep_frame.pack(fill=tk.X, padx=12, pady=4)
+        rep_frame = ttk.LabelFrame(col_l, text="Summary report (last page)")
+        rep_frame.pack(fill=tk.X, padx=6, pady=4)
         ttk.Checkbutton(
             rep_frame,
             text="Append one-page summary",
@@ -17523,7 +17769,8 @@ class CameraWireTool:
         sum_breakdown = tk.BooleanVar(value=True)
         sum_cable = tk.BooleanVar(value=True)
         sum_models = tk.BooleanVar(value=True)
-        adv = ttk.Frame(rep_frame); adv.pack(fill=tk.X, padx=26, pady=(0, 6))
+        adv = ttk.Frame(rep_frame)
+        adv.pack(fill=tk.X, padx=26, pady=(0, 6))
         ttk.Label(adv, text="Include on summary:",
                   foreground="#888888").grid(row=0, column=0, columnspan=3,
                                              sticky=tk.W, pady=(0, 1))
@@ -17536,16 +17783,13 @@ class CameraWireTool:
                             variable=sum_models),
         ]
         for i, cb in enumerate(adv_cbs):
-            cb.grid(row=1, column=i, sticky=tk.W, padx=(0, 10), pady=1)
+            cb.grid(row=1 + i, column=0, sticky=tk.W, padx=(0, 10), pady=1)
 
         def _sync_summary_opts(*_):
             st = "normal" if inc_summary.get() else "disabled"
             for cb in adv_cbs:
                 cb.configure(state=st)
         inc_summary.trace_add("write", _sync_summary_opts)
-
-        btns = ttk.Frame(dlg)
-        btns.pack(fill=tk.X, padx=12, pady=(6, 12))
 
         def _do_export():
             page_specs = [{"label": label, "show_wires": sw, "show_fov": sf}
@@ -17592,7 +17836,9 @@ class CameraWireTool:
                 floor_tag = "multiple"
             initial = f"{proj_base}_{floor_tag}_export.pdf"
             path = filedialog.asksaveasfilename(
+                parent=self.root,
                 title="Export to PDF", defaultextension=".pdf",
+                initialdir=self._export_initialdir(),
                 initialfile=initial,
                 filetypes=[("PDF", "*.pdf")])
             if not path:
@@ -17610,10 +17856,11 @@ class CameraWireTool:
                 summary_options=summary_options,
             )
 
-        ttk.Button(btns, text="Export PDF", command=_do_export).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        self._dialog_buttons(dlg, [("Export PDF", _do_export),
+                                   ("Cancel", dlg.destroy)])
         # Return = primary action, matching every other dialog in the app.
         dlg.bind("<Return>", lambda _e: _do_export())
+        self._autosize_dialog(dlg)
 
     def _run_pdf_map_export(self, path: str, *, page_specs: list,
                             include_summary: bool, hide_types: set,
@@ -17621,24 +17868,26 @@ class CameraWireTool:
                             floor_ids: list | None = None,
                             symbol_scale: float = 1.0,
                             caption_text: str = "",
-                            summary_options: dict | None = None) -> None:
-        # Each page is rendered OFF-SCREEN at the floor-plan's native
-        # resolution (see _render_map_image). For a multi-floor export we
-        # walk the selected floors with _switch_floor (which swaps the whole
-        # drawing state in place), render each one's pages, then switch back
-        # to where the user was. Visibility flags are restored in finally.
-        saved = {
-            "hidden": set(self._hidden_types),
-            "wires": self._show_wires.get(),
-            "legend": self._show_legend.get(),
-            "drops": self._show_drops.get(),
-            "fov": self._show_fov.get(),
-            "only_sel_fov": self._show_only_selected_fov.get(),
-            "legend_box": dict(self.legend_box) if self.legend_box else None,
-        }
-        orig_active = self._project.active_floor if self._project else None
-        # Resolve the floor list (de-duped, order preserved); default to the
-        # floor the user is on.
+                            summary_options: dict | None = None,
+                            on_finished=None) -> None:
+        """Export the map PDF WITHOUT freezing the window.
+
+        1. On the Tk thread, one floor per event-loop turn: switch to each
+           selected floor and capture a MapRenderSnapshot of it BY VALUE
+           (devices, wires, alignment, scale, visibility…), then switch
+           back to the floor the user was on. The live app's visibility
+           flags are never touched.
+        2. On a worker thread: render every page from those snapshots at
+           the plan's native resolution, one at a time straight into the
+           PDF (no temp files), and write the PDF atomically. This is the
+           part that used to block the UI for ~15 s ("Not Responding").
+        3. Back on the Tk thread: show the result.
+        A modal progress window shows page n of N and can cancel.
+
+        `on_finished(result)` (optional) receives {"path"} on success,
+        {"cancelled": True} or {"error": exc}."""
+        proj = self._project
+        orig_active = proj.active_floor if proj else None
         if not floor_ids:
             floor_ids = [orig_active] if orig_active else [None]
         _seen: set = set()
@@ -17654,195 +17903,343 @@ class CameraWireTool:
 
         # Clear any wire-in-progress so _switch_floor doesn't prompt mid-export.
         self.current_wire_points = []
+        cancel = threading.Event()
+        prog = _ProgressDialog(
+            self, "Export to PDF", f"Exporting {os.path.basename(path)}",
+            on_cancel=cancel.set)
+        # (snapshot, [page specs], caption) per floor, and each exported
+        # floor's devices/wires (the snapshot's own copies) for the summary.
+        prepared: list[tuple] = []
+        exported_state: list[tuple] = []
+        skipped: list[str] = []
+        steps = {"i": 0}
+        n_prep = len(floor_ids) if page_specs else 0
 
-        map_pages: list[dict] = []
-        # Snapshots of each exported floor's devices/wires, captured
-        # WHILE that floor is active. The summary is built from these —
-        # building it from self.devices after switching back rendered
-        # Floor 2's maps with Floor 1's totals.
-        exported_state: list[tuple[str | None, list, list]] = []
-        skipped_floors: list[str] = []
-        render_error: Exception | None = None
-        try:
-            if page_specs:
-                self._hidden_types = set(self._hidden_types) | set(hide_types)
-                self._show_legend.set(not hide_legend)
-                self._show_drops.set(not hide_drops)
-                self._show_only_selected_fov.set(False)  # export ALL cones
-                for fid in floor_ids:
-                    if (self._project and fid
-                            and fid != self._project.active_floor):
-                        self._switch_floor(fid)
-                        if self._project.active_floor != fid:
-                            # Switch failed (missing/corrupt .drawio —
-                            # _switch_floor already showed its dialog).
-                            # Rendering now would emit the PREVIOUS
-                            # floor's map under this floor's caption.
-                            skipped_floors.append(_floor_name(fid))
-                            continue
-                    exported_state.append(
-                        (fid, list(self.devices), list(self.wire_routes)))
-                    # Per-page caption: the user's editable text, with the
-                    # floor name appended when exporting more than one floor
-                    # so the pages stay identifiable.
-                    if caption_text and multi:
-                        page_caption = f"{caption_text} — {_floor_name(fid)}"
-                    else:
-                        page_caption = caption_text
-                    # Nudge THIS floor's legend down so it isn't floating high
-                    # with empty space beneath it. Restored after this floor.
-                    floor_legend = dict(self.legend_box) if self.legend_box else None
-                    if self.legend_box:
-                        self.legend_box = {**self.legend_box,
-                                           "y": self.legend_box.get("y", 0) + 250}
-                    # Collapse views that would render IDENTICALLY for this
-                    # floor — e.g. with no wire, "Devices + wires" and
-                    # "Devices only (no wires)" look the same, so don't emit
-                    # the same page twice. A view's effective look depends on
-                    # whether the wire/FOV it toggles actually exists here.
-                    floor_has_wire = any(
-                        isinstance(w, dict) and w.get("points")
-                        for w in self.wire_routes)
-                    floor_has_cam = any(
-                        isinstance(d, dict) and self._is_camera_type(d.get("type"))
-                        for d in self.devices)
-                    seen_sig: set = set()
-                    floor_specs = []
-                    for spec in page_specs:
-                        sig = (bool(spec["show_wires"]) and floor_has_wire,
-                               bool(spec["show_fov"]) and floor_has_cam)
-                        if sig in seen_sig:
-                            continue
-                        seen_sig.add(sig)
-                        floor_specs.append(spec)
-                    try:
-                        for spec in floor_specs:
-                            self._show_wires.set(bool(spec["show_wires"]))
-                            self._show_fov.set(bool(spec["show_fov"]))
-                            img = self._render_map_image(symbol_scale=symbol_scale)
-                            if img is None:
-                                raise RuntimeError(
-                                    "No floor-plan image is loaded to render.")
-                            fd, p = tempfile.mkstemp(suffix=".png", prefix="cwt_map_")
-                            os.close(fd)
-                            img.save(p)
-                            map_pages.append({"image": p, "caption": page_caption})
-                    finally:
-                        if floor_legend is not None:
-                            self.legend_box = floor_legend
-        except Exception as e:
-            # A render/disk failure must surface as a dialog (not a
-            # silent stderr traceback) and must clean up the already-
-            # rendered temp PNGs — the cleanup in the write block below
-            # was never reached when this path raised.
-            render_error = e
-        finally:
-            self._hidden_types = saved["hidden"]
-            self._show_wires.set(saved["wires"])
-            self._show_legend.set(saved["legend"])
-            self._show_drops.set(saved["drops"])
-            self._show_fov.set(saved["fov"])
-            self._show_only_selected_fov.set(saved["only_sel_fov"])
-            # Return to the floor the user started on.
+        def _finish(result: dict) -> None:
+            prog.close()
+            self._pdf_export_busy = False
+            if on_finished is not None:
+                try:
+                    on_finished(result)
+                except Exception as e:
+                    log_error("PDF export completion callback failed", e)
+
+        def _return_to_start_floor() -> None:
             if (self._project and orig_active
                     and self._project.active_floor != orig_active):
                 self._switch_floor(orig_active)
-            if saved["legend_box"] is not None:
-                self.legend_box = saved["legend_box"]
             self._redraw()
 
-        if render_error is not None:
-            log_error("PDF map export failed while rendering pages",
-                      render_error)
-            for pg in map_pages:
-                ip = pg.get("image")
-                if ip and os.path.exists(ip):
-                    try:
-                        os.unlink(ip)
-                    except OSError:
-                        pass
-            messagebox.showerror("Export failed", str(render_error))
-            return
-        if skipped_floors and not map_pages:
-            messagebox.showerror(
-                "Export failed",
-                "None of the selected floors could be rendered:\n"
-                + "\n".join(skipped_floors))
-            return
+        def prepare_next() -> None:
+            if cancel.is_set():
+                _return_to_start_floor()
+                self._flash_status("PDF export cancelled.", ttl_ms=3000)
+                _finish({"cancelled": True})
+                return
+            i = steps["i"]
+            if i >= n_prep:
+                _return_to_start_floor()
+                start_worker()
+                return
+            steps["i"] = i + 1
+            fid = floor_ids[i]
+            prog.update(0, 1, f"Preparing {_floor_name(fid) or 'the map'}…")
+            try:
+                if (self._project and fid
+                        and fid != self._project.active_floor):
+                    self._switch_floor(fid)
+                    if self._project.active_floor != fid:
+                        # Missing/corrupt floor file (_switch_floor showed
+                        # its own dialog). Rendering now would emit the
+                        # PREVIOUS floor's map under this floor's caption.
+                        skipped.append(_floor_name(fid))
+                        self.root.after(1, prepare_next)
+                        return
+                snap = MapRenderSnapshot(
+                    self, hide_types=hide_types, hide_legend=hide_legend,
+                    hide_drops=hide_drops, live_layers=False,
+                    # Nudge the legend down so it isn't floating high with
+                    # empty space beneath it (as the export always did).
+                    legend_nudge=250 if self.legend_box else 0)
+            except Exception as e:
+                log_error("PDF map export failed while preparing a floor", e)
+                _return_to_start_floor()
+                messagebox.showerror("Export failed", str(e))
+                _finish({"error": e})
+                return
+            exported_state.append((fid, snap.devices, snap.wire_routes))
+            caption = (f"{caption_text} — {_floor_name(fid)}"
+                       if caption_text and multi else caption_text)
+            # Collapse views that would render IDENTICALLY for this floor
+            # (e.g. no wire: "Devices + wires" == "Devices only").
+            has_wire = any(isinstance(w, dict) and w.get("points")
+                           for w in snap.wire_routes)
+            has_cam = any(isinstance(d, dict)
+                          and snap._is_camera_type(d.get("type"))
+                          for d in snap.devices)
+            seen_sig: set = set()
+            specs = []
+            for spec in page_specs:
+                sig = (bool(spec["show_wires"]) and has_wire,
+                       bool(spec["show_fov"]) and has_cam)
+                if sig not in seen_sig:
+                    seen_sig.add(sig)
+                    specs.append(spec)
+            prepared.append((snap, specs, caption))
+            self.root.after(1, prepare_next)
 
-        # The summary must reflect ONLY what was exported — the EXPORTED
-        # floors' snapshots (captured while each floor was active), and,
-        # if the user hid some device types (e.g. exported "IT only"),
-        # filtered to the visible types. Compute the filtered BOM/model
-        # rollups by temporarily swapping in the visible devices/wires
-        # (both helpers read self.devices/self.wire_routes).
-        export_hidden = set(saved["hidden"]) | set(hide_types)
+        def start_worker() -> None:
+            if skipped and not prepared and page_specs:
+                messagebox.showerror(
+                    "Export failed",
+                    "None of the selected floors could be rendered:\n"
+                    + "\n".join(skipped))
+                _finish({"error": RuntimeError("no floors rendered")})
+                return
+            floor_label = (", ".join(_floor_name(fid) for fid, _d, _w
+                                     in exported_state if fid)
+                           or (self._project.active_floor if self._project
+                               else None))
+            pdf_kwargs = self._map_pdf_summary_kwargs(
+                exported_state, hide_types, floor_label=floor_label,
+                include_summary=include_summary,
+                summary_options=summary_options)
+            n_pages = sum(len(specs) for _s, specs, _c in prepared)
+
+            class _Cancelled(Exception):
+                pass
+
+            def work(report, is_cancelled):
+                total = n_pages + 1
+                counter = {"done": 0}
+
+                def page_renderer(snap, spec):
+                    def _render():
+                        if is_cancelled():
+                            raise _Cancelled()
+                        i = counter["done"]
+                        report(i, total, f"Rendering page {i + 1} of "
+                                         f"{n_pages}: {spec['label']}")
+                        img = snap.render(
+                            symbol_scale=symbol_scale,
+                            show_wires=bool(spec["show_wires"]),
+                            show_fov=bool(spec["show_fov"]))
+                        if img is None:
+                            raise RuntimeError(
+                                "No floor-plan image is loaded to render.")
+                        counter["done"] = i + 1
+                        return img
+                    return _render
+
+                pages = [{"render": page_renderer(snap, spec),
+                          "caption": caption}
+                         for snap, specs, caption in prepared
+                         for spec in specs]
+                try:
+                    buf = io.BytesIO()
+                    export_mod.write_map_pdf(buf, map_pages=pages,
+                                             **pdf_kwargs)
+                    if is_cancelled():
+                        return {"cancelled": True}
+                    report(n_pages, total, "Saving the PDF…")
+                    # Atomic: the finished document replaces the target in
+                    # one step, so a failure never leaves a half-written PDF.
+                    with open(path + ".tmp", "wb") as fh:
+                        fh.write(buf.getvalue())
+                    os.replace(path + ".tmp", path)
+                    return {"path": path}
+                except _Cancelled:
+                    return {"cancelled": True}
+                except Exception as e:
+                    return {"error": e}
+
+            def on_done(result: dict) -> None:
+                if result.get("error") is not None:
+                    log_error("PDF map export failed", result["error"])
+                    messagebox.showerror("Export failed", str(result["error"]))
+                elif result.get("cancelled"):
+                    self._flash_status("PDF export cancelled — nothing was "
+                                       "written.", ttl_ms=3500)
+                else:
+                    note = (f" (skipped: {', '.join(skipped)})"
+                            if skipped else "")
+                    self._show_export_done(path, "PDF exported" + note)
+                _finish(result)
+
+            self._run_in_background(work, on_done, progress=prog,
+                                    cancel=cancel)
+
+        self._pdf_export_busy = True
+        self.root.after(1, prepare_next)
+
+    def _map_pdf_summary_kwargs(self, exported_state, hide_types, *,
+                                floor_label, include_summary,
+                                summary_options) -> dict:
+        """write_map_pdf's summary inputs, computed on the Tk thread from
+        ONLY what was exported (the exported floors' snapshot copies, minus
+        hidden device types). Everything returned is a private copy, safe
+        to hand to the export worker thread."""
+        export_hidden = set(self._hidden_types) | set(hide_types)
         if exported_state:
-            all_devices = [d for _fid, devs, _w in exported_state for d in devs]
-            all_wires = [w for _fid, _d, wires in exported_state for w in wires]
+            all_devices = [d for _f, devs, _w in exported_state for d in devs]
+            all_wires = [w for _f, _d, ws in exported_state for w in ws]
         else:
-            all_devices, all_wires = self.devices, self.wire_routes
-        vis_devices = [d for d in all_devices
-                       if isinstance(d, dict) and d.get("type") not in export_hidden]
+            all_devices = copy.deepcopy(self.devices)
+            all_wires = copy.deepcopy(self.wire_routes)
+        vis_devices = [d for d in all_devices if isinstance(d, dict)
+                       and d.get("type") not in export_hidden]
         vis_ids = {d.get("id") for d in vis_devices}
-        vis_wires = [w for w in all_wires
-                     if isinstance(w, dict)
-                     and (not w.get("device_id") or w.get("device_id") in vis_ids)]
+        vis_wires = [w for w in all_wires if isinstance(w, dict)
+                     and (not w.get("device_id")
+                          or w.get("device_id") in vis_ids)]
+        # _build_bom_report / _model_inventory read self.devices and
+        # self.wire_routes: swap the exported sets in for the call.
         _sd, _sw = self.devices, self.wire_routes
         self.devices, self.wire_routes = vis_devices, vis_wires
         try:
             vis_bom = self._build_bom_report()
-            vis_models = self._model_inventory()
+            vis_models = copy.deepcopy(self._model_inventory())
         finally:
             self.devices, self.wire_routes = _sd, _sw
+        project_name = ((self._project.project_name if self._project else "")
+                        or os.path.splitext(os.path.basename(self.drawio_path))[0])
+        return {
+            "project_name": project_name,
+            "devices": vis_devices,
+            "symbol_types": copy.deepcopy(self.symbol_types),
+            "wire_routes": vis_wires,
+            "bom_report": vis_bom,
+            "model_lines": vis_models,
+            "include_summary": include_summary,
+            "summary_options": summary_options,
+            "floor_label": floor_label,
+            "scale_factor": self.scale_factor,
+            "format_length": self._length_formatter_snapshot(),
+            "currency": self._bom_currency_var.get() or "$",
+        }
 
-        tmp_pdf = path + ".tmp"
-        try:
-            project_name = (self._project.project_name if self._project else "")
-            project_name = project_name or os.path.splitext(
-                os.path.basename(self.drawio_path))[0]
-            export_mod.write_map_pdf(
-                tmp_pdf,
-                project_name=project_name,
-                map_pages=map_pages,
-                devices=vis_devices,
-                symbol_types=self.symbol_types,
-                wire_routes=vis_wires,
-                bom_report=vis_bom,
-                model_lines=vis_models,
-                include_summary=include_summary,
-                summary_options=summary_options,
-                # Label the summary with what was actually exported, not
-                # whichever floor the user happened to be viewing.
-                floor_label=(", ".join(_floor_name(fid)
-                                       for fid, _d, _w in exported_state
-                                       if fid)
-                             or (self._project.active_floor
-                                 if self._project else None)),
-                scale_factor=self.scale_factor,
-                format_length=self._format_length,
-                currency=self._bom_currency_var.get() or "$",
-            )
-            os.replace(tmp_pdf, path)
-            note = ("\n\nSkipped (couldn't render): "
-                    + ", ".join(skipped_floors) if skipped_floors else "")
-            messagebox.showinfo("Exported", f"PDF written:\n{path}{note}")
-        except Exception as e:
-            log_error("PDF map export failed", e)
+    def _length_formatter_snapshot(self):
+        """A length formatter frozen to the current unit, safe to call from
+        a worker thread (the live one reads a Tk variable)."""
+        unit = self.unit_var.get()
+        stub = types.SimpleNamespace(
+            unit_var=types.SimpleNamespace(get=lambda: unit),
+            _IN_PER_M=self._IN_PER_M, _IN_PER_CM=self._IN_PER_CM)
+        return lambda inches: CameraWireTool._format_length(stub, inches)
+
+    def _run_in_background(self, work, on_done, *, progress=None,
+                           cancel=None) -> None:
+        """Run `work(report, is_cancelled)` on a worker thread and hand its
+        return value to `on_done(result)` on the Tk thread.
+
+        The worker must never call Tk: it reports progress through
+        `report(done, total, text)`, which only queues a message; the Tk
+        thread polls the queue with after() and updates `progress` (a
+        _ProgressDialog). Tk calls from other threads crash on Windows."""
+        q: queue.Queue = queue.Queue()
+        cancel = cancel or threading.Event()
+
+        def report(done, total, text=""):
+            q.put(("progress", done, total, text))
+
+        def run():
             try:
-                if os.path.exists(tmp_pdf):
-                    os.unlink(tmp_pdf)
-            except OSError:
+                res = work(report, cancel.is_set)
+            except Exception as e:     # work() should catch; belt and braces
+                res = {"error": e}
+            q.put(("done", res))
+
+        t = threading.Thread(target=run, daemon=True, name="cwt-export")
+        self._background_thread = t
+        t.start()
+
+        def poll():
+            try:
+                while True:
+                    msg = q.get_nowait()
+                    if msg[0] == "progress":
+                        if progress is not None:
+                            progress.update(msg[1], msg[2], msg[3])
+                    else:
+                        on_done(msg[1])
+                        return
+            except queue.Empty:
                 pass
-            messagebox.showerror("Export failed", str(e))
-        finally:
-            for pg in map_pages:
-                ip = pg.get("image")
-                if ip and os.path.exists(ip):
-                    try:
-                        os.unlink(ip)
-                    except OSError:
-                        pass
+            with contextlib.suppress(tk.TclError):
+                self.root.after(80, poll)
+        self.root.after(80, poll)
+
+    # ---------------- Export completion + remembered export folder
+    def _export_initialdir(self) -> str:
+        """Where Save dialogs for exports start: the last export folder,
+        else the project folder."""
+        d = (self._ui_state.get("last_export_dir")
+             or self._user_settings.get("last_export_dir"))
+        if isinstance(d, str) and os.path.isdir(d):
+            return d
+        return os.path.dirname(os.path.abspath(self.project_path))
+
+    def _remember_export_dir(self, path: str) -> None:
+        self._ui_state["last_export_dir"] = os.path.dirname(os.path.abspath(path))
+        self._persist_user_settings()
+
+    def _show_export_done(self, path: str, title: str = "Exported") -> None:
+        """Non-modal completion notice over the bottom of the map, with
+        Open and Show in folder, instead of a modal box with a raw path."""
+        self._remember_export_dir(path)
+        self._flash_status(f"✓ {title}: {os.path.basename(path)}", ttl_ms=8000)
+        old = getattr(self, "_toast", None)
+        if old is not None:
+            with contextlib.suppress(tk.TclError):
+                old.destroy()
+        toast = ttk.Frame(self.canvas.master, padding=(12, 8),
+                          relief=tk.SOLID, borderwidth=1)
+        self._toast = toast
+        ttk.Label(toast, text=f"✓ {title}", font="AppStrong").pack(
+            side=tk.LEFT, padx=(0, 8))
+        ttk.Label(toast, text=os.path.basename(path)).pack(
+            side=tk.LEFT, padx=(0, 12))
+
+        def _close():
+            with contextlib.suppress(tk.TclError):
+                toast.destroy()
+        ttk.Button(toast, text="Open", style="Accent.TButton",
+                   command=lambda: (self._open_path(path), _close())).pack(
+            side=tk.LEFT)
+        ttk.Button(toast, text="Show in folder",
+                   command=lambda: (self._reveal_path(path), _close())).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toast, text="✕", width=3, style="Toolbutton",
+                   command=_close).pack(side=tk.LEFT, padx=(6, 0))
+        toast.place(relx=0.0, rely=1.0, anchor="sw", x=12, y=-12)
+        with contextlib.suppress(tk.TclError):
+            toast.after(15000, _close)
+
+    @staticmethod
+    def _open_path(path: str) -> None:
+        """Open a file with its default app (best effort)."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)   # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except OSError as e:
+            messagebox.showerror("Couldn't open file", f"{path}\n\n{e}")
+
+    @staticmethod
+    def _reveal_path(path: str) -> None:
+        """Show a file selected in Explorer (its folder elsewhere)."""
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(path) or "."])
+        except OSError as e:
+            messagebox.showerror("Couldn't open folder", f"{path}\n\n{e}")
 
     # ============================================================ FOV rendering helper
     def _device_azimuth(self, dev: dict) -> float:
@@ -18197,6 +18594,16 @@ class CameraWireTool:
                             hx+12, hy+12, text=lbl, fill="#FFFFFF",
                             font="AppStrong", anchor=tk.W,
                             tags=("fov", f"fov_label_{d['id']}"))
+
+
+# Pure helpers MapRenderSnapshot borrows from the app class: they only
+# read attributes the snapshot carries (symbol_types, dx/dy_scale,
+# _fov_color_by_type, _project.device_azimuths).
+for _name in ("_drawio_to_img", "_is_camera_type", "_safe_sym",
+              "_fov_color_for_type", "_device_channels", "_channel_azimuth",
+              "_render_map_image"):
+    setattr(MapRenderSnapshot, _name, getattr(CameraWireTool, _name))
+del _name
 
 
 # ============================================================ Entry point
