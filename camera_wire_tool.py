@@ -1884,7 +1884,7 @@ class CameraWireTool:
              self.devices, self.symbol_types, self.legend_box) = parse_drawio(drawio_path)
         except (RuntimeError, OSError) as e:
             messagebox.showerror("Cannot open file", str(e))
-            sys.exit(1)
+            raise ProjectOpenError(str(e)) from e
         # Ids of device cells that exist in the source XML. _save_drawio
         # uses this to sweep DELETED devices out of the file regardless
         # of id shape — the old "starts with 's'" heuristic resurrected
@@ -1898,7 +1898,7 @@ class CameraWireTool:
                 "image — we need one to overlay devices and wires on. "
                 "Open the file in draw.io and add the floor plan as an "
                 "image, then save and reopen here.")
-            sys.exit(1)
+            raise ProjectOpenError("no background image")
 
         self.img_w, self.img_h = self.bg_image.size
         self.dx_scale = self.img_w / self.page_w
@@ -2145,8 +2145,9 @@ class CameraWireTool:
         # to a path nobody ever reads back.
         self._autosave_path = self.project_path + ".autosave.json"
 
-        # Recent files
-        push_recent_file(drawio_path)
+        # Recent files: the .zsmt the user opened, not its extracted work
+        # drawing (reopening that bypassed the bundle's revisions).
+        push_recent_file(bundle_path or drawio_path)
 
         # Build UI
         self._build_ui()
@@ -2825,12 +2826,7 @@ class CameraWireTool:
                  else os.path.normpath(os.path.join(base, df)))
         keep_bundle = self._bundle_path
         self._flush_pending_settings()
-        self.root.destroy()
-        new_root = tk.Tk()
-        apply_theme(new_root)
-        new_root.title("Camera Wire Estimation Tool")
-        CameraWireTool(new_root, apath, bundle_path=keep_bundle)
-        new_root.mainloop()
+        _relaunch(self.root, apath, bundle_path=keep_bundle)
 
     # ============================================================ initial render + events
     def _initial_render(self) -> None:
@@ -4674,27 +4670,33 @@ class CameraWireTool:
         if not os.path.exists(path):
             messagebox.showwarning("Missing", f"File no longer exists:\n{path}")
             return
+        # Older versions recorded a bundle's extracted work drawing
+        # instead of the .zsmt itself; reopen those through the bundle so
+        # saves keep adding revisions to it.
+        path = _bundle_for_work_drawing(path) or path
+        if path.lower().endswith(bundle_mod.BUNDLE_EXT):
+            if not self._can_navigate_away():
+                return
+            drawio, err = _extract_bundle_for_open(path)
+            if err:
+                messagebox.showerror("Couldn't open bundle", err)
+                return
+            self._flush_pending_settings()
+            _relaunch(self.root, drawio, bundle_path=path)
+            return
         # Pre-flight parse BEFORE asking about unsaved changes — if the
         # file is malformed, the user shouldn't even be asked to discard
         # their work for it. Mirrors the same pattern in _file_open.
-        try:
-            parse_drawio(path)
-        except (RuntimeError, OSError) as e:
-            log_error(f"Refused to open malformed .drawio: {path}", e)
+        err = _preflight_drawio(path)
+        if err:
             messagebox.showerror(
                 "Couldn't open file",
-                f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
-                f"The current project is untouched.")
+                f"{path}\n\n{err}\n\nThe current project is untouched.")
             return
         if not self._can_navigate_away():
             return
         self._flush_pending_settings()
-        self.root.destroy()
-        new_root = tk.Tk()
-        apply_theme(new_root)
-        new_root.title("Camera Wire Estimation Tool")
-        CameraWireTool(new_root, path)
-        new_root.mainloop()
+        _relaunch(self.root, path)
 
     # ============================================================ Mode handling
     def _on_mode_radio(self, m: Mode) -> None:
@@ -11253,23 +11255,16 @@ class CameraWireTool:
             path = converted
         else:
             # Sanity-check the .drawio BEFORE destroying the current root,
-            # so a bad file leaves the session intact.
-            try:
-                parse_drawio(path)
-            except (RuntimeError, OSError) as e:
-                log_error(f"Refused to open malformed .drawio: {path}", e)
+            # so a bad file (or one with no floor-plan image, which used
+            # to close the app) leaves the session intact.
+            err = _preflight_drawio(path)
+            if err:
                 messagebox.showerror(
                     "Couldn't open file",
-                    f"{path}\n\nCan't be opened as a .drawio:\n{e}\n\n"
-                    f"The current project is untouched.")
+                    f"{path}\n\n{err}\n\nThe current project is untouched.")
                 return
         self._flush_pending_settings()
-        self.root.destroy()
-        new_root = tk.Tk()
-        apply_theme(new_root)
-        new_root.title("Camera Wire Estimation Tool")
-        CameraWireTool(new_root, path, bundle_path=bundle_path)
-        new_root.mainloop()
+        _relaunch(self.root, path, bundle_path=bundle_path)
 
     def _file_save_as(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -11504,7 +11499,7 @@ class CameraWireTool:
         self._device_ids_at_parse = {d["id"] for d in self.devices}
         self._mark_clean()
         self._cleanup_autosave()    # autosave is no longer needed
-        push_recent_file(self.drawio_path)
+        push_recent_file(self._bundle_path or self.drawio_path)
         self._refresh_recent_menu()
         # Quiet flash instead of a modal popup — the title bar's `*` going
         # away and the "Saved just now" indicator already convey success.
@@ -18778,77 +18773,317 @@ def _enable_windows_dpi_awareness() -> None:
             pass
 
 
-def main() -> None:
-    _enable_windows_dpi_awareness()
+class ProjectOpenError(Exception):
+    """A drawing could not be opened (unreadable, or no floor-plan image).
+    The user has already been told why; the caller keeps the app running
+    (start screen or current project) instead of exiting."""
+
+
+_OPEN_FILETYPES = [("Project or drawing",
+                    f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
+                   ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
+                   ("Draw.io files", "*.drawio"),
+                   ("CAD / vector drawing", "*.dxf *.svg")]
+
+
+def make_root() -> tk.Tk:
+    """A themed main window with the app icon, title and minimum size.
+    Every (re)launch goes through here so none of them loses the
+    minimum size or icon."""
     root = tk.Tk()
     apply_theme(root)
-    root.title("Camera Wire Estimation Tool")
+    root.title("Camera Wire Tool")
     # Floor plan + 4-tab side panel needs room — without a minsize the
     # user can drag the window so narrow the toolbar wraps and the
     # tab notebook clips. Tk's default size on Windows is around
     # 200×200 which is essentially unusable; set a sensible floor.
     root.minsize(900, 600)
+    return root
+
+
+def _launch_app(root, drawio_path: str, bundle_path: str | None = None) -> bool:
+    """Build the main window for a project on `root`. If the drawing
+    cannot be opened, show the start screen instead of closing the app."""
+    try:
+        CameraWireTool(root, drawio_path, bundle_path=bundle_path)
+        return True
+    except ProjectOpenError:
+        for w in root.winfo_children():
+            with contextlib.suppress(tk.TclError):
+                w.destroy()
+        StartScreen(root)
+        return False
+
+
+def _relaunch(old_root, drawio_path: str, bundle_path: str | None = None) -> None:
+    """Replace the current window with a fresh one for another project."""
+    old_root.destroy()
+    root = make_root()
+    _launch_app(root, drawio_path, bundle_path)
+    root.mainloop()
+
+
+def _preflight_drawio(path: str) -> str | None:
+    """Why `path` can't be opened as a floor plan, or None if it can."""
+    try:
+        bg = parse_drawio(path)[0]
+    except (RuntimeError, OSError) as e:
+        log_error(f"Refused to open malformed .drawio: {path}", e)
+        return f"Can't be opened as a .drawio:\n{e}"
+    if bg is None:
+        return ("This drawing has no floor-plan image to draw on. Open it "
+                "in draw.io, add the floor plan as an image, save, and try "
+                "again.")
+    return None
+
+
+def _extract_bundle_for_open(path: str) -> tuple[str | None, str | None]:
+    """(work drawing, None) for a .zsmt ready to open, or (None, error)."""
+    try:
+        drawio = _open_bundle_workdir(path)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as e:
+        return None, f"{path}\n\n{e}"
+    if not drawio:
+        return None, f"{path}\n\nThe bundle contains no floor drawings."
+    err = _preflight_drawio(drawio)
+    if err:
+        return None, f"{path}\n\n{err}"
+    return drawio, None
+
+
+def _bundle_for_work_drawing(path: str) -> str | None:
+    """The .zsmt whose extracted work folder holds `path`, if any
+    (Name_work/... next to Name.zsmt)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if not folder.endswith("_work"):
+        return None
+    cand = folder[: -len("_work")] + bundle_mod.BUNDLE_EXT
+    return cand if os.path.isfile(cand) else None
+
+
+def _path_from_argv(argv: list[str]) -> str | None:
+    """A project or drawing passed on the command line (Explorer's "Open
+    with", or double-clicking an associated file). Options are ignored."""
+    for a in argv[1:]:
+        if a.startswith("-"):
+            continue
+        if os.path.isfile(a):
+            return os.path.abspath(a)
+    return None
+
+
+def _resolve_open_target(root, path: str) -> tuple[str, str | None] | None:
+    """(drawing to open, bundle or None) for a project, drawing or CAD
+    file; or None after telling the user why it can't be opened."""
+    if path.lower().endswith(bundle_mod.BUNDLE_EXT):
+        drawio, err = _extract_bundle_for_open(path)
+        if err:
+            messagebox.showerror("Couldn't open project", err, parent=root)
+            return None
+        return drawio, path
+    if path.lower().endswith(".wiremap.json"):
+        drawio = _active_drawio_for_wiremap(path)
+        if not drawio:
+            messagebox.showerror("Couldn't open project",
+                                 f"{path}\n\nThe project lists no floor drawing.",
+                                 parent=root)
+            return None
+        path = drawio
+    elif cad_mod.is_cad_drawing(path):
+        with contextlib.suppress(tk.TclError):
+            root.config(cursor="watch")
+            root.update_idletasks()
+        try:
+            path = cad_mod.convert_to_drawio(path)
+        except cad_mod.CadImportError as e:
+            messagebox.showerror("Couldn't import drawing", f"{path}\n\n{e}",
+                                 parent=root)
+            return None
+        finally:
+            with contextlib.suppress(tk.TclError):
+                root.config(cursor="")
+    err = _preflight_drawio(path)
+    if err:
+        messagebox.showerror("Couldn't open file", f"{path}\n\n{err}",
+                             parent=root)
+        return None
+    return path, None
+
+
+class StartScreen:
+    """What the app shows when it has no single obvious project to open:
+    Open, recent and nearby projects, and the three steps of the job.
+    Replaces a bare file dialog over an empty window whose Cancel quit
+    the app without a word."""
+
+    MAX_ITEMS = 8
+
+    def __init__(self, root, *, initial_dir: str | None = None,
+                 nearby: list[str] | None = None) -> None:
+        self.root = root
+        self.initial_dir = initial_dir or _app_base_dir()
+        root.title("Camera Wire Tool")
+        self._size_window()
+        pad = round(24 * ui_scale(root))
+        self.frame = outer = ttk.Frame(root, padding=pad)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+        ttk.Label(outer, text="Camera Wire Tool", font="AppDisplay").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(outer, text="Estimate security-camera cable runs and cost "
+                              "on a floor plan.",
+                  style="Muted.TLabel", font="AppBodyLarge").grid(
+            row=1, column=0, sticky="w", pady=(2, 16))
+
+        actions = ttk.Frame(outer)
+        actions.grid(row=2, column=0, sticky="w")
+        self.open_btn = ttk.Button(
+            actions, text="Open project or drawing…", style="Accent.TButton",
+            default="active", command=self.open_dialog, underline=0)
+        self.open_btn.pack(side=tk.LEFT)
+        ttk.Label(actions, text="  .zsmt project, .drawio, .dxf or .svg",
+                  style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+
+        # How it works: the same three steps the main window's guide shows.
+        steps = ttk.Frame(outer)
+        steps.grid(row=3, column=0, sticky="w", pady=(20, 4))
+        for i, (title, text) in enumerate((
+                ("1  Set the scale", "Click both ends of a known dimension."),
+                ("2  Draw wires", "Click a camera, click the route, "
+                                  "right-click to finish."),
+                ("3  Export", "PDF map and summary, or CSV for ordering."))):
+            col = ttk.Frame(steps)
+            col.grid(row=0, column=i, sticky="nw", padx=(0, 24))
+            ttk.Label(col, text=title, font="AppHeading").pack(anchor="w")
+            ttk.Label(col, text=text, style="Muted.TLabel",
+                      wraplength=round(220 * ui_scale(root))).pack(anchor="w")
+
+        items = self._project_items(nearby or [])
+        box = ttk.LabelFrame(outer, text="Recent and nearby projects",
+                             padding=(8, 4))
+        box.grid(row=4, column=0, sticky="nsew", pady=(16, 0))
+        outer.rowconfigure(4, weight=1)
+        self.items = items
+        self.tree = None
+        if not items:
+            ttk.Label(box, text="Nothing yet. Projects you open appear here.",
+                      style="Muted.TLabel").pack(anchor="w", pady=4)
+        else:
+            k = ui_scale(root)
+            tree = ttk.Treeview(box, columns=("name", "folder"), show="headings",
+                                height=min(len(items), self.MAX_ITEMS),
+                                selectmode="browse")
+            tree.heading("name", text="Project", anchor="w")
+            tree.heading("folder", text="Folder", anchor="w")
+            tree.column("name", width=round(240 * k), stretch=False, anchor="w")
+            tree.column("folder", width=round(380 * k), stretch=True, anchor="w")
+            for n, path in enumerate(items):
+                tree.insert("", "end", iid=str(n), values=(
+                    os.path.basename(path), os.path.dirname(path)))
+            tree.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
+            tree.bind("<Double-1>", lambda _e: self.open_selected())
+            ttk.Label(box, text="Double-click a project, or select it and "
+                                "press Enter.",
+                      style="Muted.TLabel").pack(anchor="w")
+            self.tree = tree
+
+        self._binds = [
+            ("<Return>", root.bind("<Return>", self._on_return)),
+            ("<Control-o>", root.bind("<Control-o>",
+                                      lambda _e: self.open_dialog())),
+            ("<Alt-o>", root.bind("<Alt-o>", lambda _e: self.open_dialog())),
+        ]
+        with contextlib.suppress(tk.TclError):
+            self.open_btn.focus_set()
+
+    def _on_return(self, _e=None) -> None:
+        if (self.tree is not None and self.tree.selection()
+                and self.root.focus_get() is self.tree):
+            self.open_selected()
+        else:
+            self.open_dialog()
+
+    def open_selected(self) -> None:
+        if self.tree is None:
+            return
+        sel = self.tree.selection()
+        if sel:
+            self.open_path(self.items[int(sel[0])])
+
+    def _size_window(self) -> None:
+        r = self.root
+        k = ui_scale(r)
+        w, h = round(760 * k), round(520 * k)
+        with contextlib.suppress(tk.TclError):
+            r.state("normal")          # un-maximise after a failed open
+        with contextlib.suppress(tk.TclError):
+            sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+            w, h = min(w, sw), min(h, sh - round(60 * k))
+            r.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 3, 0)}")
+
+    def _project_items(self, nearby: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in list(load_recent_files()) + list(nearby):
+            p = _bundle_for_work_drawing(raw) or raw
+            if p not in out and os.path.exists(p):
+                out.append(p)
+        return out[: self.MAX_ITEMS]
+
+    def open_dialog(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self.root, title="Open Camera Wire Tool project",
+            initialdir=self.initial_dir, filetypes=_OPEN_FILETYPES)
+        if chosen:
+            self.open_path(chosen)
+
+    def open_path(self, path: str) -> bool:
+        """Open `path` in this window. On failure say why and stay here."""
+        resolved = _resolve_open_target(self.root, path)
+        if resolved is None:
+            return False
+        self.close()
+        return _launch_app(self.root, *resolved)
+
+    def close(self) -> None:
+        for seq, fid in self._binds:
+            with contextlib.suppress(tk.TclError):
+                self.root.unbind(seq, fid)
+        with contextlib.suppress(tk.TclError):
+            self.frame.destroy()
+
+
+def main() -> None:
+    _enable_windows_dpi_awareness()
+    root = make_root()
 
     script_dir = _app_base_dir()
     bundles = _discover_files((bundle_mod.BUNDLE_EXT,))
     wiremaps = _discover_files((".wiremap.json",))
     drawio_files = _discover_drawio_files()
 
-    bundle_path: str | None = None
-    drawio_path: str | None = None
+    target = _path_from_argv(sys.argv)
+    if target is None:
+        if len(bundles) == 1:
+            # Prefer the .zsmt bundle — it's the canonical, revisioned project.
+            target = bundles[0]
+        elif not bundles and len(wiremaps) == 1:
+            # No bundle, but a loose folder project — open it directly.
+            target = _active_drawio_for_wiremap(wiremaps[0])
+        elif not bundles and not wiremaps and len(drawio_files) == 1:
+            target = drawio_files[0]
 
-    if len(bundles) == 1:
-        # Prefer the .zsmt bundle — it's the canonical, revisioned project.
-        bundle_path = bundles[0]
-    elif not bundles and len(wiremaps) == 1:
-        # No bundle, but a loose folder project — open it directly.
-        drawio_path = _active_drawio_for_wiremap(wiremaps[0])
-    elif not bundles and not wiremaps and len(drawio_files) == 1:
-        drawio_path = drawio_files[0]
-
-    if bundle_path is None and drawio_path is None:
-        # Ambiguous (none, or several projects) — ask, offering BOTH the
-        # bundle format and raw drawings.
-        initial = (os.path.dirname((bundles or wiremaps or drawio_files or [script_dir])[0])
-                   if (bundles or wiremaps or drawio_files) else script_dir)
-        chosen = filedialog.askopenfilename(
-            title="Open Camera Measurement project",
-            initialdir=initial,
-            filetypes=[("Project or drawing",
-                        f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
-                       ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
-                       ("Draw.io files", "*.drawio"),
-                       ("CAD / vector drawing", "*.dxf *.svg")])
-        if not chosen:
-            sys.exit(0)
-        if chosen.lower().endswith(bundle_mod.BUNDLE_EXT):
-            bundle_path = chosen
-        elif cad_mod.is_cad_drawing(chosen):
-            try:
-                drawio_path = cad_mod.convert_to_drawio(chosen)
-            except cad_mod.CadImportError as e:
-                messagebox.showerror("Couldn't import drawing",
-                                     f"{chosen}\n\n{e}")
-                sys.exit(1)
-        else:
-            drawio_path = chosen
-
-    if bundle_path is not None:
-        try:
-            drawio_path = _open_bundle_workdir(bundle_path)
-        except Exception as e:
-            messagebox.showerror("Couldn't open bundle",
-                                 f"{bundle_path}\n\n{e}")
-            sys.exit(1)
-        if not drawio_path:
-            messagebox.showerror("Couldn't open bundle",
-                                 "Bundle contains no floor drawings.")
-            sys.exit(1)
-
-    if not drawio_path:
-        sys.exit(0)
-
-    CameraWireTool(root, drawio_path, bundle_path=bundle_path)
+    initial = (os.path.dirname((bundles or wiremaps or drawio_files)[0])
+               if (bundles or wiremaps or drawio_files) else script_dir)
+    # The one obvious project opens straight away. With none, several, or
+    # one that can't be opened (after saying why), show the start screen
+    # instead of quitting.
+    resolved = _resolve_open_target(root, target) if target else None
+    if resolved is not None:
+        _launch_app(root, *resolved)
+    else:
+        StartScreen(root, initial_dir=initial,
+                    nearby=bundles + [p for p in drawio_files
+                                      if not _bundle_for_work_drawing(p)])
     root.mainloop()
 
 
