@@ -450,6 +450,54 @@ class _MouseWheelEvent:
 
 
 # ============================================================ Tooltip helper
+_DIST_UNITS_IN = {
+    "'": 12.0, "ft": 12.0, "foot": 12.0, "feet": 12.0,
+    '"': 1.0, "in": 1.0, "inch": 1.0, "inches": 1.0,
+    "m": 39.37007874015748, "meter": 39.37007874015748,
+    "meters": 39.37007874015748, "metre": 39.37007874015748,
+    "metres": 39.37007874015748,
+    "cm": 0.39370078740157477, "mm": 0.039370078740157477,
+}
+_DIST_TOKEN = re.compile(
+    r"\s*(\d+(?:[.,]\d+)?|\.\d+)\s*"
+    r"(feet|foot|ft|inches|inch|in|metres|meters|metre|meter|mm|cm|m|'|\")?"
+    r"\s*-?\s*")
+
+
+def parse_distance_in(text: str, metric: bool = False) -> float | None:
+    """Parse a typed distance into inches, or None if it can't be read.
+
+    Accepts what people type off a drawing: 30'-6", 30 ft 6 in, 30' 6,
+    9.2 m, 920 cm, 3 m 50 cm. Bare numbers take the major unit first
+    (feet, or metres when `metric`) and the minor unit second (inches /
+    centimetres)."""
+    if not isinstance(text, str):
+        return None
+    t = (text.strip().lower().replace("\u2019", "'").replace("\u2032", "'")
+         .replace("\u201d", '"').replace("\u2033", '"').replace("''", '"'))
+    if not t:
+        return None
+    pos, total, n_bare, found = 0, 0.0, 0, False
+    major, minor = ((_DIST_UNITS_IN["m"], _DIST_UNITS_IN["cm"]) if metric
+                    else (12.0, 1.0))
+    while pos < len(t):
+        m = _DIST_TOKEN.match(t, pos)
+        if not m or m.end() == pos:
+            return None
+        num = float(m.group(1).replace(",", "."))
+        unit = m.group(2)
+        if unit:
+            total += num * _DIST_UNITS_IN[unit]
+        else:
+            if n_bare >= 2:
+                return None
+            total += num * (major if n_bare == 0 and not found else minor)
+            n_bare += 1
+        found = True
+        pos = m.end()
+    return total if found else None
+
+
 class Tooltip:
     """Lightweight hover tooltip for any tk widget."""
 
@@ -1913,6 +1961,76 @@ class CameraWireTool:
         # context for the warning.
         self.root.after(800, self._maybe_warn_drastic_alignment)
 
+    def _autosize_dialog(self, dlg, min_w: int = 0, min_h: int = 0) -> None:
+        """Size a dialog to its content once it is built, never smaller
+        than min_w x min_h (100 %-DPI pixels, scaled to the display) and
+        never larger than the screen, and centre it on its parent.
+
+        Replaces fixed dlg.geometry("WxH") calls, which ignored both DPI
+        and content: at 150 % the Close/Apply buttons of several dialogs
+        were cut off (some could only be closed with Esc)."""
+        def _fit():
+            try:
+                if not dlg.winfo_exists():
+                    return
+                dlg.update_idletasks()
+                rw, rh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+                sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+                # Leave room for the taskbar and the title bar.
+                max_w, max_h = sw - self._px(24), sh - self._px(80)
+                w = min(max(rw, min_w), max_w)
+                h = min(max(rh, min_h), max_h)
+                parent = dlg.master if dlg.master is not None else self.root
+                try:
+                    px_, py_ = parent.winfo_rootx(), parent.winfo_rooty()
+                    pw, ph = parent.winfo_width(), parent.winfo_height()
+                except tk.TclError:
+                    px_ = py_ = 0
+                    pw, ph = sw, sh
+                if pw <= 1 or ph <= 1:
+                    px_, py_, pw, ph = 0, 0, sw, sh
+                x = min(max(px_ + (pw - w) // 2, 0), max(sw - w, 0))
+                y = min(max(py_ + (ph - h) // 3, 0), max(sh - h - self._px(40), 0))
+                dlg.geometry(f"{w}x{h}+{x}+{y}")
+                dlg.minsize(min(rw, w), min(rh, h))
+            except tk.TclError:
+                pass
+        _fit()          # right away for dialogs built before this call
+        with contextlib.suppress(tk.TclError):
+            dlg.after_idle(_fit)   # and again once the content exists
+
+    def _dialog_buttons(self, dlg, buttons, *, pack_before=None):
+        """Standard dialog button row, bottom-right in Windows order: the
+        first (primary) button is the accented default, the last is
+        usually Cancel/Close. Packed at the BOTTOM before the body, so it
+        stays visible even when the dialog is shorter than its content.
+        Returns the row frame."""
+        row = ttk.Frame(dlg, padding=(12, 8, 12, 12))
+        if pack_before is None:
+            slaves = dlg.pack_slaves()
+            pack_before = slaves[0] if slaves else None
+        kw = {"before": pack_before} if pack_before is not None else {}
+        row.pack(side=tk.BOTTOM, fill=tk.X, **kw)
+        for i, (text, cmd) in enumerate(reversed(buttons)):
+            primary = i == len(buttons) - 1
+            b = ttk.Button(row, text=text, command=cmd,
+                           style="Accent.TButton" if primary else "TButton",
+                           default="active" if primary else "normal")
+            b.pack(side=tk.RIGHT, padx=(8, 0))
+        return row
+
+    @staticmethod
+    def _pin_bottom(dlg, frame) -> None:
+        """Re-pack an already-packed button row at the bottom of `dlg`
+        AHEAD of the body in packing order, so it is never the part that
+        gets cut off when the dialog is shorter than its content."""
+        others = [w for w in dlg.pack_slaves() if w is not frame]
+        with contextlib.suppress(tk.TclError):
+            if others:
+                frame.pack_configure(side=tk.BOTTOM, before=others[0])
+            else:
+                frame.pack_configure(side=tk.BOTTOM)
+
     def _px(self, n: float) -> int:
         """Scale a 100 %-DPI pixel size (column widths, fixed boxes) to the
         current display scale, so tables are not cramped at 150 %."""
@@ -2404,7 +2522,7 @@ class CameraWireTool:
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.title("Revision history")
-        dlg.geometry("520x420")
+        self._autosize_dialog(dlg, 520, 420)
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         ttk.Label(dlg, text="Every save is a revision. Select one and revert "
                             "— your current state is snapshotted first, so "
@@ -2441,10 +2559,11 @@ class CameraWireTool:
 
         btns = ttk.Frame(dlg)
         btns.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Button(btns, text="Revert to selected",
-                   command=_do_revert).pack(side=tk.LEFT)
         ttk.Button(btns, text="Close",
                    command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Revert to selected", style="Accent.TButton",
+                   command=_do_revert).pack(side=tk.RIGHT, padx=(0, 8))
+        self._pin_bottom(dlg, btns)
 
     def _revert_to_revision(self, rev_id) -> None:
         """Restore a revision: write its wiremap + drawios back over the
@@ -6032,7 +6151,7 @@ class CameraWireTool:
         # Wider so the 120×120 preview canvas in column 2 fits cleanly next
         # to the wide checkbox-text rows (columnspan=2). Resizable so the
         # user can grow it if their display has bigger system fonts.
-        dlg.geometry("680x460")
+        self._autosize_dialog(dlg, 680, 460)
         dlg.minsize(600, 420)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -8076,7 +8195,7 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Enter Known Distance")
-        dlg.geometry("520x320")
+        self._autosize_dialog(dlg, 520, 320)
         dlg.transient(self.root)
         dlg.grab_set()
         # If the user closes the dialog without committing, reset the
@@ -8106,38 +8225,50 @@ class CameraWireTool:
         metric = unit in ("meters", "cm", "m-cm")
 
         input_frame = ttk.Frame(dlg)
-        input_frame.pack(pady=4)
-        a_var = tk.StringVar(value="0")
-        b_var = tk.StringVar(value="0")
+        input_frame.pack(anchor=tk.W, padx=14, pady=4)
+        # Empty (not "0") so the user can just type; empty counts as 0.
+        a_var = tk.StringVar(value="")
+        b_var = tk.StringVar(value="")
 
-        if metric:
-            ttk.Label(input_frame, text="Meters:").grid(row=0, column=0, padx=4)
-            ttk.Entry(input_frame, textvariable=a_var, width=10).grid(row=0, column=1, padx=4)
-            ttk.Label(input_frame, text="cm:").grid(row=0, column=2, padx=4)
-            ttk.Entry(input_frame, textvariable=b_var, width=10).grid(row=0, column=3, padx=4)
-        else:
-            ttk.Label(input_frame, text="Feet:").grid(row=0, column=0, padx=4)
-            ttk.Entry(input_frame, textvariable=a_var, width=10).grid(row=0, column=1, padx=4)
-            ttk.Label(input_frame, text="Inches:").grid(row=0, column=2, padx=4)
-            ttk.Entry(input_frame, textvariable=b_var, width=10).grid(row=0, column=3, padx=4)
+        major, minor = (("Meters:", "cm:") if metric else ("Feet:", "Inches:"))
+        ttk.Label(input_frame, text=major).grid(row=0, column=0, padx=(0, 4))
+        a_entry = ttk.Entry(input_frame, textvariable=a_var, width=10)
+        a_entry.grid(row=0, column=1, padx=4)
+        ttk.Label(input_frame, text=minor).grid(row=0, column=2, padx=(12, 4))
+        ttk.Entry(input_frame, textvariable=b_var, width=10).grid(
+            row=0, column=3, padx=4)
+        ttk.Label(dlg, text=("You can also type it in one box, e.g. 3.5 m or "
+                             "350 cm." if metric else
+                             "You can also type it in one box, e.g. 30'-6\" "
+                             "or 30 ft 6 in."),
+                  style="Muted.TLabel").pack(anchor=tk.W, padx=14)
 
         def apply():
+            a_txt, b_txt = a_var.get().strip(), b_var.get().strip()
             try:
-                a = float(a_var.get())
-                b = float(b_var.get())
+                a = float(a_txt.replace(",", ".")) if a_txt else 0.0
+                b = float(b_txt.replace(",", ".")) if b_txt else 0.0
+                total_in = ((a * self._IN_PER_M + b * self._IN_PER_CM)
+                            if metric else a * 12 + b)
             except ValueError:
-                messagebox.showerror(
-                    "Invalid number",
-                    "Both distance fields need to be numeric.")
-                return
-            if metric:
-                total_in = a * self._IN_PER_M + b * self._IN_PER_CM
-            else:
-                total_in = a * 12 + b
+                # Free-form ("30'-6\"", "9.2 m", …) in either box.
+                total_in = parse_distance_in(f"{a_txt} {b_txt}".strip(),
+                                             metric=metric)
+                if total_in is None:
+                    messagebox.showerror(
+                        "Can't read that distance",
+                        ("Type metres and centimetres, e.g. 3 and 50, "
+                         "or 3.5 m." if metric else
+                         "Type feet and inches, e.g. 30 and 6, or 30'-6\"."),
+                        parent=dlg)
+                    a_entry.focus_set()
+                    return
             if total_in <= 0:
                 messagebox.showerror(
-                    "Invalid distance",
-                    "Distance must be positive (greater than zero).")
+                    "Enter the distance",
+                    "Type the real-world length between the two points "
+                    "(greater than zero).", parent=dlg)
+                a_entry.focus_set()
                 return
             # px_dist is in RAW image pixels on the active floor. The
             # project's scale_factor is supposed to be inches per
@@ -8201,12 +8332,12 @@ class CameraWireTool:
                       foreground="#FFD060",
                       ).grid(row=i, column=1, sticky=tk.W, padx=12, pady=1)
 
-        btns = ttk.Frame(dlg)
-        btns.pack(pady=10)
-        ttk.Button(btns, text="Apply", command=apply).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=4)
+        self._dialog_buttons(dlg, [("Apply", apply), ("Cancel", cancel)])
         dlg.bind("<Return>", lambda _e: apply())
         dlg.bind("<Escape>", lambda _e: cancel())
+        # Ready to type: the distance box has focus (it used to stay on
+        # the canvas, with "0" pre-filled in both boxes).
+        a_entry.focus_set()
 
         self.cal_points = []
         self._set_mode(Mode.MOVE)
@@ -10538,7 +10669,7 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Reassign wire")
-        dlg.geometry("520x520")
+        self._autosize_dialog(dlg, 520, 520)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -11158,7 +11289,7 @@ class CameraWireTool:
         sets the right selection), Esc cancels."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Quick jump")
-        dlg.geometry("520x420")
+        self._autosize_dialog(dlg, 520, 420)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -11621,7 +11752,7 @@ class CameraWireTool:
         canvas left-click drops the annotation at that position."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Add Map Annotation")
-        dlg.geometry("420x220")
+        self._autosize_dialog(dlg, 420, 220)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -11801,7 +11932,7 @@ class CameraWireTool:
         """Tiny inline editor for an existing annotation."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Edit Annotation")
-        dlg.geometry("420x200")
+        self._autosize_dialog(dlg, 420, 200)
         dlg.transient(self.root); dlg.grab_set()
         ttk.Label(dlg, text="Edit annotation",
                   font="AppSubtitle",
@@ -11896,7 +12027,7 @@ class CameraWireTool:
         list and the autosave file."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Preferences")
-        dlg.geometry("520x440")
+        self._autosize_dialog(dlg, 520, 440)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -11908,7 +12039,7 @@ class CameraWireTool:
             text="Changes here save automatically to "
                  f"{SETTINGS_PATH.name} in your home folder, and apply "
                  "to every project you open.",
-            wraplength=480, foreground="#7fc4ff",
+            wraplength=self._px(480), foreground="#7fc4ff",
             font="AppHint",
         ).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
@@ -12023,8 +12154,7 @@ class CameraWireTool:
         ttk.Button(row, text="Clear Recent Files",
                    command=clear_recents).pack(side=tk.LEFT, padx=4)
 
-        ttk.Button(dlg, text="Close (Esc)",
-                   command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
+        self._dialog_buttons(dlg, [("Close", dlg.destroy)])
 
     # ============================================================ Help dialogs
     def _show_shortcuts(self) -> None:
@@ -12032,7 +12162,7 @@ class CameraWireTool:
         section headers, two-column layout, and a "Got it" close button."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Keyboard Shortcuts")
-        dlg.geometry("560x520")
+        self._autosize_dialog(dlg, 560, 520)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -12157,8 +12287,9 @@ class CameraWireTool:
         # Footer
         footer = ttk.Frame(dlg)
         footer.pack(fill=tk.X, padx=14, pady=10)
-        ttk.Button(footer, text="Got it (Esc)",
+        ttk.Button(footer, text="Got it", style="Accent.TButton",
                    command=dlg.destroy).pack(side=tk.RIGHT)
+        self._pin_bottom(dlg, footer)
 
     def _open_log_file(self) -> None:
         """Open the rotating error log file in the OS default viewer.
@@ -12186,7 +12317,7 @@ class CameraWireTool:
     def _show_about(self) -> None:
         dlg = tk.Toplevel(self.root)
         dlg.title("About Camera Wire Tool")
-        dlg.geometry("520x460")
+        self._autosize_dialog(dlg, 520, 460)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -12249,8 +12380,7 @@ class CameraWireTool:
             text="MIT License  ·  See PLAYBOOK.md for the architecture",
             foreground="#888", font="AppSmall",
         ).pack(anchor=tk.W, padx=20, pady=(10, 4))
-        ttk.Button(dlg, text="Close (Esc)",
-                   command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
+        self._dialog_buttons(dlg, [("Close", dlg.destroy)])
 
     # ============================================================ right-click context menu
     def _on_canvas_double_click(self, event) -> None:
@@ -12692,7 +12822,7 @@ class CameraWireTool:
         # the user clicks. We bypass that by directly committing here.
         dlg = tk.Toplevel(self.root)
         dlg.title("Add Annotation Here")
-        dlg.geometry("420x180")
+        self._autosize_dialog(dlg, 420, 180)
         dlg.transient(self.root); dlg.grab_set()
         ttk.Label(dlg, text="Annotation text:",
                   font="AppHeading",
@@ -13191,7 +13321,7 @@ class CameraWireTool:
         """
         dlg = tk.Toplevel(self.root)
         dlg.title("Cable Types")
-        dlg.geometry("560x520")
+        self._autosize_dialog(dlg, 560, 520)
         dlg.transient(self.root); dlg.grab_set()
         # Escape/close handler is bound at the bottom of this method
         # (needs commit_form in scope) so a dirty form is auto-committed
@@ -14111,7 +14241,7 @@ class CameraWireTool:
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.title("Camera models")
-        dlg.geometry("520x380")
+        self._autosize_dialog(dlg, 520, 380)
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         lb = tk.Listbox(dlg, font="AppMono")
         lb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
@@ -14171,6 +14301,7 @@ class CameraWireTool:
         ttk.Button(bf, text="Delete", command=_del_sel).pack(side=tk.LEFT)
         ttk.Button(bf, text="Close",
                    command=dlg.destroy).pack(side=tk.RIGHT)
+        self._pin_bottom(dlg, bf)
 
     def _zoom_to_devices(self, devs: list[dict]) -> None:
         if not devs:
@@ -14346,7 +14477,7 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title(f"FOV / DORI — {device['id']}")
-        dlg.geometry("560x540")
+        self._autosize_dialog(dlg, 560, 540)
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -14801,7 +14932,8 @@ class CameraWireTool:
         new_id = f"F{n}"
 
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
-        dlg.title("New floor"); dlg.geometry("360x180")
+        dlg.title("New floor")
+        self._autosize_dialog(dlg, 360, 180)
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         ttk.Label(dlg, text=f"Floor ID: {new_id}").pack(anchor=tk.W, padx=10, pady=4)
         ttk.Label(dlg, text="Name:").pack(anchor=tk.W, padx=10)
@@ -15374,7 +15506,7 @@ class CameraWireTool:
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.title(f"Drag-align {active.id} to reference")
-        dlg.geometry("1100x780")
+        self._autosize_dialog(dlg, 1100, 780)
         dlg.minsize(720, 520)
         # transient() above removed the maximize box on Windows — put it
         # back so the user can maximize / Aero-Snap the dialog. F11 also
@@ -16247,7 +16379,7 @@ class CameraWireTool:
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.title(f"Align floor {active.id} to reference")
-        dlg.geometry("520x320")
+        self._autosize_dialog(dlg, 520, 320)
 
         # Anchor flow always aligns the ACTIVE floor onto a reference.
         # Make the direction explicit so users don't get the same
@@ -16317,7 +16449,7 @@ class CameraWireTool:
             # Quick manual nudge dialog using arrow keys
             n = tk.Toplevel(dlg); n.transient(dlg); n.grab_set()
             n.title("Manual nudge")
-            n.geometry("320x220")
+            self._autosize_dialog(n, 320, 220)
             n.bind("<Escape>", lambda _e: n.destroy())
             ttk.Label(n, text="Buttons: 1px nudges and ×10 nudges.\n"
                               "Or click the focus area then use arrow keys "
@@ -16386,12 +16518,15 @@ class CameraWireTool:
                      f"(Esc cancels)")
             dlg.destroy()
 
-        btns = ttk.Frame(dlg); btns.pack(side=tk.BOTTOM, pady=10)
+        btns = ttk.Frame(dlg, padding=(12, 8, 12, 12))
+        btns.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Pick anchor points (this floor)",
-                   command=pick_anchors).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Manual nudge…", command=manual).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Reset", command=reset).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+                   style="Accent.TButton",
+                   command=pick_anchors).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(btns, text="Manual nudge…", command=manual).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Reset", command=reset).pack(side=tk.LEFT, padx=8)
+        self._pin_bottom(dlg, btns)
 
     def _open_floor_manager(self) -> None:
         if self._project is None or not self._project.floors:
@@ -16401,7 +16536,8 @@ class CameraWireTool:
             return
         dlg = tk.Toplevel(self.root); dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.title("Manage floors"); dlg.geometry("700x400")
+        dlg.title("Manage floors")
+        self._autosize_dialog(dlg, 700, 400)
         # Resizable: the Drawio column shows file paths that easily
         # exceed any fixed width — let the user stretch the dialog.
         dlg.minsize(620, 320)
@@ -16555,11 +16691,13 @@ class CameraWireTool:
             self._flash_status(
                 f"Floor {target_id} deleted.", ttl_ms=3500)
 
-        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
+        btns = ttk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=10, pady=8)
         ttk.Button(btns, text="Delete selected floor",
                    command=delete_selected).pack(side=tk.LEFT)
         ttk.Button(btns, text="Close",
                    command=dlg.destroy).pack(side=tk.RIGHT)
+        self._pin_bottom(dlg, btns)
 
     # ============================================================ Export
     def _warn_if_no_scale(self, doc_type: str) -> bool:
