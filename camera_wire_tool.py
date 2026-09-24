@@ -1918,6 +1918,10 @@ class CameraWireTool:
         self.cal_points: list[tuple[float, float]] = []
         self.wire_routes: list[dict] = []
         self.current_wire_points: list[tuple[float, float]] = []
+        # Set after a wire is finished in Wire mode: the next wire has to
+        # start on a device or drop point. A stray click on the map used to
+        # start a new wire silently credited to the device just wired.
+        self._wire_awaiting_source = False
         self.dragging_device: dict | None = None
         self._drag_start_pos: tuple[float, float] | None = None
         self.drag_offset = (0.0, 0.0)
@@ -4731,6 +4735,7 @@ class CameraWireTool:
             return
         self.current_wire_points = [(cx, cy)]
         self._wire_snap = None
+        self._wire_awaiting_source = False
         info = self._safe_sym(dev["type"])
         self.status_label.config(
             text=f"Wire from {dev['id']} ({info.get('label','?')}) — "
@@ -4772,6 +4777,10 @@ class CameraWireTool:
 
     def _kbd_mode_wire(self, event):
         if self._is_text_focus(event):
+            return
+        if self.mode == Mode.WIRE:
+            # Already wiring: W starts the next wire from the selection.
+            self._autostart_wire_from_selection()
             return
         self._set_mode(Mode.WIRE)
         self._flash_status("Mode: Wire (W)  —  click points; right-click finishes")
@@ -5162,6 +5171,10 @@ class CameraWireTool:
             self._redo_btn.state(["!disabled"] if self.future else ["disabled"])
         except (tk.TclError, AttributeError):
             pass
+        # Every change, undo and redo passes through here: keep the
+        # "n of m cameras wired" guide current (it lagged a wire behind).
+        with contextlib.suppress(AttributeError, tk.TclError):
+            self._refresh_step_strip()
 
     # ============================================================ Dirty state / title
     def _mark_dirty(self) -> None:
@@ -7494,7 +7507,10 @@ class CameraWireTool:
             bg = "#FF8C42"
         elif self.mode == Mode.WIRE:
             n = len(self.current_wire_points)
-            if self.selected_device is not None:
+            if self._wire_awaiting_source and not n:
+                msg = ("WIRE MODE — click the next camera (or a drop point) "
+                       "to start its wire. Esc to stop.")
+            elif self.selected_device is not None:
                 msg = (f"WIRE MODE — drawing for {self.selected_device['id']}. "
                        f"Click route points ({n} so far). Right-click to finish, "
                        f"Esc to cancel.")
@@ -9009,6 +9025,7 @@ class CameraWireTool:
             if not self.current_wire_points:
                 hit_dev = self._device_at(ix, iy)
                 if hit_dev is not None:
+                    self._wire_awaiting_source = False
                     self.selected_device = hit_dev
                     cx_dev, cy_dev = self._drawio_to_img(
                         hit_dev["x"] + hit_dev["w"] / 2,
@@ -9023,6 +9040,7 @@ class CameraWireTool:
                              f"— click route points, right-click to finish.")
                     return
                 if drop_hit is not None:
+                    self._wire_awaiting_source = False
                     dpx, dpy = self._world_to_img(
                         float(drop_hit["x"]), float(drop_hit["y"]))
                     self.current_wire_points.append((dpx, dpy))
@@ -9031,6 +9049,11 @@ class CameraWireTool:
                     self.status_label.config(
                         text=f"Wire from drop {drop_hit.get('label','')} — "
                              f"click route points, right-click to finish.")
+                    return
+                if self._wire_awaiting_source:
+                    self._flash_status(
+                        "Click a camera or drop point to start the next wire "
+                        "(Esc stops drawing wires).", ttl_ms=4000)
                     return
             else:
                 # Clicking a drop point FINISHES the wire on that drop —
@@ -9827,20 +9850,28 @@ class CameraWireTool:
             route["drop_ids"] = drop_ids
         self._execute(AddWireCmd(self, route))
         self.current_wire_points = []
+        # Stay in Wire mode (wiring camera after camera is the main job),
+        # but the next wire must start on a device or drop point.
+        self._wire_awaiting_source = bool(device_id)
         self._refresh_wire_list()
         self._refresh_device_list()
         self._redraw()
         dev_label = f" for {device_id}" if device_id else " (unassigned)"
+        length = (f": {self._format_length(real_in)}"
+                  if real_in is not None else "")
         riser = (f"  +{self._format_length(vert_in)} vertical riser "
                  f"({', '.join(drop_ids)})" if vert_in > 0 else "")
+        nxt = ("Click the next camera to wire it, or press Esc to stop."
+               if device_id else "Click to start a new one, or press Esc to stop.")
         self.status_label.config(
-            text=f"Wire route saved{dev_label}.{riser} Click to start a new one.")
+            text=f"Wire added{dev_label}{length}.{riser} {nxt}")
 
     def _reset_action_state(self) -> None:
         """Pure cleanup: clear in-progress wire / cal / anchor state and
         any preview canvas items. DOES NOT change mode (so it's safe to
         call from _set_mode without recursion)."""
         self.current_wire_points = []
+        self._wire_awaiting_source = False
         try:
             self.canvas.delete("wire_preview")
             self.canvas.delete("wip_wire")
