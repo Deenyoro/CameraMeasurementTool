@@ -1876,7 +1876,7 @@ class CameraWireTool:
         # a revision to it (rather than a folder side-car). See
         # _bundle_sidecar_path().
         self._bundle_path = bundle_path
-        _maximize_window(self.root)
+        self._restore_window_placement()
 
         # Parse — show user-friendly error rather than stack trace
         try:
@@ -4048,12 +4048,14 @@ class CameraWireTool:
 
         # Side panel
         side = ttk.Frame(main, width=self._px(380))
-        main.add(side, stretch="never", minsize=self._px(240), width=self._px(380))
+        main.add(side, stretch="never", minsize=self._px(240),
+                 width=self._saved_side_width())
 
         notebook = ttk.Notebook(side)
         notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._notebook = notebook
         notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
+        self.root.after_idle(self._restore_active_tab)
 
         # --- Tab 1: Devices ---
         tab_dev = ttk.Frame(notebook)
@@ -5294,14 +5296,83 @@ class CameraWireTool:
     def _flush_pending_settings(self) -> None:
         """Cancel the debounce timer and run the settings write now —
         called from every path that's about to destroy/quit the root,
-        so a tweak within the 250ms window doesn't get dropped."""
-        if getattr(self, "_settings_save_id", None) is not None:
+        so a tweak within the 250ms window doesn't get dropped. Also
+        records the window's placement for next time."""
+        pending = getattr(self, "_settings_save_id", None) is not None
+        if pending:
             try:
                 self.root.after_cancel(self._settings_save_id)
             except tk.TclError:
                 pass
             self._settings_save_id = None
+        if self._remember_window_state() or pending:
             self._do_persist_user_settings()
+
+    # ---------------- Window placement (new optional settings keys:
+    # window_zoomed, window_geometry, side_width, active_tab)
+    def _remember_window_state(self) -> bool:
+        """Copy the window's size/position, side-panel width and open tab
+        into the settings about to be written. Best effort."""
+        st = getattr(self, "_ui_state", None)
+        if st is None:
+            return False
+        try:
+            zoomed = self.root.state() == "zoomed"
+            if not zoomed:
+                with contextlib.suppress(tk.TclError):
+                    zoomed = str(self.root.attributes("-zoomed")) in ("1", "true")
+            st["window_zoomed"] = zoomed
+            if not zoomed:
+                st["window_geometry"] = self.root.geometry()
+            side = self._notebook.master
+            w = side.winfo_width()
+            if w > 1:
+                st["side_width"] = round(w / ui_scale(self.root))
+            st["active_tab"] = int(self._notebook.index("current"))
+        except (tk.TclError, AttributeError, ValueError):
+            return False
+        return True
+
+    def _restore_window_placement(self) -> None:
+        """Reopen where the user left the window; maximised by default,
+        and whenever the saved placement would not fit this screen."""
+        prefs = load_settings()
+        geom = prefs.get("window_geometry")
+        if prefs.get("window_zoomed", True) is False and isinstance(geom, str):
+            m = re.fullmatch(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", geom.strip())
+            if m:
+                w, h, x, y = (int(m.group(1)), int(m.group(2)),
+                              int(m.group(3)), int(m.group(4)))
+                try:
+                    sw = self.root.winfo_screenwidth()
+                    sh = self.root.winfo_screenheight()
+                except tk.TclError:
+                    sw = sh = 0
+                if (900 <= w <= sw and 600 <= h <= sh
+                        and 0 <= x <= sw - 100 and 0 <= y <= sh - 100):
+                    with contextlib.suppress(tk.TclError):
+                        self.root.geometry(f"{w}x{h}+{x}+{y}")
+                        return
+        _maximize_window(self.root)
+
+    def _saved_side_width(self) -> int:
+        try:
+            w = int(load_settings().get("side_width", 380))
+        except (TypeError, ValueError):
+            w = 380
+        try:
+            limit = int(self.root.winfo_screenwidth() * 0.6)
+        except tk.TclError:
+            limit = 1200
+        return max(self._px(240), min(self._px(w), limit))
+
+    def _restore_active_tab(self) -> None:
+        try:
+            i = int(load_settings().get("active_tab", 0))
+            if 0 < i < len(self._notebook.tabs()):
+                self._notebook.select(i)
+        except (tk.TclError, TypeError, ValueError, AttributeError):
+            pass
 
     def _on_close(self) -> None:
         if not self._can_navigate_away():
