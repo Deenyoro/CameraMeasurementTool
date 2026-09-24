@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+A usability pass for Windows users: the window no longer freezes during
+exports, the main window and dialogs fit a 768 px laptop and 150 % display
+scaling, and the scale, wire and export steps are easier to follow.
+Project, drawing and export file formats are unchanged. Older settings
+files still load, and the new settings are optional.
+
+### Fixed
+
+- **The BOM tab no longer shows $0 after wires are drawn on the map.**
+  Finishing a wire with a right-click did not refresh the BOM tab.
+- **PDF export no longer freezes the window.** Pages render in the
+  background. A progress window shows "page n of N" and has a Cancel
+  button, and a cancelled export writes nothing. Each floor is prepared
+  from its own copy of the plan, so every floor keeps its own scale and
+  alignment.
+- **Finishing a wire no longer starts a stray new one.** The next click
+  on empty map space used to start another cable for the camera that was
+  just wired. Wire mode now waits until you click the next camera.
+- **A drawing with no floor-plan image no longer closes the app**, at
+  start-up or from Open, Open Recent or Add Floor.
+- **Open Recent reopens a `.zsmt` as a bundle**, so saves keep adding
+  revisions to it. Before, it recorded the extracted work drawing
+  instead.
+- **Map Snapshot (PNG) renders the whole map off-screen.** Before, it
+  captured the screen, which always failed on Linux and on Windows could
+  include windows that overlapped the map.
+- The status bar with the live totals is always visible. Before, it was
+  the first thing cut off on a 768 px-tall screen.
+- Dialogs size themselves to their content and to the display scale.
+  Before, some lost their buttons at 150 %.
+- The mini-map hides again when the map is too narrow for it.
+
+### Changed
+
+- The toolbar is one command bar: Open, Save, Undo, Redo, a Move/Wire
+  switch that clearly shows the current mode, Place, a Layers menu, and
+  floor, units, scale and zoom. It wraps to a second row only when the
+  window is too narrow.
+- A "Next step" guide above the map shows the three steps: 1 set the
+  scale, 2 draw wires ("n of m cameras wired"), 3 export. You can click
+  each step, and you can hide the guide (new `show_steps` setting).
+- A start screen replaces the bare file dialog when there is no project
+  to open. It has Open, a list of recent and nearby projects, and the
+  three steps. A file passed on the command line opens directly.
+- The known-distance dialog is ready to type in, and it also accepts
+  values such as `30'-6"`, `30 ft 6 in`, `3.5 m` and `350 cm`.
+- The BOM tab shows the wiring total at the top. All three tables and
+  every button fit on screen. The tax box takes 8 or 0.08 for 8 % and is
+  still saved as the decimal `tax_rate`.
+- The Export to PDF dialog has two columns so that it fits a 768 px
+  screen. After an export, a notice offers Open and Show in folder in
+  place of a modal box.
+- Save dialogs start in the last export folder (new `last_export_dir`
+  setting).
+- The window reopens as you left it: maximised, or at its size and
+  position, with the same side-panel width and open tab (new
+  `window_zoomed`, `window_geometry`, `side_width` and `active_tab`
+  settings).
+- Add Floor accepts DXF and SVG drawings, like Open.
+- Consistent sizing at 125–150 % display scaling, with one set of Segoe
+  UI fonts.
+- The app icon appears on every window.
+- Menu items no longer use emoji, which showed as empty boxes on
+  Windows.
+
 ## [1.2.1] - 2026-09-24
 
 Patch release. Two security/data-loss fixes when opening `.zsmt` bundles,
