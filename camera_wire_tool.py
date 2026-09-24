@@ -4183,10 +4183,11 @@ class CameraWireTool:
             self._active_search_entry = self._sym_search_entry
         else:
             self._active_search_entry = None
-        # Lazy BOM refresh: edits that happened while the BOM tab was
-        # hidden marked it stale instead of recomputing the full BOM
-        # rollup on every keystroke/command. Catch up now it's visible.
-        if idx == 3 and getattr(self, "_bom_tab_stale", False):
+        # Lazy BOM refresh: edits made while the BOM tab was hidden skip
+        # the full rollup. Opening the tab ALWAYS rebuilds it: relying on
+        # the stale flag alone showed an empty "$0" BOM whenever a code
+        # path forgot to set it (finishing a wire did).
+        if idx == 3:
             self._bom_tab_stale = False
             self._refresh_bom_tab(force=True)
 
@@ -4559,6 +4560,37 @@ class CameraWireTool:
         self.future.clear()
         self._mark_dirty()
         self._update_undo_redo_state()
+        # Many callers refresh only the lists they know changed (e.g.
+        # finishing a wire refreshed the wire + device lists but never
+        # the BOM), so the BOM tab kept showing "no wire runs" and a $0
+        # estimate. Every mutation invalidates the BOM here, in one place.
+        self._invalidate_bom()
+
+    def _invalidate_bom(self) -> None:
+        """Mark the BOM tab (and the summary built from it) out of date.
+        When the BOM tab is visible, refresh it once the current event
+        has finished (coalesced); otherwise the tab-change handler
+        rebuilds it when the user opens it."""
+        self._bom_tab_stale = True
+        if getattr(self, "_bom_refresh_pending", False):
+            return
+        try:
+            visible = self._notebook.index("current") == 3
+        except (AttributeError, tk.TclError):
+            return
+        if not visible:
+            return
+
+        def _go():
+            self._bom_refresh_pending = False
+            if getattr(self, "_bom_tab_stale", False):
+                self._bom_tab_stale = False
+                self._refresh_bom_tab(force=True)
+        try:
+            self._bom_refresh_pending = True
+            self.root.after_idle(_go)
+        except tk.TclError:
+            self._bom_refresh_pending = False
 
     def _undo(self) -> None:
         # Don't hijack Ctrl+Z while the user is typing in a text widget —
