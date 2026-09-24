@@ -492,8 +492,8 @@ class Tooltip:
         lbl = tk.Label(
             self.tip, text=self.text, justify=tk.LEFT,
             background="#2d2d2d", foreground="#e0e0e0",
-            relief=tk.SOLID, borderwidth=1, font=("Segoe UI", 9),
-            padx=8, pady=4,
+            relief=tk.SOLID, borderwidth=1, font="AppBody",
+            padx=8, pady=4, wraplength=int(420 * ui_scale(self.widget)),
         )
         lbl.pack()
 
@@ -1396,6 +1396,123 @@ def _tk_callback_exception(exc_type, exc_value, exc_tb):
         pass
 
 
+# Named fonts used across the UI. Sizes are in POINTS, so Tk scales them
+# with the display DPI (the process is per-monitor DPI aware on Windows).
+# (name, size, weight, slant, monospace)
+_APP_FONTS = (
+    ("AppSmall",       8,  "normal", "roman",  False),
+    ("AppSmallHint",   8,  "normal", "italic", False),
+    ("AppBody",        9,  "normal", "roman",  False),
+    ("AppHint",        9,  "normal", "italic", False),
+    ("AppStrong",      9,  "bold",   "roman",  False),
+    ("AppBodyLarge",   10, "normal", "roman",  False),
+    ("AppHeading",     10, "bold",   "roman",  False),
+    ("AppSubtitle",    11, "bold",   "roman",  False),
+    ("AppTitle",       12, "bold",   "roman",  False),
+    ("AppTotal",       14, "bold",   "roman",  False),
+    ("AppDisplay",     18, "bold",   "roman",  False),
+    ("AppMono",        9,  "normal", "roman",  True),
+    ("AppMonoStrong",  9,  "bold",   "roman",  True),
+    ("AppMonoLarge",   10, "normal", "roman",  True),
+)
+
+# sv-ttk declares its fonts in PIXELS (-14 etc.), which Tk never scales
+# with DPI, so at 150 % the ttk widgets stayed at 100 % while every
+# point-sized font grew. Re-declare them in points.
+_SV_FONT_POINTS = {
+    "SunValleyCaptionFont": 9,
+    "SunValleyBodyFont": 10,
+    "SunValleyBodyStrongFont": 10,
+    "SunValleyBodyLargeFont": 13,
+    "SunValleySubtitleFont": 15,
+    "SunValleyTitleFont": 20,
+    "SunValleyTitleLargeFont": 30,
+    "SunValleyDisplayFont": 50,
+}
+
+
+def ui_scale(widget) -> float:
+    """Display scale relative to 96 dpi (1.0 at 100 %, 1.5 at 150 %)."""
+    try:
+        return max(0.5, float(widget.tk.call("tk", "scaling")) / (96 / 72))
+    except (tk.TclError, ValueError, AttributeError):
+        return 1.0
+
+
+def _font_families(root) -> tuple[str, str]:
+    """(UI family, monospace family) for this platform."""
+    try:
+        have = set(tkfont.families(root))
+    except tk.TclError:
+        have = set()
+    if sys.platform == "win32":
+        ui = "Segoe UI"
+        mono = next((f for f in ("Cascadia Mono", "Consolas") if f in have),
+                    "Consolas")
+        return ui, mono
+    try:
+        ui = tkfont.nametofont("TkDefaultFont", root=root).actual("family")
+        mono = tkfont.nametofont("TkFixedFont", root=root).actual("family")
+    except (tk.TclError, TypeError):
+        ui, mono = "Helvetica", "Courier"
+    return ui, mono
+
+
+def _init_fonts(root) -> None:
+    """Create (or refresh) the App* named fonts and put sv-ttk's fonts on
+    point sizes, then size Treeview rows to the resulting font."""
+    ui, mono = _font_families(root)
+    # tkinter deletes a named font when the Font object that created it
+    # is garbage-collected, so keep them alive on the root.
+    keep = root.__dict__.setdefault("_app_fonts", {})
+    existing = set(root.tk.splitlist(root.tk.call("font", "names")))
+    for name, size, weight, slant, is_mono in _APP_FONTS:
+        opts = {"family": mono if is_mono else ui, "size": size,
+                "weight": weight, "slant": slant}
+        with contextlib.suppress(tk.TclError):
+            if name in existing:
+                root.tk.call("font", "configure", name,
+                             *(x for k, v in opts.items() for x in (f"-{k}", v)))
+            else:
+                keep[name] = tkfont.Font(root=root, name=name, **opts)
+    for name, pts in _SV_FONT_POINTS.items():
+        with contextlib.suppress(tk.TclError):
+            root.tk.call("font", "configure", name, "-size", pts)
+    with contextlib.suppress(tk.TclError):
+        body = ("SunValleyBodyFont" if _HAS_SVTTK
+                and "SunValleyBodyFont" in root.tk.splitlist(
+                    root.tk.call("font", "names"))
+                else "TkDefaultFont")
+        line = int(root.tk.call("font", "metrics", body, "-linespace"))
+        ttk.Style(root).configure(
+            "Treeview", rowheight=line + round(6 * ui_scale(root)))
+
+
+def _app_icon_path() -> str | None:
+    """The app icon PNG when running from source (frozen builds use the
+    icon embedded in the exe instead)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(base, "packaging", "icons", "cameramtool.png")
+    return p if os.path.exists(p) else None
+
+
+def apply_window_icon(root) -> None:
+    """Show the app icon (not the Tk feather) in the title bar, taskbar
+    and Alt+Tab, for the main window and every dialog. Best effort."""
+    try:
+        if sys.platform == "win32" and getattr(sys, "frozen", False):
+            # Tk extracts the icon embedded in the exe itself.
+            root.iconbitmap(default=sys.executable)
+            return
+        p = _app_icon_path()
+        if p:
+            img = tk.PhotoImage(master=root, file=p)
+            root.iconphoto(True, img)
+            root._app_icon_ref = img   # keep the image alive
+    except (tk.TclError, OSError, AttributeError):
+        pass
+
+
 def apply_theme(root: tk.Tk) -> None:
     # Route unhandled callback exceptions to the log + a messagebox.
     root.report_callback_exception = _tk_callback_exception
@@ -1404,6 +1521,8 @@ def apply_theme(root: tk.Tk) -> None:
             sv_ttk.set_theme("dark")
         except tk.TclError:
             pass
+    _init_fonts(root)
+    apply_window_icon(root)
     # Touch up a few colors via ttk style for our custom segmented control
     style = ttk.Style(root)
     try:
@@ -1793,6 +1912,11 @@ class CameraWireTool:
         # appears AFTER the first render, when the user has visual
         # context for the warning.
         self.root.after(800, self._maybe_warn_drastic_alignment)
+
+    def _px(self, n: float) -> int:
+        """Scale a 100 %-DPI pixel size (column widths, fixed boxes) to the
+        current display scale, so tables are not cramped at 150 %."""
+        return int(round(n * ui_scale(self.root)))
 
     def _maybe_warn_drastic_alignment(self) -> None:
         """Surface a one-time, NON-destructive nudge at startup only if the
@@ -2289,7 +2413,7 @@ class CameraWireTool:
                   ).pack(anchor=tk.W, padx=10, pady=(8, 6))
         frame = ttk.Frame(dlg)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-        lb = tk.Listbox(frame, font=("Consolas", 9))
+        lb = tk.Listbox(frame, font="AppMono")
         sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=lb.yview)
         lb.config(yscrollcommand=sb.set)
         lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -3588,8 +3712,8 @@ class CameraWireTool:
         main.add(canvas_frame, stretch="always", minsize=300)
 
         # Side panel
-        side = ttk.Frame(main, width=380)
-        main.add(side, stretch="never", minsize=240, width=380)
+        side = ttk.Frame(main, width=self._px(380))
+        main.add(side, stretch="never", minsize=self._px(240), width=self._px(380))
 
         notebook = ttk.Notebook(side)
         notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -3600,7 +3724,7 @@ class CameraWireTool:
         tab_dev = ttk.Frame(notebook)
         notebook.add(tab_dev, text="Devices")
         ttk.Label(tab_dev, text="Placed Devices",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+                  font="AppHeading").pack(anchor=tk.W, padx=6, pady=(6, 2))
         self._dev_search_var = tk.StringVar()
         s_frame = ttk.Frame(tab_dev)
         s_frame.pack(fill=tk.X, padx=6, pady=2)
@@ -3648,7 +3772,7 @@ class CameraWireTool:
         df.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         # EXTENDED selectmode lets the user Ctrl/Shift-click rows to
         # build a multi-selection — synced to the canvas via _on_dev_select.
-        self.dev_listbox = tk.Listbox(df, font=("Consolas", 9), selectmode=tk.EXTENDED,
+        self.dev_listbox = tk.Listbox(df, font="AppMono", selectmode=tk.EXTENDED,
                                        activestyle="dotbox")
         sb1 = ttk.Scrollbar(df, orient=tk.VERTICAL, command=self.dev_listbox.yview)
         self.dev_listbox.config(yscrollcommand=sb1.set)
@@ -3673,14 +3797,14 @@ class CameraWireTool:
         # Updated alongside the listbox in _refresh_device_list.
         self._dev_total_label = ttk.Label(
             tab_dev, text="—",
-            font=("Segoe UI", 9), foreground="#888888")
+            font="AppBody", foreground="#888888")
         self._dev_total_label.pack(anchor=tk.W, padx=8, pady=(2, 6))
 
         # --- Tab 2: Wires ---
         tab_wire = ttk.Frame(notebook)
         notebook.add(tab_wire, text="Wires")
         ttk.Label(tab_wire, text="Wire Runs",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+                  font="AppHeading").pack(anchor=tk.W, padx=6, pady=(6, 2))
 
         # Big hint banner so users know the easy way to add wires.
         hint = ttk.Label(
@@ -3690,8 +3814,8 @@ class CameraWireTool:
                   "right-click to finish.\n"
                   "Or press W with a device selected, then click points."),
             justify=tk.LEFT, foreground="#7fc4ff",
-            font=("Segoe UI", 9, "italic"),
-            wraplength=440,
+            font="AppHint",
+            wraplength=self._px(360),
         )
         hint.pack(anchor=tk.W, padx=8, pady=(0, 6))
 
@@ -3735,7 +3859,7 @@ class CameraWireTool:
         wf = ttk.Frame(tab_wire)
         wf.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         # EXTENDED so user can Ctrl-click multiple wires for bulk delete.
-        self.wire_listbox = tk.Listbox(wf, font=("Consolas", 9), selectmode=tk.EXTENDED,
+        self.wire_listbox = tk.Listbox(wf, font="AppMono", selectmode=tk.EXTENDED,
                                         activestyle="dotbox")
         sb2 = ttk.Scrollbar(wf, orient=tk.VERTICAL, command=self.wire_listbox.yview)
         self.wire_listbox.config(yscrollcommand=sb2.set)
@@ -3790,7 +3914,7 @@ class CameraWireTool:
         ttk.Separator(tab_wire, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=4)
         # Big total — same prominence as the toolbar metric badge
         self.total_label = ttk.Label(tab_wire, text="Total Wire: --",
-                                     font=("Segoe UI", 14, "bold"),
+                                     font="AppTotal",
                                      foreground="#3ddc84")
         self.total_label.pack(anchor=tk.W, padx=8, pady=(2, 8))
 
@@ -3798,7 +3922,7 @@ class CameraWireTool:
         tab_sym = ttk.Frame(notebook)
         notebook.add(tab_sym, text="Symbols")
         ttk.Label(tab_sym, text="Symbol Types",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+                  font="AppHeading").pack(anchor=tk.W, padx=6, pady=(6, 2))
 
         self._sym_search_var = tk.StringVar()
         ss_frame = ttk.Frame(tab_sym)
@@ -3815,7 +3939,7 @@ class CameraWireTool:
 
         sf = ttk.Frame(tab_sym)
         sf.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        self.sym_listbox = tk.Listbox(sf, font=("Consolas", 9), selectmode=tk.SINGLE,
+        self.sym_listbox = tk.Listbox(sf, font="AppMono", selectmode=tk.SINGLE,
                                        activestyle="dotbox")
         sb3 = ttk.Scrollbar(sf, orient=tk.VERTICAL, command=self.sym_listbox.yview)
         self.sym_listbox.config(yscrollcommand=sb3.set)
@@ -3864,8 +3988,8 @@ class CameraWireTool:
         ttk.Label(tab_sym,
                   text="Tip: double-click any symbol to drop it on the map. "
                        "Right-click for more options.",
-                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
-                  wraplength=440, justify=tk.LEFT,
+                  foreground="#7fc4ff", font="AppHint",
+                  wraplength=self._px(360), justify=tk.LEFT,
                   ).pack(anchor=tk.W, padx=8, pady=(4, 6))
 
         # Internal: place_combo / place_type_var are still consumed by
@@ -3879,7 +4003,7 @@ class CameraWireTool:
         tab_bom = ttk.Frame(notebook)
         notebook.add(tab_bom, text="BOM")
         ttk.Label(tab_bom, text="Bill of Materials",
-                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=6, pady=(6, 2))
+                  font="AppHeading").pack(anchor=tk.W, padx=6, pady=(6, 2))
 
         # Cost adjustment row
         adj = ttk.Frame(tab_bom)
@@ -3904,7 +4028,7 @@ class CameraWireTool:
 
         # BOM table (Treeview) — cable totals
         ttk.Label(tab_bom, text="Wiring — cable runs (hardware totaled separately below)",
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(4, 0))
+                  font="AppStrong").pack(anchor=tk.W, padx=6, pady=(4, 0))
         bom_frame = ttk.Frame(tab_bom)
         bom_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         cols = ("cable", "label", "runs", "ft", "rate", "subtotal")
@@ -3945,7 +4069,7 @@ class CameraWireTool:
 
         # Devices-by-symbol Treeview — count + cable + wire totals per type
         ttk.Label(tab_bom, text="By device type",
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(8, 0))
+                  font="AppStrong").pack(anchor=tk.W, padx=6, pady=(8, 0))
         dev_frame = ttk.Frame(tab_bom)
         dev_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         dev_cols = ("code", "label", "count", "cable", "runs", "wire")
@@ -3993,7 +4117,7 @@ class CameraWireTool:
 
         # By-camera-model Treeview — qty + unit price + subtotal per model
         ttk.Label(tab_bom, text="By camera model",
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=6, pady=(8, 0))
+                  font="AppStrong").pack(anchor=tk.W, padx=6, pady=(8, 0))
         model_frame = ttk.Frame(tab_bom)
         model_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         model_cols = ("name", "number", "qty", "unit", "subtotal")
@@ -4031,14 +4155,14 @@ class CameraWireTool:
         # table above and on the hardware line below.
         ttk.Label(tab_bom,
                   text="Wiring totals (cable only — excludes camera hardware)",
-                  font=("Segoe UI", 9, "bold"),
+                  font="AppStrong",
                   foreground="#7fc4ff").pack(anchor=tk.W, padx=8, pady=(6, 0))
         totals_frame = ttk.Frame(tab_bom)
         totals_frame.pack(fill=tk.X, padx=8, pady=(2, 0))
         # Use plain tk.Label so we can color the pills individually
         self._bom_pill_subtotal = tk.Label(
             totals_frame, text="Cable Subtotal\n—", padx=10, pady=4,
-            bg="#23304a", fg="#e0e8ff", font=("Segoe UI", 9),
+            bg="#23304a", fg="#e0e8ff", font="AppBody",
             justify=tk.CENTER,
         )
         self._bom_pill_subtotal.pack(side=tk.LEFT, padx=(0, 4))
@@ -4047,7 +4171,7 @@ class CameraWireTool:
                 "type in the BOM. Before waste + tax.")
         self._bom_pill_waste = tk.Label(
             totals_frame, text="Waste\n—", padx=10, pady=4,
-            bg="#33231a", fg="#ffd0a0", font=("Segoe UI", 9),
+            bg="#33231a", fg="#ffd0a0", font="AppBody",
             justify=tk.CENTER,
         )
         self._bom_pill_waste.pack(side=tk.LEFT, padx=2)
@@ -4057,7 +4181,7 @@ class CameraWireTool:
                 "or Preferences.")
         self._bom_pill_tax = tk.Label(
             totals_frame, text="Tax\n—", padx=10, pady=4,
-            bg="#1a3328", fg="#a0e0c0", font=("Segoe UI", 9),
+            bg="#1a3328", fg="#a0e0c0", font="AppBody",
             justify=tk.CENTER,
         )
         self._bom_pill_tax.pack(side=tk.LEFT, padx=2)
@@ -4067,7 +4191,7 @@ class CameraWireTool:
         self._bom_pill_total = tk.Label(
             totals_frame, text="TOTAL\n—",
             padx=12, pady=4,
-            bg="#202060", fg="#FFFFFF", font=("Segoe UI", 10, "bold"),
+            bg="#202060", fg="#FFFFFF", font="AppHeading",
             justify=tk.CENTER,
         )
         self._bom_pill_total.pack(side=tk.RIGHT, padx=(8, 0))
@@ -4079,7 +4203,7 @@ class CameraWireTool:
         # (was a no-op stub for several rounds — bug fixed).
         self._bom_totals_label = ttk.Label(tab_bom, text="",
                                             foreground="#FF8C42",
-                                            font=("Segoe UI", 9))
+                                            font="AppBody")
         self._bom_totals_label.pack(anchor=tk.W, padx=8, pady=(0, 4),
                                      fill=tk.X)
 
@@ -4135,15 +4259,15 @@ class CameraWireTool:
         ttk.Separator(self._statusbar, orient=tk.HORIZONTAL).pack(
             side=tk.TOP, fill=tk.X)
         self.status_label = ttk.Label(self._statusbar, text="", anchor=tk.W,
-                                       font=("Segoe UI", 9))
+                                       font="AppBody")
         self.status_label.pack(side=tk.LEFT, padx=8, pady=2, fill=tk.X, expand=True)
         self.cursor_label = ttk.Label(self._statusbar, text="", anchor=tk.E,
-                                       font=("Consolas", 9), foreground="#888888")
+                                       font="AppMono", foreground="#888888")
         self.cursor_label.pack(side=tk.RIGHT, padx=8, pady=2)
         # "Saved Xm ago / Modified" indicator — updates every 15s
         self.save_indicator = ttk.Label(
             self._statusbar, text="", anchor=tk.E,
-            font=("Segoe UI", 9), foreground="#888888",
+            font="AppBody", foreground="#888888",
         )
         self.save_indicator.pack(side=tk.RIGHT, padx=8, pady=2)
         # Live project totals (device/camera/wire counts, footage, cost).
@@ -4151,7 +4275,7 @@ class CameraWireTool:
         # toolbar's action buttons for horizontal space.
         self.total_toolbar_label = ttk.Label(
             self._statusbar, text="—", anchor=tk.E,
-            font=("Segoe UI", 9, "bold"))
+            font="AppStrong")
         self.total_toolbar_label.pack(side=tk.RIGHT, padx=8, pady=2)
         Tooltip(self.total_toolbar_label,
                 "Live project totals: device + camera count, "
@@ -5329,12 +5453,12 @@ class CameraWireTool:
                 cx, cy - r, cx + r, cy, cx, cy + r, cx - r, cy,
                 fill=fill, outline=outline, width=ow, tags="drop")
             self.canvas.create_text(cx, cy, text="↕", fill="#04222a",
-                                    font=("Segoe UI", 11, "bold"), tags="drop")
+                                    font="AppSubtitle", tags="drop")
             sub = f"{d.get('label', 'DP')}  [{'·'.join(floors)}]"
             if not is_home:
                 sub += f"  →{home}"
             self.canvas.create_text(cx, cy + r + 9, text=sub, fill="#d8f6f7",
-                                    font=("Segoe UI", 8), tags="drop")
+                                    font="AppSmall", tags="drop")
 
     def _vertical_in_for_drop_ids(self, drop_ids) -> float:
         """Sum of vertical riser INCHES for the given drop ids, relative to
@@ -5395,7 +5519,7 @@ class CameraWireTool:
             row=0, column=1, sticky=tk.W, **pad)
 
         ttk.Label(dlg, text="Show on floors:",
-                  font=("Segoe UI", 9, "bold")).grid(
+                  font="AppStrong").grid(
             row=1, column=0, columnspan=2, sticky=tk.W, padx=10, pady=(8, 2))
         cur_floors = set(drop.get("floors") or [])
         floor_vars: dict[str, tk.BooleanVar] = {}
@@ -6612,7 +6736,7 @@ class CameraWireTool:
             self.canvas.create_text(
                 8, ch - 22, anchor=tk.SW,
                 text=f"ghost: {floor.id} {floor.name}",
-                fill="#9fe0ff", font=("Segoe UI", 9, "bold"),
+                fill="#9fe0ff", font="AppStrong",
                 tags="ghost")
 
     def _redraw(self) -> None:
@@ -6787,7 +6911,7 @@ class CameraWireTool:
         self.canvas.create_text(
             cw - 8, ch - 8, anchor=tk.SE,
             text=f"grid: {label}", fill="#5a6273",
-            font=("Segoe UI", 8, "italic"), tags="grid")
+            font="AppSmallHint", tags="grid")
 
     # ============================================================ Mini-map
     def _build_minimap_image(self) -> None:
@@ -7066,7 +7190,7 @@ class CameraWireTool:
         self.canvas.create_rectangle(0, 0, cw, 32, fill=bg, outline="",
                                      tags="mode_banner")
         self.canvas.create_text(cw / 2, 16, text=msg, fill=fg,
-                                font=("Segoe UI", 10, "bold"),
+                                font="AppHeading",
                                 tags="mode_banner")
 
     def _draw_legend(self) -> None:
@@ -7587,7 +7711,7 @@ class CameraWireTool:
             # legend. A dark plate behind it keeps it legible over anything.
             txt_id = self.canvas.create_text(
                 mx, my - 12, text=label, fill="#00FFFF",
-                font=("Consolas", 9, "bold"),
+                font="AppMonoStrong",
                 tags=(f"wire_{idx}", "wire_sel_label"))
             bbox = self.canvas.bbox(txt_id)
             if bbox:
@@ -7970,12 +8094,12 @@ class CameraWireTool:
         ttk.Label(
             dlg,
             text=f"You measured {px_dist:.1f} pixels on the map.",
-            font=("Segoe UI", 11, "bold"),
+            font="AppSubtitle",
         ).pack(anchor=tk.W, padx=14, pady=(14, 2))
         ttk.Label(
             dlg,
             text="Enter the real-world distance between those two points:",
-            font=("Segoe UI", 10),
+            font="AppBodyLarge",
         ).pack(anchor=tk.W, padx=14, pady=(2, 8))
 
         unit = self.unit_var.get()
@@ -8070,10 +8194,10 @@ class CameraWireTool:
                 ("Ceiling height",       "8'-0\"  to  10'-0\""),
             ]
         for i, (label_, value) in enumerate(tips):
-            ttk.Label(ref, text=label_, font=("Segoe UI", 9),
+            ttk.Label(ref, text=label_, font="AppBody",
                       foreground="#a0a8b8",
                       ).grid(row=i, column=0, sticky=tk.W, padx=8, pady=1)
-            ttk.Label(ref, text=value, font=("Consolas", 9),
+            ttk.Label(ref, text=value, font="AppMono",
                       foreground="#FFD060",
                       ).grid(row=i, column=1, sticky=tk.W, padx=12, pady=1)
 
@@ -9161,7 +9285,7 @@ class CameraWireTool:
                 )
                 self.canvas.create_text(
                     px + 4, py + 4, text="\n".join(lines), anchor=tk.NW,
-                    fill="#FFFFFF", font=("Segoe UI", 9), tags="hover_info",
+                    fill="#FFFFFF", font="AppBody", tags="hover_info",
                 )
                 return
             if dev_under is not self._hover_device:
@@ -9217,7 +9341,7 @@ class CameraWireTool:
                     )
                     self.canvas.create_text(
                         px + 4, py + 4, text=text, anchor=tk.NW,
-                        fill="#FFFFFF", font=("Segoe UI", 9),
+                        fill="#FFFFFF", font="AppBody",
                         tags="hover_info",
                     )
 
@@ -9245,7 +9369,7 @@ class CameraWireTool:
             )
             self.canvas.create_text(
                 mid_x, mid_y - 15, text=text, fill="#FFD060",
-                font=("Segoe UI", 9, "bold"), tags="cal_preview",
+                font="AppStrong", tags="cal_preview",
             )
 
         if self.mode == Mode.WIRE and self.current_wire_points:
@@ -9285,7 +9409,7 @@ class CameraWireTool:
                 }.get(kind, kind)
                 self.canvas.create_text(
                     scx + 14, scy - 14, text=kind_label, anchor=tk.W,
-                    fill=ring_color, font=("Segoe UI", 8, "italic"),
+                    fill=ring_color, font="AppSmallHint",
                     tags="wire_snap",
                 )
             else:
@@ -9312,7 +9436,7 @@ class CameraWireTool:
             )
             self.canvas.create_text(
                 ex + 18, ey - 14, text=running_str, anchor=tk.W,
-                fill="#FFFFFF", font=("Segoe UI", 10, "bold"),
+                fill="#FFFFFF", font="AppHeading",
                 tags="wire_preview",
             )
             shift_hint = "  (Shift = lock 0/45/90°)" if not self._shift_held else "  [SHIFT-LOCK]"
@@ -10427,10 +10551,10 @@ class CameraWireTool:
             cur_label = (f"{cur_dev['id']}  ({cur_dev['type']} — "
                          f"{sym.get('label', cur_dev['type'])})")
         ttk.Label(dlg, text=f"Currently assigned to:  {cur_label}",
-                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  foreground="#7fc4ff", font="AppHint",
                   ).pack(anchor=tk.W, padx=12, pady=(10, 2))
         ttk.Label(dlg, text="Pick a new device for this wire:",
-                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(4, 4))
+                  font="AppBody").pack(anchor=tk.W, padx=12, pady=(4, 4))
 
         # Search filter — focused on open so the user can type to filter
         # immediately (the natural first action in a pick-a-device list).
@@ -10445,7 +10569,7 @@ class CameraWireTool:
         # List of devices
         list_frame = ttk.Frame(dlg)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
-        lb = tk.Listbox(list_frame, font=("Consolas", 10),
+        lb = tk.Listbox(list_frame, font="AppMonoLarge",
                         selectmode=tk.SINGLE, activestyle="dotbox")
         sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=lb.yview)
         lb.config(yscrollcommand=sb.set)
@@ -11039,13 +11163,13 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text="Type to find any device, symbol, or wire:",
-                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=10, pady=(8, 2))
+                  font="AppBody").pack(anchor=tk.W, padx=10, pady=(8, 2))
         q_var = tk.StringVar()
         entry = ttk.Entry(dlg, textvariable=q_var, font=("Segoe UI", 11))
         entry.pack(fill=tk.X, padx=10, pady=4)
         entry.focus_set()
 
-        listbox = tk.Listbox(dlg, font=("Consolas", 10), activestyle="dotbox")
+        listbox = tk.Listbox(dlg, font="AppMonoLarge", activestyle="dotbox")
         sb = ttk.Scrollbar(dlg, orient=tk.VERTICAL, command=listbox.yview)
         listbox.config(yscrollcommand=sb.set)
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=4)
@@ -11502,12 +11626,12 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text="Drop a text label on the floor plan",
-                  font=("Segoe UI", 11, "bold"),
+                  font="AppSubtitle",
                   ).pack(anchor=tk.W, padx=14, pady=(12, 2))
         ttk.Label(dlg,
                   text="Useful for room labels (Lobby, Server Room, IDF…), "
                        "construction notes, and zone callouts.",
-                  wraplength=380, foreground="#888888", font=("Segoe UI", 9),
+                  wraplength=380, foreground="#888888", font="AppBody",
                   ).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
         form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=14, pady=4)
@@ -11530,7 +11654,7 @@ class CameraWireTool:
                       relief=tk.RAISED, cursor="hand2")
         sw.pack(side=tk.LEFT, padx=(0, 4))
         ttk.Label(color_row, textvariable=color_var, width=10,
-                  font=("Consolas", 9)).pack(side=tk.LEFT)
+                  font="AppMono").pack(side=tk.LEFT)
         def pick(_e=None):
             c = colorchooser.askcolor(initialcolor=color_var.get(),
                                        title="Annotation color")
@@ -11680,7 +11804,7 @@ class CameraWireTool:
         dlg.geometry("420x200")
         dlg.transient(self.root); dlg.grab_set()
         ttk.Label(dlg, text="Edit annotation",
-                  font=("Segoe UI", 11, "bold"),
+                  font="AppSubtitle",
                   ).pack(anchor=tk.W, padx=14, pady=(12, 8))
         form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=14)
         ttk.Label(form, text="Text:", width=8).grid(row=0, column=0, sticky=tk.E, pady=4)
@@ -11704,7 +11828,7 @@ class CameraWireTool:
                       relief=tk.RAISED, cursor="hand2")
         sw.pack(side=tk.LEFT, padx=(0, 4))
         ttk.Label(color_row, textvariable=color_var, width=10,
-                  font=("Consolas", 9)).pack(side=tk.LEFT)
+                  font="AppMono").pack(side=tk.LEFT)
         def pick(_e=None):
             c = colorchooser.askcolor(initialcolor=color_var.get(),
                                        title="Annotation color")
@@ -11777,7 +11901,7 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text="Preferences",
-                  font=("Segoe UI", 14, "bold"),
+                  font="AppTotal",
                   ).pack(anchor=tk.W, padx=14, pady=(12, 2))
         ttk.Label(
             dlg,
@@ -11785,7 +11909,7 @@ class CameraWireTool:
                  f"{SETTINGS_PATH.name} in your home folder, and apply "
                  "to every project you open.",
             wraplength=480, foreground="#7fc4ff",
-            font=("Segoe UI", 9, "italic"),
+            font="AppHint",
         ).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
         # Defaults card
@@ -11813,7 +11937,7 @@ class CameraWireTool:
         ttk.Entry(row, textvariable=self._bom_currency_var,
                    width=8).pack(side=tk.LEFT)
         ttk.Label(row, text="(e.g. $, €, £, ¥)",
-                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  foreground="#888888", font="AppHint",
                   ).pack(side=tk.LEFT, padx=8)
 
         row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
@@ -11821,7 +11945,7 @@ class CameraWireTool:
         ttk.Entry(row, textvariable=self._bom_waste_var,
                    width=8).pack(side=tk.LEFT)
         ttk.Label(row, text="(1.10 = +10% material allowance)",
-                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  foreground="#888888", font="AppHint",
                   ).pack(side=tk.LEFT, padx=8)
 
         row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
@@ -11829,7 +11953,7 @@ class CameraWireTool:
         ttk.Entry(row, textvariable=self._bom_tax_var,
                    width=8).pack(side=tk.LEFT)
         ttk.Label(row, text="(decimal, e.g. 0.08 = 8%)",
-                  foreground="#888888", font=("Segoe UI", 9, "italic"),
+                  foreground="#888888", font="AppHint",
                   ).pack(side=tk.LEFT, padx=8)
 
         # Cleanup card
@@ -11839,7 +11963,7 @@ class CameraWireTool:
         row = ttk.Frame(cleanup); row.pack(fill=tk.X, padx=8, pady=4)
         ttk.Label(row,
                   text=f"Settings file: {SETTINGS_PATH.name}",
-                  font=("Consolas", 9),
+                  font="AppMono",
                   ).pack(side=tk.LEFT)
 
         row = ttk.Frame(cleanup); row.pack(fill=tk.X, padx=8, pady=8)
@@ -11914,11 +12038,11 @@ class CameraWireTool:
 
         # Header
         ttk.Label(dlg, text="Keyboard Shortcuts",
-                  font=("Segoe UI", 14, "bold"),
+                  font="AppTotal",
                   ).pack(anchor=tk.W, padx=14, pady=(12, 2))
         ttk.Label(dlg,
                   text="Press F1 or ? at any time to open this list.",
-                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  foreground="#7fc4ff", font="AppHint",
                   ).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
         # Scrollable body
@@ -12017,16 +12141,16 @@ class CameraWireTool:
         ]
         for title, rows in sections:
             ttk.Label(body, text=title,
-                      font=("Segoe UI", 11, "bold"),
+                      font="AppSubtitle",
                       foreground="#7fc4ff",
                       ).grid(sticky=tk.W, padx=4, pady=(8, 2),
                               columnspan=2)
             for keys, desc in rows:
                 ttk.Label(body, text=keys,
-                          font=("Consolas", 10),
+                          font="AppMonoLarge",
                           foreground="#FFD060",
                           ).grid(sticky=tk.W, padx=(20, 16))
-                ttk.Label(body, text=desc, font=("Segoe UI", 10),
+                ttk.Label(body, text=desc, font="AppBodyLarge",
                           ).grid(row=body.grid_size()[1] - 1, column=1,
                                   sticky=tk.W)
 
@@ -12068,7 +12192,7 @@ class CameraWireTool:
 
         # Big title
         ttk.Label(dlg, text="Camera Wire Tool",
-                  font=("Segoe UI", 18, "bold"),
+                  font="AppDisplay",
                   ).pack(anchor=tk.W, padx=20, pady=(20, 0))
         # Single source of truth for the version string lives in
         # cwt/__init__.py — bumping it there now updates the About card.
@@ -12092,7 +12216,7 @@ class CameraWireTool:
             "drag-to-reassign endpoints",
             "• Map annotations, arrow-key nudge, jump-to-unwired-camera (Ctrl+U)",
         ):
-            ttk.Label(feat, text=line, font=("Segoe UI", 9),
+            ttk.Label(feat, text=line, font="AppBody",
                       ).pack(anchor=tk.W, padx=10, pady=1)
 
         # Stats card showing what's loaded
@@ -12114,16 +12238,16 @@ class CameraWireTool:
         ):
             row = ttk.Frame(stats); row.pack(fill=tk.X, padx=8, pady=2)
             ttk.Label(row, text=label, width=10,
-                      foreground="#888888", font=("Segoe UI", 9),
+                      foreground="#888888", font="AppBody",
                       ).pack(side=tk.LEFT)
-            ttk.Label(row, text=value, font=("Segoe UI", 9),
+            ttk.Label(row, text=value, font="AppBody",
                       ).pack(side=tk.LEFT)
 
         # Footer
         ttk.Label(
             dlg,
             text="MIT License  ·  See PLAYBOOK.md for the architecture",
-            foreground="#888", font=("Segoe UI", 8),
+            foreground="#888", font="AppSmall",
         ).pack(anchor=tk.W, padx=20, pady=(10, 4))
         ttk.Button(dlg, text="Close (Esc)",
                    command=dlg.destroy).pack(side=tk.BOTTOM, pady=10)
@@ -12571,7 +12695,7 @@ class CameraWireTool:
         dlg.geometry("420x180")
         dlg.transient(self.root); dlg.grab_set()
         ttk.Label(dlg, text="Annotation text:",
-                  font=("Segoe UI", 10, "bold"),
+                  font="AppHeading",
                   ).pack(anchor=tk.W, padx=14, pady=(12, 4))
         text_var = tk.StringVar(value="Server Room")
         ent = ttk.Entry(dlg, textvariable=text_var, width=42)
@@ -13077,7 +13201,7 @@ class CameraWireTool:
             dlg,
             text="These cables show up in the BOM. Click a row to edit it; "
                  "click 'Add new cable…' for a fresh one.",
-            wraplength=520, foreground="#7fc4ff", font=("Segoe UI", 9),
+            wraplength=520, foreground="#7fc4ff", font="AppBody",
         ).pack(anchor=tk.W, padx=12, pady=(10, 4))
 
         # ---------------- project-wide default cable
@@ -13132,7 +13256,7 @@ class CameraWireTool:
             ("swatch", 100, tk.W, "Color"),
         ):
             tree.heading(c, text=h)
-            tree.column(c, width=w, anchor=anchor, stretch=False)
+            tree.column(c, width=self._px(w), anchor=anchor, stretch=False)
         sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
         tree.config(yscrollcommand=sb.set)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -13147,7 +13271,7 @@ class CameraWireTool:
         id_entry = ttk.Entry(form, textvariable=id_var, width=18)
         id_entry.grid(row=0, column=1, sticky=tk.W, padx=4)
         id_help = ttk.Label(form, text="(short identifier, e.g. Cat6 — can't change after add)",
-                            foreground="#888", font=("Segoe UI", 8, "italic"))
+                            foreground="#888", font="AppSmallHint")
         id_help.grid(row=0, column=2, sticky=tk.W, padx=4)
 
         ttk.Label(form, text="Description:").grid(row=1, column=0, sticky=tk.E, padx=8, pady=6)
@@ -13170,7 +13294,7 @@ class CameraWireTool:
                            relief=tk.RAISED, cursor="hand2")
         swatch.pack(side=tk.LEFT, padx=(0, 6))
         color_label = ttk.Label(color_row, textvariable=color_var, width=10,
-                                 font=("Consolas", 10))
+                                 font="AppMonoLarge")
         color_label.pack(side=tk.LEFT)
 
         def pick_color(_event=None):
@@ -13862,7 +13986,7 @@ class CameraWireTool:
         ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
             row=r, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
         r += 1
-        ttk.Label(dlg, text="Field of view", font=("Segoe UI", 9, "bold")).grid(
+        ttk.Label(dlg, text="Field of view", font="AppStrong").grid(
             row=r, column=0, columnspan=2, sticky=tk.W, padx=10)
         r += 1
         lens_var = tk.StringVar(value=str(fov.get("lens_mm", 4.0)))
@@ -13883,7 +14007,7 @@ class CameraWireTool:
         ttk.Entry(dlg, textvariable=hfov_var, width=10).grid(
             row=r, column=1, sticky=tk.W, **pad)
         ttk.Label(dlg, text="(360 = full circle; blank = derive from lens)",
-                  foreground="#888888", font=("Segoe UI", 8)).grid(
+                  foreground="#888888", font="AppSmall").grid(
             row=r, column=2, sticky=tk.W)
         r += 1
         ttk.Label(dlg, text="Lens (mm):").grid(row=r, column=0, sticky=tk.W, **pad)
@@ -13989,7 +14113,7 @@ class CameraWireTool:
         dlg.title("Camera models")
         dlg.geometry("520x380")
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        lb = tk.Listbox(dlg, font=("Consolas", 9))
+        lb = tk.Listbox(dlg, font="AppMono")
         lb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 4))
         ordered: list[dict] = []
 
@@ -14227,7 +14351,7 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text=f"Camera {device['id']} ({device['type']})",
-                  font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 4))
+                  font="AppSubtitle").pack(anchor=tk.W, padx=10, pady=(10, 4))
 
         form = ttk.Frame(dlg); form.pack(fill=tk.X, padx=10, pady=4)
         row = 0
@@ -14305,7 +14429,7 @@ class CameraWireTool:
         # DORI distance preview
         preview = ttk.LabelFrame(dlg, text="DORI distances (computed live)")
         preview.pack(fill=tk.X, padx=10, pady=8)
-        preview_label = ttk.Label(preview, text="—", font=("Consolas", 10),
+        preview_label = ttk.Label(preview, text="—", font="AppMonoLarge",
                                    justify=tk.LEFT)
         preview_label.pack(anchor=tk.W, padx=8, pady=6)
 
@@ -15272,7 +15396,7 @@ class CameraWireTool:
         # main canvas. Now it's spelled out + swappable.
         top = ttk.Frame(dlg); top.pack(fill=tk.X, padx=10, pady=(8, 4))
         ttk.Label(top, text="Floor to ALIGN (orange, will be transformed):",
-                  font=("Segoe UI", 10, "bold"),
+                  font="AppHeading",
                   foreground="#FF8C42").pack(side=tk.LEFT)
         target_var = tk.StringVar(value=active.id)
         all_ids = [f.id for f in self._project.floors]
@@ -15281,7 +15405,7 @@ class CameraWireTool:
                                      width=10)
         target_combo.pack(side=tk.LEFT, padx=(6, 14))
         ttk.Label(top, text="onto REFERENCE (grey, stays fixed):",
-                  font=("Segoe UI", 10, "bold"),
+                  font="AppHeading",
                   foreground="#7fc4ff").pack(side=tk.LEFT)
         ref_var = tk.StringVar(value=ref_floor.id)
         ref_combo = ttk.Combobox(top, textvariable=ref_var,
@@ -15310,7 +15434,7 @@ class CameraWireTool:
             "workspace. SHIFT/CTRL + wheel: resize the orange floor. "
             "Spinboxes on the right give precise values. Maximize the "
             "window (or F11) for more room. Hit Apply to save.",
-            font=("Segoe UI", 9), foreground="#888888",
+            font="AppBody", foreground="#888888",
             wraplength=1060, justify=tk.LEFT)
         help_lbl.pack(anchor=tk.W, padx=10, pady=(2, 4))
 
@@ -15436,7 +15560,7 @@ class CameraWireTool:
                         text=f"Drag-align render error:\n{e}\n\n"
                              f"Check ~/.camera_wire_tool.log for the "
                              f"traceback. Resizing the dialog may help.",
-                        fill="#ff8080", font=("Consolas", 10),
+                        fill="#ff8080", font="AppMonoLarge",
                         width=(canvas.winfo_width() or 900) - 20)
                 except tk.TclError:
                     pass
@@ -15742,7 +15866,7 @@ class CameraWireTool:
         yscroll.config(command=_on_yscroll)
 
         # ---- Control panel ----
-        ttk.Label(panel, text="Alignment", font=("Segoe UI", 10, "bold"),
+        ttk.Label(panel, text="Alignment", font="AppHeading",
                   foreground="#7fc4ff").pack(anchor=tk.W, pady=(0, 4))
 
         def _entry_row(parent, label, var, fmt, lo, hi, step):
@@ -15826,7 +15950,7 @@ class CameraWireTool:
 
         ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
         ttk.Label(panel, text="Transparency",
-                  font=("Segoe UI", 10, "bold"),
+                  font="AppHeading",
                   foreground="#7fc4ff").pack(anchor=tk.W)
         # Per-layer opacity sliders. Stored as 0–255 internally but
         # shown to the user as 0–100% which is what people expect.
@@ -15874,7 +15998,7 @@ class CameraWireTool:
         act_alpha_var.trace_add("write", _on_act_alpha)
 
         ttk.Separator(panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
-        ttk.Label(panel, text="Preview", font=("Segoe UI", 10, "bold"),
+        ttk.Label(panel, text="Preview", font="AppHeading",
                   foreground="#7fc4ff").pack(anchor=tk.W)
         zoom_row = ttk.Frame(panel); zoom_row.pack(fill=tk.X, pady=2)
         ttk.Label(zoom_row, text="View %").pack(side=tk.LEFT)
@@ -16155,7 +16279,7 @@ class CameraWireTool:
             text="Status: anchors not picked.\n\n"
                  "Tip: anchor points are stored per-floor. To re-align, just pick "
                  "new ones. The transform updates automatically.",
-            font=("Segoe UI", 9), justify=tk.LEFT)
+            font="AppBody", justify=tk.LEFT)
         info_label.pack(anchor=tk.W, padx=10, pady=8)
 
         def show_current():
@@ -16283,7 +16407,7 @@ class CameraWireTool:
         dlg.minsize(620, 320)
         ttk.Label(dlg, text="Double-click a row to switch to that floor. "
                               "Use the Delete button below to remove one.",
-                  foreground="#7fc4ff", font=("Segoe UI", 9, "italic"),
+                  foreground="#7fc4ff", font="AppHint",
                   ).pack(anchor=tk.W, padx=10, pady=(8, 2))
         cols = ("id", "name", "elevation", "align", "drawio")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
@@ -16291,7 +16415,8 @@ class CameraWireTool:
                          ("elevation", 80, "Elev. (ft)"),
                          ("align", 90, "Aligned"),
                          ("drawio", 290, "Drawio")):
-            tree.heading(c, text=h); tree.column(c, width=w)
+            tree.heading(c, text=h)
+            tree.column(c, width=self._px(w))
 
         def _align_summary(al):
             """Compact 'identity' or 'scale 1.5x, +50px' description for
@@ -17107,12 +17232,12 @@ class CameraWireTool:
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
         ttk.Label(dlg, text="Export to PDF",
-                  font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 2))
+                  font="AppTitle").pack(anchor=tk.W, padx=12, pady=(10, 2))
         ttk.Label(dlg, text="Each checked map view becomes its own full-view "
                             "page (rendered at high resolution). Add a one-page "
                             "summary at the end if you like.",
                   wraplength=440, foreground="#7fc4ff",
-                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(0, 8))
+                  font="AppBody").pack(anchor=tk.W, padx=12, pady=(0, 8))
 
         view_vars: list[tuple] = []
         mp_frame = ttk.LabelFrame(dlg, text="Map pages (one PDF page each)")
@@ -17727,7 +17852,7 @@ class CameraWireTool:
         ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
             row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=6)
         ttk.Label(dlg, text="Per camera type  (show · color · transparency):",
-                  font=("Segoe UI", 9, "bold")).grid(
+                  font="AppStrong").grid(
             row=6, column=0, columnspan=3, sticky=tk.W, **pad)
 
         cams = sorted(t for t in self.symbol_types if self._is_camera_type(t))
@@ -17932,7 +18057,7 @@ class CameraWireTool:
                                else f"{int(chan_az[i])}° ({compass})")
                         self.canvas.create_text(
                             hx+12, hy+12, text=lbl, fill="#FFFFFF",
-                            font=("Segoe UI", 9, "bold"), anchor=tk.W,
+                            font="AppStrong", anchor=tk.W,
                             tags=("fov", f"fov_label_{d['id']}"))
 
 
