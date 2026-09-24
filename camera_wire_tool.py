@@ -15181,22 +15181,29 @@ class CameraWireTool:
 
     def _add_floor_dialog(self) -> None:
         path = filedialog.askopenfilename(
-            title="Pick .drawio for new floor",
+            parent=self.root,
+            title="Pick the drawing for the new floor",
             initialdir=os.path.dirname(self.drawio_path),
-            filetypes=[("Draw.io files", "*.drawio")])
+            filetypes=[("Drawing", "*.drawio *.dxf *.svg"),
+                       ("Draw.io files", "*.drawio"),
+                       ("CAD / vector drawing", "*.dxf *.svg")])
         if not path:
             return
+        # A DXF/SVG floor is converted the same way File > Open does it,
+        # so a project started from CAD can add its other floors from CAD.
+        if cad_mod.is_cad_drawing(path):
+            converted = self._convert_cad_drawing(path)
+            if not converted:
+                return
+            path = converted
         # Pre-flight parse — same UX as _file_open + _open_recent. A
         # malformed floor file would otherwise add a phantom row to
         # the floor list, then fail when the user tried to switch.
-        try:
-            parse_drawio(path)
-        except (RuntimeError, OSError) as e:
-            log_error(f"Refused to add floor with malformed .drawio: {path}", e)
+        err = _preflight_drawio(path)
+        if err:
             messagebox.showerror(
                 "Can't add floor",
-                f"{path}\n\nIsn't a valid .drawio:\n{e}\n\n"
-                f"No floor was added.")
+                f"{path}\n\n{err}\n\nNo floor was added.")
             return
         if self._project is None:
             # Bootstrap into multi-floor mode by capturing current floor as F1
