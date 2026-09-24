@@ -24,6 +24,7 @@ Windows.
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import io
 import json
@@ -1408,6 +1409,14 @@ def apply_theme(root: tk.Tk) -> None:
     try:
         style.configure("Mode.TButton", padding=(10, 4))
         style.configure("ModeActive.TButton", padding=(10, 4), foreground="#ffffff")
+        style.configure("Muted.TLabel", foreground="#9a9a9a")
+        if not _HAS_SVTTK:
+            # sv-ttk ships an accent button; give the built-in themes an
+            # equivalent so the active-mode / primary buttons still stand out.
+            style.configure("Accent.TButton", foreground="#ffffff",
+                            background="#005fb8")
+            style.map("Accent.TButton",
+                      background=[("active", "#1a73c8")])
     except tk.TclError:
         pass
 
@@ -1608,6 +1617,9 @@ class CameraWireTool:
         # Mini-map overlay (top-right of the canvas). Hideable via its
         # own right-click menu or View → Show Mini-map.
         self._show_minimap = tk.BooleanVar(value=True)
+        # "Next step" guide strip above the canvas (new optional setting
+        # show_steps; absent = shown).
+        self._show_steps = tk.BooleanVar(value=True)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -1649,6 +1661,9 @@ class CameraWireTool:
         # `_loaded_unit` only when the project file didn't carry one.
         self._initial_pref_unit = prefs.get("unit")
         self._user_settings = prefs
+        # UI-state keys (window placement, remembered folders, …) that
+        # are merged into the settings file on the next preference write.
+        self._ui_state: dict = {}
         # Restore hidden device types (per-type on-map visibility).
         ht = prefs.get("hidden_types")
         if isinstance(ht, list):
@@ -1683,6 +1698,7 @@ class CameraWireTool:
             ("show_wires",      self._show_wires),
             ("show_drops",      self._show_drops),
             ("show_minimap",    self._show_minimap),
+            ("show_steps",      self._show_steps),
         ):
             if key in prefs:
                 try:
@@ -2383,7 +2399,7 @@ class CameraWireTool:
                     self._unit_label_var.set(lab); break
         # ttk.Button doesn't accept `foreground` via config(); the changing
         # text (⚠-prefixed → plain "Scale:") is enough to signal state.
-        self.scale_label.config(text=self._scale_label_text())
+        self._refresh_scale_label()
         # Safety: hidden_types is a persisted user pref — a "Hide all"
         # from a past session would make EVERY device invisible on a
         # fresh launch, which reads as "my symbols are gone" with no
@@ -2644,7 +2660,7 @@ class CameraWireTool:
         unwired = [c for c in cameras if c["id"] not in wired_ids]
         if not unwired:
             self._flash_status(
-                f"All {len(cameras)} cameras have at least one wire 🎉",
+                f"All {len(cameras)} cameras have at least one wire.",
                 ttl_ms=3000)
             return
         # Cycle from current primary selection so repeated presses walk
@@ -3019,7 +3035,7 @@ class CameraWireTool:
 
         # File
         file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
+        menubar.add_cascade(label="File", underline=0, menu=file_menu)
         # State-driven Save greyout — visible cue that there's nothing
         # to save. Save itself is idempotent (flashes 'Already saved'),
         # but the greyed entry tells the user that before they click.
@@ -3045,12 +3061,12 @@ class CameraWireTool:
         file_menu.add_command(label="Save As…", command=self._file_save_as,
                               accelerator="Ctrl+Shift+S")
         file_menu.add_separator()
-        file_menu.add_command(label="🕘  Revisions / revert…",
+        file_menu.add_command(label="Revisions / revert…",
                               command=self._show_revisions_dialog)
-        file_menu.add_command(label="📦  Export project bundle (.zsmt)…",
+        file_menu.add_command(label="Export project bundle (.zsmt)…",
                               command=self._export_bundle)
         if _HAS_EXPORT:
-            file_menu.add_command(label="🗎  Export to PDF (map + report)…",
+            file_menu.add_command(label="Export to PDF (map + report)…",
                                   command=self._open_export_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close,
@@ -3078,7 +3094,7 @@ class CameraWireTool:
 
         # Edit
         edit_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Edit", menu=edit_menu)
+        menubar.add_cascade(label="Edit", underline=0, menu=edit_menu)
         # postcommand fires just before the menu opens — update enabled
         # state for actions that depend on selection / history.
         def _refresh_edit_menu_state():
@@ -3138,7 +3154,7 @@ class CameraWireTool:
 
         # View
         view_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="View", menu=view_menu)
+        menubar.add_cascade(label="View", underline=0, menu=view_menu)
         def _refresh_view_menu_state():
             try:
                 has_sel = bool(self.selected_devices) or bool(
@@ -3191,6 +3207,8 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show Mini-map",
                                   variable=self._show_minimap,
                                   command=self._apply_minimap_visibility)
+        view_menu.add_checkbutton(label="Show Next-Step Guide",
+                                  variable=self._show_steps)
         view_menu.add_separator()
         view_menu.add_command(label="Toggle Fullscreen",
                               command=self._toggle_fullscreen,
@@ -3198,7 +3216,7 @@ class CameraWireTool:
 
         # Mode
         mode_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Mode", menu=mode_menu)
+        menubar.add_cascade(label="Mode", underline=0, menu=mode_menu)
         mode_menu.add_radiobutton(label="Move", variable=self.mode_var, value=Mode.MOVE.name,
                                   accelerator="M",
                                   command=lambda: self._set_mode(Mode.MOVE))
@@ -3211,7 +3229,7 @@ class CameraWireTool:
 
         # Floors
         floor_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Floors", menu=floor_menu)
+        menubar.add_cascade(label="Floors", underline=1, menu=floor_menu)
         self._floor_menu = floor_menu
         # postcommand re-renders the floor list on every open so the
         # active-floor '●' marker, the Add/Align/Manage greyout state,
@@ -3222,7 +3240,7 @@ class CameraWireTool:
 
         # Tools
         tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
+        menubar.add_cascade(label="Tools", underline=0, menu=tools_menu)
         def _refresh_tools_menu_state():
             try:
                 cams = [d for d in self.devices
@@ -3299,7 +3317,7 @@ class CameraWireTool:
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
+        menubar.add_cascade(label="Help", underline=0, menu=help_menu)
         help_menu.add_command(label="Keyboard Shortcuts",
                               command=self._show_shortcuts,
                               accelerator="F1")
@@ -3309,177 +3327,134 @@ class CameraWireTool:
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
-        # Toolbar — TWO permanent rows. One row needed ~1600px and
-        # clipped the scale/zoom/totals readouts off-screen on 1280-1440
-        # wide windows (most laptops). Row 1: actions + mode + floor.
-        # Row 2: view toggles + units + live readouts.
-        toolbar_wrap = ttk.Frame(self.root)
+        # Command bar. Two clusters: the primary task controls on the left
+        # (file, undo, MODE, place, layers) and the context readouts on the
+        # right (floor, units, scale, zoom). When the window is wide enough
+        # they share one row; otherwise the right cluster wraps onto a
+        # second row instead of being silently cut off (the old fixed
+        # two-row bar lost Move/Wire/Calibrate at the 900 px minimum and on
+        # half-screen snapped windows). Rarely used layer toggles live in a
+        # "Layers" menu so the bar stays short.
+        toolbar_wrap = ttk.Frame(self.root, padding=(4, 2))
         toolbar_wrap.pack(side=tk.TOP, fill=tk.X)
-        toolbar = ttk.Frame(toolbar_wrap)
-        toolbar.pack(side=tk.TOP, fill=tk.X)
-        toolbar2 = ttk.Frame(toolbar_wrap)
-        toolbar2.pack(side=tk.TOP, fill=tk.X)
+        self._toolbar_wrap = toolbar_wrap
+        toolbar = ttk.Frame(toolbar_wrap)          # left cluster
+        toolbar2 = ttk.Frame(toolbar_wrap)         # right cluster
+        self._toolbar_left, self._toolbar_right = toolbar, toolbar2
+        toolbar_wrap.columnconfigure(1, weight=1)
+        toolbar.grid(row=0, column=0, sticky="w")
+        toolbar2.grid(row=0, column=2, sticky="e")
+        self._toolbar_wrapped = False
 
-        # Text-labelled buttons render reliably on Windows where emoji glyphs
-        # in ttk.Button silently fall back to empty squares. Width=None lets
-        # each button size to its label.
-        def _ttkbtn(text, cmd, tip, width=None):
-            kwargs = {"text": text, "command": cmd}
+        def _ttkbtn(text, cmd, tip, *, width=None, parent=None, style=None,
+                    underline=-1):
+            kwargs = {"text": text, "command": cmd, "underline": underline}
             if width is not None:
                 kwargs["width"] = width
-            b = ttk.Button(toolbar, **kwargs)
-            b.pack(side=tk.LEFT, padx=2, pady=4)
+            if style:
+                kwargs["style"] = style
+            b = ttk.Button(parent or toolbar, **kwargs)
+            b.pack(side=tk.LEFT, padx=2, pady=2)
             Tooltip(b, tip)
             return b
 
-        _ttkbtn("Open",  self._file_open,   "Open .zsmt / .drawio / .dxf / .svg  (Ctrl+O)")
-        _ttkbtn("Save",  self._save_drawio, "Save  (Ctrl+S)")
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        def _sep(parent):
+            ttk.Separator(parent, orient=tk.VERTICAL).pack(
+                side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
 
-        self._undo_btn = _ttkbtn("← Undo", self._undo, "Undo  (Ctrl+Z)")
-        self._redo_btn = _ttkbtn("Redo →", self._redo, "Redo  (Ctrl+Y)")
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        _ttkbtn("Open", self._file_open,
+                "Open a project (.zsmt) or drawing (.drawio / .dxf / .svg)  (Ctrl+O)")
+        _ttkbtn("Save", self._save_drawio, "Save  (Ctrl+S)")
+        _sep(toolbar)
+        self._undo_btn = _ttkbtn("Undo", self._undo, "Undo  (Ctrl+Z)")
+        self._redo_btn = _ttkbtn("Redo", self._redo, "Redo  (Ctrl+Y)")
+        _sep(toolbar)
 
-        _ttkbtn("Set Scale",
-                self._start_calibration,
-                "Set real-world scale by clicking a known dimension  (C)")
-        _ttkbtn("Fit",
-                lambda: (self._fit_image(), self._redraw()),
-                "Fit floor plan to viewport  (Home)")
-        _ttkbtn("Zoom +", lambda: self._zoom_button(1),  "Zoom in  (+)",  width=8)
-        _ttkbtn("Zoom −", lambda: self._zoom_button(-1), "Zoom out (-)", width=8)
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        # Mode switch — the most important control, so it gets a strong
+        # selected state (accent button) instead of a Toolbutton whose
+        # "on" look was indistinguishable from "off" under the dark theme.
+        seg = ttk.Frame(toolbar)
+        seg.pack(side=tk.LEFT, padx=2)
+        self._mode_buttons: dict[Mode, ttk.Button] = {}
+        # (Scale has ONE control: the scale button on the right, which
+        # is accented until the scale is set. Three different buttons
+        # used to start calibration.)
+        for m, label, tip in (
+            (Mode.MOVE,       "Move",      "Select and move devices  (M)"),
+            (Mode.WIRE,       "Wire",      "Draw a cable route from a device  (W)"),
+        ):
+            b = ttk.Button(seg, text=label,
+                           command=lambda mm=m: self._on_mode_radio(mm))
+            b.pack(side=tk.LEFT, padx=1, pady=2)
+            Tooltip(b, tip)
+            self._mode_buttons[m] = b
+        self.mode_var.trace_add("write",
+                                lambda *_: self._refresh_mode_buttons())
+        self._refresh_mode_buttons()
+        _sep(toolbar)
 
-        # Quick toggles — ROW 2 of the toolbar.
-        # Master layer-visibility toggles — quick way to declutter the
-        # canvas for a screenshot or focus on just one layer.
-        devs_btn = ttk.Checkbutton(
-            toolbar2, text="Devices", variable=self._show_devices,
-            style="Toolbutton", command=self._redraw,
-        )
-        devs_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(devs_btn,
-                "Show / hide ALL device symbols on the map. Off = floor "
-                "plan + wires only — useful for screenshots that focus "
-                "on cable runs.")
-        wires_btn = ttk.Checkbutton(
-            toolbar2, text="Wires", variable=self._show_wires,
-            style="Toolbutton", command=self._redraw,
-        )
-        wires_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(wires_btn,
-                "Show / hide ALL wire runs on the map. Off = clean "
-                "device layout view, e.g. for verifying placement "
-                "without route clutter.")
-        ids_btn = ttk.Checkbutton(
-            toolbar2, text="IDs", variable=self._show_device_ids,
-            style="Toolbutton", command=self._redraw,
-        )
-        ids_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(ids_btn, "Show device-ID labels above each icon on the map")
-        grid_btn = ttk.Checkbutton(
-            toolbar2, text="Grid", variable=self._show_grid,
-            style="Toolbutton", command=self._redraw,
-        )
-        grid_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(grid_btn, "Show alignment grid (5 ft / 1 m intervals)")
-        legend_btn = ttk.Checkbutton(
-            toolbar2, text="Legend", variable=self._show_legend,
-            style="Toolbutton", command=self._redraw,
-        )
-        legend_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(legend_btn, "Show / hide the auto-generated legend on the map")
-        fov_btn = ttk.Checkbutton(
-            toolbar2, text="FOV", variable=self._show_fov,
-            style="Toolbutton", command=self._redraw,
-        )
-        fov_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(fov_btn, "Show / hide camera FOV cones with DORI rings")
-        fov_gear = ttk.Button(toolbar2, text="⚙", width=2,
-                              style="Toolbutton",
-                              command=self._open_fov_settings_dialog)
-        fov_gear.pack(side=tk.LEFT, padx=(0, 2), pady=2)
-        Tooltip(fov_gear,
-                "FOV display settings — hide cones per camera type "
-                "(e.g. 360s), color, transparency, DORI detail.")
-        drops_btn = ttk.Checkbutton(
-            toolbar2, text="Drops", variable=self._show_drops,
-            style="Toolbutton", command=self._redraw,
-        )
-        drops_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(drops_btn,
-                "Show / hide cross-floor cable drop / riser points on the map.")
-        cam_only_btn = ttk.Checkbutton(
-            toolbar2, text="Cameras only", variable=self._cameras_only_var,
-            style="Toolbutton", command=self._on_cameras_only_toggle,
-        )
-        cam_only_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(cam_only_btn,
-                "Show only cameras on the map; hide all other device "
-                "types (card readers, motion sensors, door switches, …). "
-                "Per-type control is in the Devices tab.")
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        # Place ▾ — drop points, text labels, devices.
+        place_mb = ttk.Menubutton(toolbar, text="Place")
+        place_menu = tk.Menu(place_mb, tearoff=0)
+        place_menu.add_command(label="Drop / riser point",
+                               command=self._start_place_drop)
+        place_menu.add_command(label="Text label…",
+                               command=self._start_place_annotation)
+        place_menu.add_separator()
+        place_menu.add_command(
+            label="Device (pick in the Symbols tab)…",
+            command=lambda: self._notebook.select(2))
+        place_mb.configure(menu=place_menu)
+        place_mb.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(place_mb,
+                "Add something to the map: a cross-floor cable drop / riser "
+                "point, a text label, or a device from the Symbols tab.")
 
-        # Floor switcher — visible at all times so multi-floor mode is
-        # discoverable. Click pops a menu that lists every floor plus
-        # 'Add floor…' / 'Manage floors…' shortcuts so the user never
-        # has to hunt through the Floors menu.
+        # Layers ▾ — checkable menu of every map layer. The same variables
+        # back the View menu, so both stay in sync.
+        layers_mb = ttk.Menubutton(toolbar, text="Layers")
+        layers_menu = tk.Menu(layers_mb, tearoff=0)
+        for label, var in (("Devices", self._show_devices),
+                           ("Wires", self._show_wires),
+                           ("Device IDs", self._show_device_ids),
+                           ("Legend", self._show_legend),
+                           ("Camera FOV cones", self._show_fov),
+                           ("Drop / riser points", self._show_drops),
+                           ("Alignment grid", self._show_grid)):
+            layers_menu.add_checkbutton(label=label, variable=var,
+                                        command=self._redraw)
+        layers_menu.add_separator()
+        layers_menu.add_checkbutton(label="Cameras only",
+                                    variable=self._cameras_only_var,
+                                    command=self._on_cameras_only_toggle)
+        layers_menu.add_checkbutton(label="Mini-map",
+                                    variable=self._show_minimap,
+                                    command=self._apply_minimap_visibility)
+        layers_menu.add_separator()
+        layers_menu.add_command(label="FOV display settings…",
+                                command=self._open_fov_settings_dialog)
+        layers_mb.configure(menu=layers_menu)
+        layers_mb.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(layers_mb,
+                "Show or hide map layers: devices, wires, IDs, legend, FOV "
+                "cones, drop points, grid, mini-map.")
+
+        # ---- right cluster: floor, units, scale status, zoom
         self._floor_mb_var = tk.StringVar(value="Floor: —")
-        floor_mb = ttk.Menubutton(
-            toolbar, textvariable=self._floor_mb_var,
-            style="Toolbutton", width=22,
-        )
+        floor_mb = ttk.Menubutton(toolbar2, textvariable=self._floor_mb_var)
         self._floor_mb = floor_mb
         self._floor_mb_menu = tk.Menu(floor_mb, tearoff=0,
                                        postcommand=self._refresh_floor_mb_menu)
         floor_mb.configure(menu=self._floor_mb_menu)
-        floor_mb.pack(side=tk.LEFT, padx=4, pady=2)
+        floor_mb.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(floor_mb,
                 "Multi-floor projects: click to switch floors, add a new "
                 "floor, or align one floor to another's frame. Each floor "
                 "is its own .drawio — the project (.wiremap.json) bundles "
                 "them together. PgUp/PgDn also switches.")
         self._refresh_floor_mb_label()
-        add_drop_btn = ttk.Button(
-            toolbar, text="🪜 Drop", width=8,
-            command=self._start_place_drop, style="Toolbutton")
-        add_drop_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(add_drop_btn,
-                "Add a cross-floor cable drop / riser point: click here, "
-                "then click the map to place it. You'll pick which floors "
-                "it spans and its home floor.")
-        add_text_btn = ttk.Button(
-            toolbar, text="📝 Text", width=8,
-            command=self._start_place_annotation, style="Toolbutton")
-        add_text_btn.pack(side=tk.LEFT, padx=2, pady=2)
-        Tooltip(add_text_btn,
-                "Add a text label / note to the drawing: click here, set the "
-                "text, size and color, then click the map to place it. Labels "
-                "are per-floor, undoable, and right-click to edit. "
-                "(Also under Tools → Add Map Annotation.)")
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
-        # Mode segmented control
-        seg = ttk.Frame(toolbar)
-        seg.pack(side=tk.LEFT, padx=4, pady=2)
-        self._mode_buttons: dict[Mode, ttk.Radiobutton] = {}
-        for m, label, tip in (
-            (Mode.MOVE,       "Move",       "Move/select devices  (M)"),
-            (Mode.WIRE,       "Wire",       "Draw wire routes  (W)"),
-            (Mode.CALIBRATE,  "Calibrate",  "Set real-world scale  (C)"),
-        ):
-            rb = ttk.Radiobutton(
-                seg, text=label, value=m.name, variable=self.mode_var,
-                command=lambda mm=m: self._on_mode_radio(mm),
-                style="Toolbutton",
-            )
-            rb.pack(side=tk.LEFT, padx=1)
-            Tooltip(rb, tip)
-            self._mode_buttons[m] = rb
-
-        ttk.Separator(toolbar2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
-        ttk.Label(toolbar2, text="Units:").pack(side=tk.LEFT, padx=(4, 0))
-        # Imperial + metric in a single dropdown — keeps the toolbar tidy.
+        # Units ▾ — short caption, full descriptions in the menu.
         self._unit_choices = [
             ("Feet & Inches  (12'-6 1/2\")", "ft-in"),
             ("Inches  (150.50\")",            "inches"),
@@ -3488,40 +3463,41 @@ class CameraWireTool:
             ("Centimeters  (382.3 cm)",      "cm"),
             ("Meters & cm  (3 m 82.3 cm)",   "m-cm"),
         ]
+        _unit_short = {"ft-in": "ft-in", "inches": "in", "feet-dec": "ft",
+                       "meters": "m", "cm": "cm", "m-cm": "m-cm"}
         self._unit_label_var = tk.StringVar()
-        self._unit_combo = ttk.Combobox(
-            toolbar2, textvariable=self._unit_label_var,
-            values=[label for label, _val in self._unit_choices],
-            state="readonly", width=22,
-        )
-        self._unit_combo.pack(side=tk.LEFT, padx=4)
-        Tooltip(self._unit_combo, "Switch length-display units (imperial or metric)")
+        self._unit_short_var = tk.StringVar()
+        unit_mb = ttk.Menubutton(toolbar2, textvariable=self._unit_short_var)
+        unit_menu = tk.Menu(unit_mb, tearoff=0)
 
-        # Initial selection from existing unit_var
-        def _sync_combo_from_unit():
-            for lab, v in self._unit_choices:
-                if v == self.unit_var.get():
-                    self._unit_label_var.set(lab); return
-            self._unit_label_var.set(self._unit_choices[0][0])
-        _sync_combo_from_unit()
+        def _sync_unit_labels(*_):
+            v = self.unit_var.get()
+            for lab, val in self._unit_choices:
+                if val == v:
+                    self._unit_label_var.set(lab)
+                    break
+            else:
+                self._unit_label_var.set(self._unit_choices[0][0])
+            self._unit_short_var.set(f"Units: {_unit_short.get(v, v)}")
+        self.unit_var.trace_add("write", _sync_unit_labels)
+        _sync_unit_labels()
+        for lab, val in self._unit_choices:
+            unit_menu.add_radiobutton(label=lab, value=val,
+                                      variable=self.unit_var,
+                                      command=self._on_unit_change)
+        unit_mb.configure(menu=unit_menu)
+        unit_mb.pack(side=tk.LEFT, padx=2, pady=2)
+        Tooltip(unit_mb, "Length units for the map, lists and exports "
+                         "(imperial or metric)")
 
-        def _on_unit_combo(_e=None):
-            label = self._unit_label_var.get()
-            for lab, v in self._unit_choices:
-                if lab == label:
-                    self.unit_var.set(v); break
-            self._on_unit_change()
-        self._unit_combo.bind("<<ComboboxSelected>>", _on_unit_combo)
-
-        # Scale display: button-styled when unset (so it's obviously
-        # clickable), plain label after calibration. Click jumps straight
-        # into the calibration flow.
+        # Scale status: an accent call-to-action while unset, a plain
+        # "Scale set" readout afterwards. Click (re)starts calibration.
         self.scale_label = ttk.Button(
             toolbar2,
-            text="⚠ Scale not set — click to calibrate",
+            text="Set the scale",
             command=self._start_calibration,
         )
-        self.scale_label.pack(side=tk.LEFT, padx=10, pady=2)
+        self.scale_label.pack(side=tk.LEFT, padx=(6, 2), pady=2)
         Tooltip(self.scale_label,
                 "Without a scale, wire lengths show in pixels.\n"
                 "Click here, then click two points of a known dimension on "
@@ -3530,17 +3506,26 @@ class CameraWireTool:
                 "floor (project scale × alignment.scale). Aligned floors "
                 "share the calibration — set it once on the reference "
                 "floor and every aligned floor inherits it.")
+        _sep(toolbar2)
 
-        # Zoom percentage indicator — quietly tucked next to scale, useful
-        # for orientation. Updates every redraw.
+        # Zoom cluster: −  58%  +  Fit
+        _ttkbtn("−", lambda: self._zoom_button(-1), "Zoom out  (-)",
+                width=2, parent=toolbar2)
         self.zoom_indicator = ttk.Label(
-            toolbar2, text="Zoom: 100%",
-            font=("Consolas", 9), foreground="#888888",
+            toolbar2, text="100%", width=5, anchor=tk.CENTER,
+            style="Muted.TLabel",
         )
-        self.zoom_indicator.pack(side=tk.LEFT, padx=8, pady=2)
+        self.zoom_indicator.pack(side=tk.LEFT, padx=2, pady=2)
         Tooltip(self.zoom_indicator,
                 "Current viewport zoom.\n"
                 "Mouse wheel zooms toward cursor; Home fits to view; Z zooms to selection.")
+        _ttkbtn("+", lambda: self._zoom_button(1), "Zoom in  (+)",
+                width=2, parent=toolbar2)
+        _ttkbtn("Fit", lambda: (self._fit_image(), self._redraw()),
+                "Fit floor plan to the window  (Home)", parent=toolbar2)
+
+        toolbar_wrap.bind("<Configure>", lambda _e: self._reflow_toolbar())
+        self.root.after_idle(self._reflow_toolbar)
 
         # Live project totals moved to the STATUS BAR's right side (see
         # the statusbar block below) — they clipped off-screen when
@@ -3559,16 +3544,20 @@ class CameraWireTool:
             borderwidth=0, bg=bg_paned,
         )
         main.pack(fill=tk.BOTH, expand=True)
+        self._main_paned = main
 
         # Canvas
         canvas_frame = ttk.Frame(main)
         canvas_bg = "#1e1e1e" if _HAS_SVTTK else "#2b2b2b"
+        # "Next step" guide: the whole workflow in one line, each step
+        # clickable — 1 Set the scale → 2 Draw wires → 3 Export.
+        self._build_step_strip(canvas_frame)
         self.canvas = tk.Canvas(canvas_frame, bg=canvas_bg, highlightthickness=0,
                                 cursor="hand2")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         # Mini-map: overview canvas pinned to the canvas's top-right.
         # Sized comfortably for navigation without dominating the canvas.
-        self._minimap_w, self._minimap_h = 280, 180
+        self._minimap_w, self._minimap_h = 240, 150
         self.minimap = tk.Canvas(
             canvas_frame, width=self._minimap_w, height=self._minimap_h,
             bg="#0e0e0e", highlightthickness=1, highlightbackground="#888888",
@@ -3576,8 +3565,12 @@ class CameraWireTool:
         )
         # `place` instead of pack so it floats over the main canvas.
         # Honor the persisted show/hide pref from the previous session.
-        if self._show_minimap.get():
-            self.minimap.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
+        # Bottom-right: at the top it covered the mode banner and the
+        # plan's title block. Auto-hidden when the canvas is too narrow
+        # for it to leave the plan readable (see _place_minimap).
+        self.canvas.bind("<Configure>", lambda _e: self._place_minimap(),
+                         add="+")
+        self._place_minimap()
         self.minimap.bind("<ButtonPress-1>", self._minimap_click)
         self.minimap.bind("<B1-Motion>", self._minimap_click)
         self.minimap.bind("<Double-Button-1>",
@@ -3611,7 +3604,7 @@ class CameraWireTool:
         self._dev_search_var = tk.StringVar()
         s_frame = ttk.Frame(tab_dev)
         s_frame.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(s_frame, text="🔎").pack(side=tk.LEFT)
+        ttk.Label(s_frame, text="Filter:").pack(side=tk.LEFT)
         self._dev_search_entry = ttk.Entry(s_frame, textvariable=self._dev_search_var)
         self._dev_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         Tooltip(self._dev_search_entry,
@@ -3705,7 +3698,7 @@ class CameraWireTool:
         self._wire_search_var = tk.StringVar()
         ws_frame = ttk.Frame(tab_wire)
         ws_frame.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(ws_frame, text="🔎").pack(side=tk.LEFT)
+        ttk.Label(ws_frame, text="Filter:").pack(side=tk.LEFT)
         self._wire_search_entry = ttk.Entry(ws_frame, textvariable=self._wire_search_var)
         self._wire_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         Tooltip(self._wire_search_entry,
@@ -3810,7 +3803,7 @@ class CameraWireTool:
         self._sym_search_var = tk.StringVar()
         ss_frame = ttk.Frame(tab_sym)
         ss_frame.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(ss_frame, text="🔎").pack(side=tk.LEFT)
+        ttk.Label(ss_frame, text="Filter:").pack(side=tk.LEFT)
         self._sym_search_entry = ttk.Entry(ss_frame, textvariable=self._sym_search_var)
         self._sym_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         Tooltip(self._sym_search_entry,
@@ -4132,8 +4125,15 @@ class CameraWireTool:
             var.trace_add("write", _bom_input_changed)
 
         # Bottom breadcrumb status bar
+        # Packed BEFORE the main paned window (which expands): pack gives
+        # space in packing order, so a status bar packed after the canvas
+        # was the first widget squeezed out on 768 px-tall laptops and at
+        # 150 % DPI — taking the live totals and "Saved" feedback with it.
         self._statusbar = ttk.Frame(self.root)
-        self._statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._statusbar.pack(side=tk.BOTTOM, fill=tk.X,
+                             before=self._main_paned)
+        ttk.Separator(self._statusbar, orient=tk.HORIZONTAL).pack(
+            side=tk.TOP, fill=tk.X)
         self.status_label = ttk.Label(self._statusbar, text="", anchor=tk.W,
                                        font=("Segoe UI", 9))
         self.status_label.pack(side=tk.LEFT, padx=8, pady=2, fill=tk.X, expand=True)
@@ -4310,6 +4310,15 @@ class CameraWireTool:
         # action mode via the toolbar/keyboard wouldn't paint the banner
         # until the next unrelated redraw (motion, scroll, etc.).
         self._redraw()
+
+    def _refresh_mode_buttons(self) -> None:
+        """Accent the toolbar button of the active mode (placing a device
+        or label counts as neither, so no button is lit)."""
+        cur = self.mode_var.get()
+        for m, b in getattr(self, "_mode_buttons", {}).items():
+            with contextlib.suppress(tk.TclError):
+                b.configure(style=("Accent.TButton" if m.name == cur
+                                   else "TButton"))
 
     def _kbd_mode_move(self, event):
         if self._is_text_focus(event):
@@ -5433,7 +5442,7 @@ class CameraWireTool:
                      width=20).grid(row=r, column=1, sticky=tk.W, **pad)
         r += 1
 
-        ttk.Button(dlg, text="📏 Edit floor elevations / spacing…",
+        ttk.Button(dlg, text="Edit floor elevations / spacing…",
                    command=lambda: (dlg.destroy(),
                                     self._edit_elevations_dialog())).grid(
             row=r, column=0, columnspan=2, sticky=tk.W, **pad)
@@ -5843,12 +5852,12 @@ class CameraWireTool:
         m.add_command(label=f"{code} — {info['label']}  (x{n} placed)",
                        state=tk.DISABLED)
         m.add_separator()
-        m.add_command(label="📍  Place on map…",
+        m.add_command(label="Place on map…",
                        command=self._place_symbol_from_listbox)
-        m.add_command(label="✏️  Edit symbol…",
+        m.add_command(label="Edit symbol…",
                        command=self._edit_symbol_type)
         m.add_separator()
-        m.add_command(label="🗑  Delete symbol type…",
+        m.add_command(label="Delete symbol type…",
                        command=self._delete_symbol_type)
         try:
             m.tk_popup(event.x_root, event.y_root)
@@ -6602,7 +6611,7 @@ class CameraWireTool:
         if floor:
             self.canvas.create_text(
                 8, ch - 22, anchor=tk.SW,
-                text=f"👻 ghost: {floor.id} {floor.name}",
+                text=f"ghost: {floor.id} {floor.name}",
                 fill="#9fe0ff", font=("Segoe UI", 9, "bold"),
                 tags="ghost")
 
@@ -6688,7 +6697,7 @@ class CameraWireTool:
         # Zoom indicator updates with every redraw — cheap, accurate
         if hasattr(self, "zoom_indicator"):
             try:
-                self.zoom_indicator.config(text=f"Zoom: {self.zoom*100:.0f}%")
+                self.zoom_indicator.config(text=f"{self.zoom*100:.0f}%")
             except tk.TclError:
                 pass
 
@@ -6908,8 +6917,7 @@ class CameraWireTool:
             return
         try:
             if self._show_minimap.get():
-                self.minimap.place(relx=1.0, rely=0.0, anchor="ne",
-                                   x=-10, y=10)
+                self._place_minimap()
                 # Force a rebuild next redraw — its cached layer may be
                 # stale from everything that happened while hidden.
                 self._minimap_state_token = None
@@ -6917,6 +6925,53 @@ class CameraWireTool:
             else:
                 self.minimap.place_forget()
         except tk.TclError:
+            pass
+
+    # Below this canvas width the 280 px mini-map would hide too much of
+    # the plan (half of it on a 900 px window), so it steps aside.
+    _MINIMAP_MIN_CANVAS_W = 760
+
+    def _place_minimap(self) -> None:
+        """Pin the mini-map to the canvas's bottom-right corner when it is
+        enabled and the canvas is wide enough; otherwise unmap it."""
+        mm = getattr(self, "minimap", None)
+        if mm is None:
+            return
+        try:
+            cw = self.canvas.winfo_width()
+            show = (self._show_minimap.get()
+                    and (cw <= 1 or cw >= self._MINIMAP_MIN_CANVAS_W))
+            if show:
+                mm.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+            else:
+                mm.place_forget()
+        except tk.TclError:
+            pass
+
+    def _reflow_toolbar(self) -> None:
+        """Put the command bar's right cluster (floor / units / scale /
+        zoom) beside the primary controls when there is room, or on a
+        second row when there is not, so nothing is ever cut off."""
+        wrap = getattr(self, "_toolbar_wrap", None)
+        if wrap is None:
+            return
+        try:
+            avail = wrap.winfo_width()
+            if avail <= 1:
+                return
+            need = (self._toolbar_left.winfo_reqwidth()
+                    + self._toolbar_right.winfo_reqwidth() + 24)
+            wrapped = need > avail
+            if wrapped == self._toolbar_wrapped:
+                return
+            self._toolbar_wrapped = wrapped
+            if wrapped:
+                self._toolbar_right.grid_configure(row=1, column=0,
+                                                   columnspan=3, sticky="w")
+            else:
+                self._toolbar_right.grid_configure(row=0, column=2,
+                                                   columnspan=1, sticky="e")
+        except (tk.TclError, AttributeError):
             pass
 
     def _minimap_context_menu(self, event) -> None:
@@ -6981,26 +7036,26 @@ class CameraWireTool:
                 # '__annotation__' code in the banner.
                 ann_text = (self._placing_annotation or {}).get("text", "")
                 preview = f" '{ann_text}'" if ann_text else ""
-                msg = (f"📍  PLACEMENT MODE — click on the map to drop "
+                msg = (f"PLACEMENT MODE — click on the map to drop "
                        f"annotation{preview}.   Esc to cancel.")
             else:
                 info = self._safe_sym(self._place_type)
                 label = info.get("label", self._place_type)
-                msg = (f"📍  PLACEMENT MODE — click anywhere on the map to drop a "
+                msg = (f"PLACEMENT MODE — click anywhere on the map to drop a "
                        f"'{self._place_type}' ({label}).   Esc to cancel.")
         elif self.mode == Mode.CALIBRATE:
             n = len(self.cal_points)
-            msg = (f"📏  CALIBRATE — click point {n+1} of 2 on a known dimension. "
+            msg = (f"CALIBRATE — click point {n+1} of 2 on a known dimension. "
                    f"Esc to cancel.")
             bg = "#FF8C42"
         elif self.mode == Mode.WIRE:
             n = len(self.current_wire_points)
             if self.selected_device is not None:
-                msg = (f"📐  WIRE MODE — drawing for {self.selected_device['id']}. "
+                msg = (f"WIRE MODE — drawing for {self.selected_device['id']}. "
                        f"Click route points ({n} so far). Right-click to finish, "
                        f"Esc to cancel.")
             else:
-                msg = ("📐  WIRE MODE — click points to draw a wire. "
+                msg = ("WIRE MODE — click points to draw a wire. "
                        "Tip: right-click a device → 'Draw wire from here…' "
                        "to associate the wire with a device. Right-click to "
                        "finish, Esc to cancel.")
@@ -7566,15 +7621,29 @@ class CameraWireTool:
         two are the same; on aligned floors they differ by alignment.scale.
         """
         if self.scale_factor is None:
-            return "⚠ Scale not set — click to calibrate"
+            return "Set the scale"
         sf = self._effective_scale_factor() or self.scale_factor
         unit = self.unit_var.get()
         if unit in ("meters", "cm", "m-cm"):
             cm_per_px = sf / self._IN_PER_CM
             if cm_per_px < 1:
-                return f"Scale:  1 px = {cm_per_px*10:.3f} mm"
-            return f"Scale:  1 px = {cm_per_px:.3f} cm"
-        return f"Scale:  1 px = {sf:.4f}\""
+                return f"Scale set: 1 px = {cm_per_px*10:.2f} mm"
+            return f"Scale set: 1 px = {cm_per_px:.2f} cm"
+        return f"Scale set: 1 px = {sf:.3f}\""
+
+    def _refresh_scale_label(self) -> None:
+        """Update the toolbar scale button: an accent call-to-action while
+        the scale is unset (the first step of every project), a plain
+        readout once it is."""
+        lbl = getattr(self, "scale_label", None)
+        if lbl is None:
+            return
+        with contextlib.suppress(tk.TclError):
+            lbl.config(text=self._scale_label_text(),
+                       style=("Accent.TButton" if self.scale_factor is None
+                              else "TButton"))
+        with contextlib.suppress(AttributeError, tk.TclError):
+            self._refresh_step_strip()
 
     @staticmethod
     def _plural(n: int, singular: str, plural: str | None = None) -> str:
@@ -7968,7 +8037,7 @@ class CameraWireTool:
                 dlg.destroy()
                 return
             self._execute(CalibrateCmd(self, self.scale_factor, new_scale))
-            self.scale_label.config(text=self._scale_label_text())
+            self._refresh_scale_label()
             # Leave calibration state — same as cancel path so subsequent
             # clicks don't accumulate stale yellow dots.
             self.cal_points = []
@@ -10065,7 +10134,7 @@ class CameraWireTool:
     def _on_unit_change(self) -> None:
         # Update scale-label format
         if hasattr(self, "scale_label"):
-            self.scale_label.config(text=self._scale_label_text())
+            self._refresh_scale_label()
         self._refresh_wire_list()
         self._refresh_device_list()
         self._refresh_bom_tab()
@@ -10107,6 +10176,7 @@ class CameraWireTool:
                 "show_wires":       bool(self._show_wires.get()),
                 "show_drops":       bool(self._show_drops.get()),
                 "show_minimap":     bool(self._show_minimap.get()),
+                "show_steps":       bool(self._show_steps.get()),
                 "hidden_types":     sorted(self._hidden_types),
                 "fov_hidden_types": sorted(self._fov_hidden_types),
                 "fov_opacity":      self._fov_opacity,
@@ -10116,7 +10186,15 @@ class CameraWireTool:
             }
         except (tk.TclError, ValueError, AttributeError):
             return
-        save_settings(prefs)
+        # Merge over what is on disk so keys this code does not manage
+        # (window placement, remembered folders, keys from a newer
+        # version) survive every preference write.
+        merged = load_settings()
+        if not isinstance(merged, dict):
+            merged = {}
+        merged.update(getattr(self, "_ui_state", {}) or {})
+        merged.update(prefs)
+        save_settings(merged)
 
     def _build_cable_type_submenu(self, parent: tk.Menu,
                                     apply_fn) -> tk.Menu | None:
@@ -10216,11 +10294,11 @@ class CameraWireTool:
         n_selected = len(self.wire_listbox.curselection())
         m = tk.Menu(self.root, tearoff=0)
         if n_selected <= 1:
-            m.add_command(label="🔁  Re-route this wire",
+            m.add_command(label="Re-route this wire",
                           command=self._reroute_selected_wire)
-            m.add_command(label="🔗  Reassign device…",
+            m.add_command(label="Reassign device…",
                           command=self._reassign_selected_wire)
-            m.add_command(label="✂  Simplify (drop colinear points)",
+            m.add_command(label="Simplify (drop colinear points)",
                           command=self._simplify_selected_wire)
             # Center the wire on the map — matches the Center entry on
             # the device-list right-click. Uses the route midpoint via
@@ -10228,7 +10306,7 @@ class CameraWireTool:
             # harmless since we're already there).
             route_idx_for_jump = self._wire_index_for_listbox(idx)
             if route_idx_for_jump is not None:
-                m.add_command(label="🎯  Center on map",
+                m.add_command(label="Center on map",
                               command=lambda ri=route_idx_for_jump:
                                   self._jump_to_wire(ri))
             cable_sub = self._build_cable_type_submenu(
@@ -10238,7 +10316,7 @@ class CameraWireTool:
                 # the canvas right-click on a wire, so the user always sees
                 # what the override would change from.
                 route_idx = self._wire_index_for_listbox(idx)
-                cable_label = "🎚  Set cable type"
+                cable_label = "Set cable type"
                 if route_idx is not None:
                     route = self.wire_routes[route_idx]
                     if isinstance(route, dict):
@@ -10248,10 +10326,10 @@ class CameraWireTool:
                             self.symbol_types, self.cable_types,
                             project_default=self._proj_default_cable())
                         cur_cable = effective + ("" if explicit else " (auto)")
-                        cable_label = f"🎚  Cable type: {cur_cable}"
+                        cable_label = f"Cable type: {cur_cable}"
                 m.add_cascade(label=cable_label, menu=cable_sub)
             m.add_separator()
-            m.add_command(label="🗑  Delete wire",
+            m.add_command(label="Delete wire",
                           command=self._delete_selected_wire,
                           accelerator="Del")
         else:
@@ -10263,10 +10341,10 @@ class CameraWireTool:
                     list(self.wire_listbox.curselection()), cid))
             if cable_sub is not None:
                 m.add_cascade(
-                    label=f"🎚  Set cable type for all {n_selected}",
+                    label=f"Set cable type for all {n_selected}",
                     menu=cable_sub)
             m.add_separator()
-            m.add_command(label=f"🗑  Delete {n_selected} selected wires",
+            m.add_command(label=f"Delete {n_selected} selected wires",
                           command=lambda: self._delete_selected_wires_multi(
                               list(self.wire_listbox.curselection())),
                           accelerator="Del")
@@ -10525,6 +10603,101 @@ class CameraWireTool:
             )
 
         self.status_label.config(text="  •  ".join(parts))
+        self._refresh_step_strip()
+
+    # ---------------- Next-step guide (1 Scale → 2 Wires → 3 Export)
+    def _build_step_strip(self, parent) -> None:
+        bar = ttk.Frame(parent, padding=(8, 4))
+        self._steps_bar = bar
+        ttk.Label(bar, text="Next step:", style="Muted.TLabel").pack(
+            side=tk.LEFT, padx=(0, 6))
+        self._step_btns: list[ttk.Button] = []
+        cmds = (self._start_calibration,
+                self._step_wire_next_camera,
+                self._open_export_dialog)
+        tips = ("Set the real-world scale: click two ends of a known "
+                "dimension on the plan, then type its length.  (C)",
+                "Select the next camera without a wire and start a cable "
+                "route from it. Click route points, right-click to finish.",
+                "Export the map and cost summary as a PDF.")
+        for i, (cmd, tip) in enumerate(zip(cmds, tips, strict=True)):
+            if i:
+                ttk.Label(bar, text="›", style="Muted.TLabel").pack(
+                    side=tk.LEFT, padx=2)
+            b = ttk.Button(bar, text="", command=cmd, style="Toolbutton")
+            b.pack(side=tk.LEFT)
+            Tooltip(b, tip)
+            self._step_btns.append(b)
+        hide = ttk.Button(bar, text="Hide", style="Toolbutton",
+                          command=lambda: self._show_steps.set(False))
+        hide.pack(side=tk.RIGHT)
+        Tooltip(hide, "Hide this guide (View → Show Next-Step Guide brings "
+                      "it back).")
+        self._show_steps.trace_add("write",
+                                   lambda *_: self._apply_step_strip_visibility())
+        self._apply_step_strip_visibility()
+
+    def _apply_step_strip_visibility(self) -> None:
+        bar = getattr(self, "_steps_bar", None)
+        if bar is None:
+            return
+        try:
+            if self._show_steps.get():
+                if not bar.winfo_ismapped():
+                    kids = bar.master.pack_slaves()
+                    if kids:
+                        bar.pack(side=tk.TOP, fill=tk.X, before=kids[0])
+                    else:
+                        bar.pack(side=tk.TOP, fill=tk.X)
+                self._refresh_step_strip()
+            else:
+                bar.pack_forget()
+        except tk.TclError:
+            pass
+        self._persist_user_settings()
+
+    def _step_wire_next_camera(self) -> None:
+        """Step 2 of the guide: go to the next unwired camera and arm a
+        wire from it (or explain what is missing)."""
+        if self.scale_factor is None:
+            self._flash_status("Set the scale first (step 1) so wire lengths "
+                               "are real distances.", ttl_ms=4000)
+        self._jump_to_next_unwired_camera()
+        dev = self.selected_device
+        if (dev is not None and self._is_camera_type(dev.get("type"))
+                and dev.get("id") not in self._wired_device_ids()):
+            self._set_mode(Mode.MOVE)
+            self._set_mode(Mode.WIRE)
+
+    def _refresh_step_strip(self) -> None:
+        btns = getattr(self, "_step_btns", None)
+        if not btns:
+            return
+        try:
+            if not self._steps_bar.winfo_ismapped() and not self._show_steps.get():
+                return
+        except tk.TclError:
+            return
+        cams = [d for d in self.devices
+                if isinstance(d, dict) and self._is_camera_type(d.get("type"))]
+        wired = self._wired_device_ids()
+        n_wired = sum(1 for d in cams if d.get("id") in wired)
+        scale_ok = self.scale_factor is not None
+        wires_ok = bool(cams) and n_wired == len(cams)
+        if cams:
+            wire_txt = f"{n_wired} of {len(cams)} cameras wired"
+        else:
+            wire_txt = f"{self._plural(len(self.wire_routes), 'wire')} drawn"
+        texts = (("✓ Scale set" if scale_ok else "1  Set the scale"),
+                 (f"✓ Wires: {wire_txt}" if wires_ok
+                  else f"2  Draw wires ({wire_txt})"),
+                 "3  Export PDF")
+        # The first unfinished step is the one to do next: accent it.
+        nxt = 0 if not scale_ok else (1 if not wires_ok else 2)
+        for i, (b, t) in enumerate(zip(btns, texts, strict=True)):
+            with contextlib.suppress(tk.TclError):
+                b.configure(text=t, style=("Accent.TButton" if i == nxt
+                                           else "Toolbutton"))
 
     # ============================================================ File operations
     def _convert_cad_drawing(self, src: str) -> str | None:
@@ -12055,9 +12228,9 @@ class CameraWireTool:
                       f"home {drop.get('home_floor')}",
                 state=tk.DISABLED)
             menu.add_separator()
-            menu.add_command(label="✏  Edit drop point…",
+            menu.add_command(label="Edit drop point…",
                              command=lambda d=drop: self._edit_drop_dialog(d))
-            menu.add_command(label="🗑  Delete drop point",
+            menu.add_command(label="Delete drop point",
                              command=lambda d=drop: self._delete_drop(d))
             try:
                 menu.tk_popup(event.x_root, event.y_root)
@@ -12071,9 +12244,9 @@ class CameraWireTool:
             menu.add_command(label=f"Annotation: \"{ann['text']}\"",
                              state=tk.DISABLED)
             menu.add_separator()
-            menu.add_command(label="✏  Edit text / color / size…",
+            menu.add_command(label="Edit text / color / size…",
                              command=lambda a=ann: self._edit_annotation(a))
-            menu.add_command(label="🗑  Delete annotation",
+            menu.add_command(label="Delete annotation",
                              command=lambda a=ann: self._delete_annotation(a))
             try:
                 menu.tk_popup(event.x_root, event.y_root)
@@ -12117,20 +12290,20 @@ class CameraWireTool:
                             and 0 < wp_idx < pt_count - 1)
             if is_interior:
                 menu.add_command(
-                    label=f"🗑  Delete this waypoint  (#{wp_idx+1}/{pt_count})",
+                    label=f"Delete this waypoint  (#{wp_idx+1}/{pt_count})",
                     command=lambda r=route, i=wp_idx:
                         self._delete_waypoint_at(r, i),
                 )
             menu.add_command(
-                label="➕  Insert waypoint here",
+                label="Insert waypoint here",
                 command=lambda r=route, x=ix, y=iy:
                     self._insert_waypoint_at(r, x, y),
             )
-            menu.add_command(label="🔁  Re-route this wire",
+            menu.add_command(label="Re-route this wire",
                              command=self._reroute_selected_wire)
-            menu.add_command(label="✂  Simplify (drop colinear points)",
+            menu.add_command(label="Simplify (drop colinear points)",
                              command=self._simplify_selected_wire)
-            menu.add_command(label="🔗  Reassign to different device…",
+            menu.add_command(label="Reassign to different device…",
                              command=self._reassign_selected_wire)
             cable_sub = self._build_cable_type_submenu(
                 menu, self._set_selected_wire_cable_type)
@@ -12143,10 +12316,10 @@ class CameraWireTool:
                     self.symbol_types, self.cable_types,
                     project_default=self._proj_default_cable())
                 cur_cable = effective + ("" if explicit else " (auto)")
-                menu.add_cascade(label=f"🎚  Cable type: {cur_cable}",
+                menu.add_cascade(label=f"Cable type: {cur_cable}",
                                   menu=cable_sub)
             menu.add_separator()
-            menu.add_command(label="🗑  Delete wire",
+            menu.add_command(label="Delete wire",
                              command=self._delete_selected_wire,
                              accelerator="Del")
             try:
@@ -12170,7 +12343,7 @@ class CameraWireTool:
                     state=tk.DISABLED)
             menu.add_separator()
             menu.add_command(
-                label="📐  Draw wire from here…",
+                label="Draw wire from here…",
                 command=lambda d=dev: self._draw_wire_from(d),
             )
             wires_for_dev = [w for w in self.wire_routes
@@ -12183,12 +12356,12 @@ class CameraWireTool:
                 # 'Replace last' meaningless until you knew it would
                 # just enter draw-mode).
                 menu.add_command(
-                    label=f"🔁  Replace last wire "
+                    label=f"Replace last wire "
                           f"({self._plural(len(wires_for_dev), 'run')})",
                     command=lambda d=dev: self._reroute_last_wire_from(d),
                 )
                 menu.add_command(
-                    label=f"🗑  Clear all wires for this device "
+                    label=f"Clear all wires for this device "
                           f"({self._plural(len(wires_for_dev), 'run')})",
                     command=lambda d=dev: self._clear_wires_for_device(d),
                 )
@@ -12197,7 +12370,7 @@ class CameraWireTool:
             same_type = [d for d in self.devices if d["type"] == dev["type"]]
             if len(same_type) > 1:
                 menu.add_command(
-                    label=f"☑  Select all {len(same_type)} {dev['type']} "
+                    label=f"Select all {len(same_type)} {dev['type']} "
                           f"on this floor",
                     command=lambda devs=same_type:
                         self._select_devices_group(devs))
@@ -12211,8 +12384,8 @@ class CameraWireTool:
             ct_sub = self._build_change_type_submenu(menu, ct_devs)
             if ct_sub is not None:
                 menu.add_cascade(
-                    label=(f"🔁  Change type of {len(ct_devs)} selected ▶"
-                           if len(ct_devs) > 1 else "🔁  Change type ▶"),
+                    label=(f"Change type of {len(ct_devs)} selected"
+                           if len(ct_devs) > 1 else "Change type"),
                     menu=ct_sub)
             if (len(self.selected_devices) <= 1
                     and self._device_is_transformed(dev)):
@@ -12220,7 +12393,7 @@ class CameraWireTool:
                                  command=lambda d=dev: self._reset_device_transform(d))
             menu.add_separator()
             if info.get("is_camera"):
-                menu.add_command(label="📷  Edit FOV / DORI…",
+                menu.add_command(label="Edit FOV / DORI…",
                                  command=lambda d=dev: self._open_fov_dialog(d))
                 menu.add_command(
                     label=f"Apply default FOV for {dev['type']}",
@@ -12245,18 +12418,18 @@ class CameraWireTool:
                 cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
                               if isinstance(cur_m, dict) else "")
                 menu.add_cascade(
-                    label=(f"🎥  Assign model to {len(cam_targets)} selected ▶"
+                    label=(f"Assign model to {len(cam_targets)} selected"
                            if len(cam_targets) > 1
-                           else f"🎥  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
+                           else f"Assign model{(' ('+cur_m_name+')') if cur_m_name else ''}"),
                     menu=self._build_assign_model_submenu(menu, cam_targets))
                 menu.add_cascade(
-                    label=f"⭐  Default model for all {dev['type']} ▶",
+                    label=f"⭐  Default model for all {dev['type']}",
                     menu=self._build_assign_model_submenu(
                         menu, None, type_code=dev["type"]))
                 menu.add_separator()
-            del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
+            del_label = (f"Delete {len(self.selected_devices)} selected devices"
                          if len(self.selected_devices) > 1
-                         else "🗑  Delete device")
+                         else "Delete device")
             menu.add_command(label=del_label, command=self._on_delete_key,
                              accelerator="Del")
         else:
@@ -12268,18 +12441,18 @@ class CameraWireTool:
             n_wire = len(wire_sel)
             if n_dev > 0:
                 menu.add_command(
-                    label=f"🗑  Delete {self._plural(n_dev, 'selected device')}",
+                    label=f"Delete {self._plural(n_dev, 'selected device')}",
                     command=self._on_delete_key, accelerator="Del")
             if n_wire > 0:
                 menu.add_command(
-                    label=f"🗑  Delete {self._plural(n_wire, 'selected wire')}",
+                    label=f"Delete {self._plural(n_wire, 'selected wire')}",
                     command=lambda: (
                         self._delete_selected_wires_multi(list(wire_sel))
                         if n_wire > 1 else self._delete_selected_wire()),
                     accelerator="Del")
             if n_dev or n_wire:
                 menu.add_command(
-                    label="🔍 Fit to selection (Z)",
+                    label="Fit to selection (Z)",
                     command=self._kbd_zoom_to_selection)
                 menu.add_command(
                     label="Clear selection",
@@ -12291,24 +12464,24 @@ class CameraWireTool:
             # When scale isn't set, surface the calibration action right
             # where the user is right-clicking. Big first-time UX win.
             if self.scale_factor is None:
-                menu.add_command(label="📏  Set Scale (calibrate)…",
+                menu.add_command(label="Set Scale (calibrate)…",
                                  command=self._start_calibration)
                 menu.add_separator()
             # "Place here" submenu — drop a device at the right-click point
             # without making the user round-trip through the Symbols tab.
             place_menu = self._build_place_here_submenu(menu, ix, iy)
             if place_menu is not None:
-                menu.add_cascade(label="➕  Place device here…",
+                menu.add_cascade(label="Place device here…",
                                   menu=place_menu)
             # Annotations have no dependency on symbol_types, so surface the
             # "Place annotation here" entry even when the device submenu is
             # absent (catalog was emptied or hasn't loaded yet).
             menu.add_command(
-                label="📝  Place annotation here…",
+                label="Place annotation here…",
                 command=lambda: self._place_annotation_at(ix, iy))
             if self._project is not None:
                 menu.add_command(
-                    label="🪜  Add cable drop / riser point here…",
+                    label="Add cable drop / riser point here…",
                     command=lambda: self._create_drop_at(ix, iy))
             menu.add_separator()
             menu.add_command(label="Fit view",
@@ -12691,12 +12864,12 @@ class CameraWireTool:
         if hw_total > 0:
             n = sum(line.count for line in hw_inv)
             info_lines.append(
-                f"💲 Hardware ({self._plural(n, 'modeled device')}): "
+                f"Hardware ({self._plural(n, 'modeled device')}): "
                 f"{cur}{hw_total:,.2f}")
             # Wiring (cable+waste+tax) + hardware → the full project total.
             full_total = report.grand_total + hw_total
             info_lines.append(
-                f"🧾 FULL TOTAL (wiring + hardware): {cur}{full_total:,.2f}")
+                f"FULL TOTAL (wiring + hardware): {cur}{full_total:,.2f}")
         if warns:
             self._bom_totals_label.config(
                 text="\n  " + "\n  ".join(info_lines + warns),
@@ -12821,11 +12994,11 @@ class CameraWireTool:
                       state=tk.DISABLED)
         m.add_separator()
         m.add_command(
-            label=f"🔍  Highlight wires using {cable_id}",
+            label=f"Highlight wires using {cable_id}",
             command=lambda c=cable_id: self._highlight_wires_by_cable(c),
         )
         m.add_command(
-            label=f"✏️  Edit cable type {cable_id}…",
+            label=f"Edit cable type {cable_id}…",
             command=self._open_cable_types_editor,
         )
         try:
@@ -13263,28 +13436,28 @@ class CameraWireTool:
         m.add_command(label=f"{device['id']} ({device['type']} – {info.get('label','?')})",
                        state=tk.DISABLED)
         m.add_separator()
-        m.add_command(label="📐  Draw wire from here…",
+        m.add_command(label="Draw wire from here…",
                        command=lambda d=device: self._draw_wire_from(d))
         if wires:
-            m.add_command(label=f"🔁  Re-route last wire "
+            m.add_command(label=f"Re-route last wire "
                                  f"({self._plural(len(wires), 'run')}, "
                                  f"{self._format_length(wire_total_in)})",
                            command=lambda d=device: self._reroute_last_wire_from(d))
-            m.add_command(label=f"🗑  Clear all wires for this device "
+            m.add_command(label=f"Clear all wires for this device "
                                  f"({self._plural(len(wires), 'run')})",
                            command=lambda d=device: self._clear_wires_for_device(d))
         else:
             m.add_command(label="(no wires assigned yet)", state=tk.DISABLED)
         m.add_separator()
-        m.add_command(label="🎯  Center on map",
+        m.add_command(label="Center on map",
                        command=self._center_on_selected)
         # Mirrors the empty-canvas right-click 'Fit to selection' entry;
         # useful when the user has a multi-selection and wants to see
         # all of them at once.
-        m.add_command(label="🔍  Zoom to fit selection (Z)",
+        m.add_command(label="Zoom to fit selection (Z)",
                        command=self._kbd_zoom_to_selection)
         if info.get("is_camera"):
-            m.add_command(label="📷  Edit FOV / DORI…",
+            m.add_command(label="Edit FOV / DORI…",
                            command=lambda d=device: self._open_fov_dialog(d))
             m.add_command(
                 label=f"Apply default FOV for {device['type']}",
@@ -13311,18 +13484,18 @@ class CameraWireTool:
         cur_m_name = (cur_m.get("name") or cur_m.get("id", "")
                       if isinstance(cur_m, dict) else "")
         m.add_cascade(
-            label=(f"🏷  Assign model to {len(model_targets)} selected ▶"
+            label=(f"Assign model to {len(model_targets)} selected"
                    if len(model_targets) > 1
-                   else f"🏷  Assign model{(' ('+cur_m_name+')') if cur_m_name else ''} ▶"),
+                   else f"Assign model{(' ('+cur_m_name+')') if cur_m_name else ''}"),
             menu=self._build_assign_model_submenu(m, model_targets))
         m.add_cascade(
-            label=f"⭐  Default model for all {device['type']} ▶",
+            label=f"⭐  Default model for all {device['type']}",
             menu=self._build_assign_model_submenu(
                 m, None, type_code=device["type"]))
         same_type = [d for d in self.devices if d["type"] == device["type"]]
         if len(same_type) > 1:
             m.add_command(
-                label=f"☑  Select all {len(same_type)} {device['type']}",
+                label=f"Select all {len(same_type)} {device['type']}",
                 command=lambda devs=same_type:
                     self._select_devices_group(devs))
         dup_devs = self._selection_or(device)
@@ -13335,13 +13508,13 @@ class CameraWireTool:
         ct_sub = self._build_change_type_submenu(m, ct_devs)
         if ct_sub is not None:
             m.add_cascade(
-                label=(f"🔁  Change type of {len(ct_devs)} selected ▶"
-                       if len(ct_devs) > 1 else "🔁  Change type ▶"),
+                label=(f"Change type of {len(ct_devs)} selected"
+                       if len(ct_devs) > 1 else "Change type"),
                 menu=ct_sub)
         m.add_separator()
-        del_label = (f"🗑  Delete {len(self.selected_devices)} selected devices"
+        del_label = (f"Delete {len(self.selected_devices)} selected devices"
                      if len(self.selected_devices) > 1
-                     else "🗑  Delete device")
+                     else "Delete device")
         m.add_command(label=del_label, command=self._on_delete_key,
                        accelerator="Del")
         try:
@@ -13379,7 +13552,7 @@ class CameraWireTool:
             m, lambda cid: self._set_selected_wires_cable_type(group_rows, cid))
         if cable_sub is not None:
             m.add_cascade(
-                label=f"🎚  Set cable type for all {len(group_indices)}",
+                label=f"Set cable type for all {len(group_indices)}",
                 menu=cable_sub)
         m.add_command(
             label=f"Delete all "
@@ -13435,17 +13608,17 @@ class CameraWireTool:
         ct_sub = self._build_change_type_submenu(m, group_devs)
         if ct_sub is not None:
             m.add_cascade(
-                label=f"🔁  Change all {len(group_devs)} in group to ▶",
+                label=f"Change all {len(group_devs)} in group to",
                 menu=ct_sub)
         if t_code is not None:
             m.add_separator()
             if t_code in self._hidden_types:
-                m.add_command(label=f"👁  Show “{t_code}” on map",
+                m.add_command(label=f"Show “{t_code}” on map",
                               command=lambda c=t_code: self._toggle_type_hidden(c))
             else:
-                m.add_command(label=f"🚫  Hide “{t_code}” on map",
+                m.add_command(label=f"Hide “{t_code}” on map",
                               command=lambda c=t_code: self._toggle_type_hidden(c))
-            m.add_command(label=f"🎯  Show only “{t_code}”",
+            m.add_command(label=f"Show only “{t_code}”",
                           command=lambda c=t_code: self._show_only_type(c))
             m.add_command(label="Show all types",
                           command=self._show_all_types)
@@ -13518,13 +13691,13 @@ class CameraWireTool:
                     else 2 if s.get("is_run_point") else 1, c)
         for code in sorted(self.symbol_types, key=_cat):
             info = self._safe_sym(code)
-            tag = ("📷" if info.get("is_camera")
-                   else "🎯" if info.get("is_run_point") else "▫")
+            tag = ("●" if info.get("is_camera")
+                   else "◆" if info.get("is_run_point") else "▫")
             sub.add_command(
                 label=f"{tag} {code} — {info.get('label', code)}",
                 command=lambda c=code, ds=targets: self._apply_change_type(ds, c))
         sub.add_separator()
-        sub.add_command(label="➕ New device type…",
+        sub.add_command(label="New device type…",
                         command=lambda ds=targets: self._new_type_then_apply(ds))
         return sub
 
@@ -13642,7 +13815,7 @@ class CameraWireTool:
         if models:
             sub.add_separator()
         sub.add_command(
-            label="➕ New model…",
+            label="New model…",
             command=lambda: self._edit_model_dialog(
                 None,
                 on_saved=((lambda i: self._assign_model_to_devices(devices, i))
@@ -14375,11 +14548,11 @@ class CameraWireTool:
                 m.add_command(label=f"{marker}{f.id}  {f.name}",
                               command=lambda fid=f.id: self._switch_floor(fid))
         m.add_separator()
-        m.add_command(label="➕  Add floor…",
+        m.add_command(label="Add floor…",
                       command=self._add_floor_dialog)
         manage_state = tk.NORMAL if n_floors >= 1 else tk.DISABLED
         align_state = tk.NORMAL if n_floors >= 2 else tk.DISABLED
-        m.add_command(label="🖱  Drag-align (visual)…",
+        m.add_command(label="Drag-align (visual)…",
                       command=self._open_drag_align_dialog,
                       state=align_state)
         m.add_command(label="⇄  Align by anchor points…",
@@ -14389,14 +14562,14 @@ class CameraWireTool:
         m.add_command(label="↺  Clear alignment on active floor",
                       command=self._clear_active_floor_alignment,
                       state=(tk.NORMAL if n_floors >= 1 else tk.DISABLED))
-        m.add_command(label="👻  Toggle ghost overlay (show other floor)",
+        m.add_command(label="Toggle ghost overlay (show other floor)",
                       command=self._toggle_ghost_overlay,
                       state=align_state)
         m.add_separator()
-        m.add_command(label="🪜  Add cable drop / riser point…",
+        m.add_command(label="Add cable drop / riser point…",
                       command=self._start_place_drop,
                       state=manage_state)
-        m.add_command(label="📏  Floor elevations / spacing…",
+        m.add_command(label="Floor elevations / spacing…",
                       command=self._edit_elevations_dialog,
                       state=manage_state)
         m.add_command(label="⚙  Manage floors…",
@@ -14834,7 +15007,7 @@ class CameraWireTool:
         # The toolbar scale label shows the active floor's effective
         # inches-per-raw-pixel rate, so update it on every floor swap.
         if hasattr(self, "scale_label"):
-            self.scale_label.config(text=self._scale_label_text())
+            self._refresh_scale_label()
         # Preserve the viewport across the switch when the project's
         # floors share an aligned frame: (zoom, offset) are in shared
         # world coords, so leaving them untouched keeps the same physical
@@ -14909,7 +15082,7 @@ class CameraWireTool:
         self._refresh_wire_list()
         self._refresh_bom_tab()
         if hasattr(self, "scale_label"):
-            self.scale_label.config(text=self._scale_label_text())
+            self._refresh_scale_label()
         self._redraw()
         self._flash_status(
             f"{active.id} alignment cleared.", ttl_ms=3000)
@@ -15912,7 +16085,7 @@ class CameraWireTool:
                 # effective scale just changed → scale label needs to
                 # display the new inches-per-raw-pixel rate.
                 if hasattr(self, "scale_label"):
-                    self.scale_label.config(text=self._scale_label_text())
+                    self._refresh_scale_label()
             self._redraw()
             # If the project has a calibrated scale, the aligned floor
             # automatically shares it — pixels are in the reference's
@@ -16258,7 +16431,7 @@ class CameraWireTool:
                 f"Floor {target_id} deleted.", ttl_ms=3500)
 
         btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Button(btns, text="🗑  Delete selected floor",
+        ttk.Button(btns, text="Delete selected floor",
                    command=delete_selected).pack(side=tk.LEFT)
         ttk.Button(btns, text="Close",
                    command=dlg.destroy).pack(side=tk.RIGHT)
@@ -16367,11 +16540,7 @@ class CameraWireTool:
             return None
         finally:
             if minimap_mapped:
-                try:
-                    self.minimap.place(relx=1.0, rely=0.0, anchor="ne",
-                                       x=-10, y=10)
-                except tk.TclError:
-                    pass
+                self._place_minimap()
             self._redraw()
 
     def _render_map_image(self, *, symbol_scale: float = 1.0):
