@@ -3026,7 +3026,9 @@ class CameraWireTool:
         # Configure (resize / sash drag) is throttled HARD: don't redraw on
         # every event, just schedule a settle. Tk clips the existing canvas
         # content automatically, so dragging feels instant.
-        self.canvas.bind("<Configure>", lambda _e: self._on_canvas_configure())
+        # add="+": _build_ui already bound the mini-map's auto-hide here.
+        self.canvas.bind("<Configure>", lambda _e: self._on_canvas_configure(),
+                         add="+")
         # Right-click: finish/cancel wire, otherwise show context menu
         self.canvas.bind("<Button-3>", self._on_right_click_with_menu)
         # Double-click: open the most-relevant editor for the thing
@@ -4627,27 +4629,31 @@ class CameraWireTool:
         self._statusbar = ttk.Frame(self.root)
         self._statusbar.pack(side=tk.BOTTOM, fill=tk.X,
                              before=self._main_paned)
-        ttk.Separator(self._statusbar, orient=tk.HORIZONTAL).pack(
-            side=tk.TOP, fill=tk.X)
+        # Grid, not pack: when the window is narrow the hint text on the
+        # left gives way first and the live totals stay readable (with
+        # pack the totals were the part cut off at the minimum width).
+        ttk.Separator(self._statusbar, orient=tk.HORIZONTAL).grid(
+            row=0, column=0, columnspan=4, sticky="ew")
+        self._statusbar.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(self._statusbar, text="", anchor=tk.W,
                                        font="AppBody")
-        self.status_label.pack(side=tk.LEFT, padx=8, pady=2, fill=tk.X, expand=True)
+        self.status_label.grid(row=1, column=0, sticky="ew", padx=8, pady=2)
         self.cursor_label = ttk.Label(self._statusbar, text="", anchor=tk.E,
                                        font="AppMono", foreground="#888888")
-        self.cursor_label.pack(side=tk.RIGHT, padx=8, pady=2)
+        self.cursor_label.grid(row=1, column=3, sticky="e", padx=8, pady=2)
         # "Saved Xm ago / Modified" indicator — updates every 15s
         self.save_indicator = ttk.Label(
             self._statusbar, text="", anchor=tk.E,
             font="AppBody", foreground="#888888",
         )
-        self.save_indicator.pack(side=tk.RIGHT, padx=8, pady=2)
+        self.save_indicator.grid(row=1, column=2, sticky="e", padx=8, pady=2)
         # Live project totals (device/camera/wire counts, footage, cost).
         # Status bar right side: always visible, never fights the
         # toolbar's action buttons for horizontal space.
         self.total_toolbar_label = ttk.Label(
             self._statusbar, text="—", anchor=tk.E,
             font="AppStrong")
-        self.total_toolbar_label.pack(side=tk.RIGHT, padx=8, pady=2)
+        self.total_toolbar_label.grid(row=1, column=1, sticky="e", padx=8, pady=2)
         Tooltip(self.total_toolbar_label,
                 "Live project totals: device + camera count, "
                 "wire-run count, total cable footage, and grand-total cost "
@@ -11218,8 +11224,13 @@ class CameraWireTool:
     def _build_step_strip(self, parent) -> None:
         bar = ttk.Frame(parent, padding=(8, 4))
         self._steps_bar = bar
-        ttk.Label(bar, text="Next step:", style="Muted.TLabel").pack(
-            side=tk.LEFT, padx=(0, 6))
+        # Compact wording when the map pane is too narrow for the full
+        # guide (at the minimum window size step 3 was cut off).
+        self._steps_compact = False
+        self._steps_full_req = 0
+        self._steps_title = ttk.Label(bar, text="Next step:", style="Muted.TLabel")
+        self._steps_title.pack(side=tk.LEFT, padx=(0, 6))
+        bar.bind("<Configure>", self._on_steps_configure, add="+")
         self._step_btns: list[ttk.Button] = []
         cmds = (self._start_calibration,
                 self._step_wire_next_camera,
@@ -11278,6 +11289,25 @@ class CameraWireTool:
             self._set_mode(Mode.MOVE)
             self._set_mode(Mode.WIRE)
 
+    def _on_steps_configure(self, event) -> None:
+        bar = self._steps_bar
+        if not self._steps_compact:
+            # Remember how wide the full wording needs to be.
+            with contextlib.suppress(tk.TclError):
+                self._steps_full_req = max(self._steps_full_req,
+                                           bar.winfo_reqwidth())
+        want = bool(self._steps_full_req) and event.width < self._steps_full_req
+        if want == self._steps_compact:
+            return
+        self._steps_compact = want
+        with contextlib.suppress(tk.TclError):
+            if want:
+                self._steps_title.pack_forget()
+            else:
+                self._steps_title.pack(side=tk.LEFT, padx=(0, 6),
+                                       before=self._step_btns[0])
+        self._refresh_step_strip()
+
     def _refresh_step_strip(self) -> None:
         btns = getattr(self, "_step_btns", None)
         if not btns:
@@ -11293,14 +11323,21 @@ class CameraWireTool:
         n_wired = sum(1 for d in cams if d.get("id") in wired)
         scale_ok = self.scale_factor is not None
         wires_ok = bool(cams) and n_wired == len(cams)
-        if cams:
-            wire_txt = f"{n_wired} of {len(cams)} cameras wired"
+        if getattr(self, "_steps_compact", False):
+            short = (f"{n_wired}/{len(cams)}" if cams
+                     else str(len(self.wire_routes)))
+            texts = (("✓ Scale" if scale_ok else "1 Scale"),
+                     (f"✓ Wires {short}" if wires_ok else f"2 Wires {short}"),
+                     "3 Export")
         else:
-            wire_txt = f"{self._plural(len(self.wire_routes), 'wire')} drawn"
-        texts = (("✓ Scale set" if scale_ok else "1  Set the scale"),
-                 (f"✓ Wires: {wire_txt}" if wires_ok
-                  else f"2  Draw wires ({wire_txt})"),
-                 "3  Export PDF")
+            if cams:
+                wire_txt = f"{n_wired} of {len(cams)} cameras wired"
+            else:
+                wire_txt = f"{self._plural(len(self.wire_routes), 'wire')} drawn"
+            texts = (("✓ Scale set" if scale_ok else "1  Set the scale"),
+                     (f"✓ Wires: {wire_txt}" if wires_ok
+                      else f"2  Draw wires ({wire_txt})"),
+                     "3  Export PDF")
         # The first unfinished step is the one to do next: accent it.
         nxt = 0 if not scale_ok else (1 if not wires_ok else 2)
         for i, (b, t) in enumerate(zip(btns, texts, strict=True)):
