@@ -5498,7 +5498,47 @@ class CameraWireTool:
         except (tk.TclError, TypeError, ValueError, AttributeError):
             pass
 
+    def _background_work_running(self) -> bool:
+        """True while an export is being prepared or rendered."""
+        t = getattr(self, "_background_thread", None)
+        return (bool(getattr(self, "_pdf_export_busy", False))
+                or (t is not None and t.is_alive()))
+
+    def _stop_background_work(self, timeout: float = 15.0) -> bool:
+        """Cancel a running export and wait for its worker to stop, so
+        closing never kills it halfway through writing a file. Returns
+        False if the worker was still busy after `timeout` seconds."""
+        for name in ("_pdf_export_cancel", "_background_cancel"):
+            ev = getattr(self, name, None)
+            if ev is not None:
+                ev.set()
+        t = getattr(self, "_background_thread", None)
+        if t is None or not t.is_alive():
+            return True
+        with contextlib.suppress(tk.TclError):
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+        t.join(timeout)
+        if t.is_alive():
+            log_error("Export worker still running at close",
+                      RuntimeError(f"no stop after {timeout:.0f} s"))
+            return False
+        return True
+
     def _on_close(self) -> None:
+        # Closing used to kill a running export silently: the PDF was
+        # never written and nothing said so. Ask first, then stop it
+        # cleanly (it writes to a .tmp and renames, so a stopped export
+        # leaves no half-written file behind).
+        if self._background_work_running():
+            if not messagebox.askyesno(
+                    "Still working",
+                    "An export or import is still running.\n\n"
+                    "Stop it and close the app? Nothing will be saved "
+                    "from the stopped task.",
+                    parent=self.root):
+                return
+            self._stop_background_work()
         if not self._can_navigate_away():
             return
         self._flush_pending_settings()
@@ -18547,6 +18587,7 @@ class CameraWireTool:
                                     cancel=cancel)
 
         self._pdf_export_busy = True
+        self._pdf_export_cancel = cancel
         self.root.after(1, prepare_next)
 
     def _map_pdf_summary_kwargs(self, exported_state, hide_types, *,
@@ -18628,6 +18669,7 @@ class CameraWireTool:
 
         t = threading.Thread(target=run, daemon=True, name="cwt-export")
         self._background_thread = t
+        self._background_cancel = cancel
         t.start()
 
         def poll():
