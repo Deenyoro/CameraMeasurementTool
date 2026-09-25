@@ -3,6 +3,8 @@ never cut off, calibration dialog ready to type and forgiving input."""
 
 from __future__ import annotations
 
+import os
+import shutil
 import tkinter as tk
 
 import pytest
@@ -73,3 +75,32 @@ def test_calibration_dialog_focus_and_free_form_distance(gui_app):
     dlg.event_generate("<Return>")
     pump(root, 3)
     assert app.scale_factor == pytest.approx(366.0 / 100.0)
+
+
+def test_export_dialog_fits_a_1366x768_laptop_at_150_percent(tk_root, tmp_path):
+    """The Export PDF dialog of the 2-floor sample must fit the work area
+    of a 1366x768 screen at 150 % (it asked for 1764 px of width)."""
+    if not (cwt._HAS_EXPORT and getattr(cwt.export_mod, "_HAS_REPORTLAB", False)):
+        pytest.skip("reportlab not installed")
+    data = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "data")
+    for f in ("Floor1_Security_Measurements.drawio",
+              "Floor1_Security_Measurements.wiremap.json",
+              "Floor2_Security.drawio"):
+        shutil.copyfile(os.path.join(data, f), tmp_path / f)
+    tk_root.tk.call("tk", "scaling", 2.0)
+    cwt._init_fonts(tk_root)
+    app = cwt.CameraWireTool(
+        tk_root, str(tmp_path / "Floor1_Security_Measurements.drawio"))
+    tk_root.geometry("1366x705+0+0")
+    pump(tk_root, 5)
+    app._open_export_dialog()
+    pump(tk_root, 5)
+    dlg = _newest_toplevel(tk_root)
+    dlg.update_idletasks()
+    assert dlg.title() == "Export to PDF"
+    work_w, work_h = 1366, 768 - app._px(80)     # taskbar + title bar
+    assert dlg.winfo_reqwidth() <= work_w, dlg.winfo_reqwidth()
+    assert dlg.winfo_reqheight() <= work_h, dlg.winfo_reqheight()
+    dlg.destroy()
+

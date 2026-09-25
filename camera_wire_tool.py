@@ -18071,13 +18071,15 @@ class CameraWireTool:
         ttk.Label(dlg, text="Export to PDF",
                   font="AppTitle").pack(anchor=tk.W, padx=12, pady=(10, 2))
         ttk.Label(dlg, text="Each checked map view becomes its own full-view "
-                            "page (rendered at high resolution). Add a one-page "
-                            "summary at the end if you like.",
-                  wraplength=self._px(640), foreground="#7fc4ff",
+                            "page. Add a one-page summary at the end if you "
+                            "like.",
+                  wraplength=self._px(560), foreground="#7fc4ff",
                   font="AppBody").pack(anchor=tk.W, padx=12, pady=(0, 8))
-        # Two columns — what goes in the PDF on the left, what shows on the
-        # map on the right — so the dialog fits a 768 px-tall laptop (the
-        # single column was 792 px tall and pushed Export PDF off-screen).
+        # Two columns — what goes in the PDF on the left, which floors and
+        # what shows on the map on the right — so the dialog fits a
+        # 1366x768 laptop even at 150 % (the single column was 792 px tall
+        # and pushed Export PDF off-screen; the first two-column version
+        # was 1764 px wide at 150 %).
         body = ttk.Frame(dlg)
         body.pack(fill=tk.BOTH, expand=True, padx=6)
         col_l = ttk.Frame(body)
@@ -18101,7 +18103,7 @@ class CameraWireTool:
         # Only shown for multi-floor projects; default = current floor only.
         floor_vars: list[tuple] = []   # (BooleanVar, floor_id, floor_name)
         if self._project and len(self._project.floors) > 1:
-            ff = ttk.LabelFrame(col_l, text="Floors to export")
+            ff = ttk.LabelFrame(col_r, text="Floors to export")
             ff.pack(fill=tk.X, padx=6, pady=4)
             active_id = self._project.active_floor
             fr = ttk.Frame(ff); fr.pack(fill=tk.X, padx=4, pady=4)
@@ -18164,9 +18166,15 @@ class CameraWireTool:
         if types_present:
             tf = ttk.LabelFrame(opt_frame, text="Device types to show on map")
             tf.pack(fill=tk.X, padx=8, pady=(2, 8))
-            n_rows = (len(types_present) + 1) // 2
-            if n_rows > 8:
-                type_canvas = tk.Canvas(tf, height=180, highlightthickness=0)
+            # Two columns only when the screen has room for them (at 150 %
+            # on a 1366 px laptop two columns pushed the dialog off-screen).
+            n_cols = 2 if (dlg.winfo_screenwidth()
+                           >= self._px(1500)) else 1
+            n_rows = -(-len(types_present) // n_cols)
+            if n_rows > 6:
+                row_h = self._px(26)
+                type_canvas = tk.Canvas(tf, height=row_h * 6,
+                                        highlightthickness=0)
                 tsb = ttk.Scrollbar(tf, orient=tk.VERTICAL,
                                     command=type_canvas.yview)
                 type_canvas.configure(yscrollcommand=tsb.set)
@@ -18176,7 +18184,8 @@ class CameraWireTool:
                 inner = ttk.Frame(type_canvas)
                 type_canvas.create_window((0, 0), window=inner, anchor="nw")
                 inner.bind("<Configure>", lambda _e: type_canvas.configure(
-                    scrollregion=type_canvas.bbox("all")))
+                    scrollregion=type_canvas.bbox("all"),
+                    width=inner.winfo_reqwidth()))
                 type_canvas.bind(
                     "<MouseWheel>",
                     lambda e: type_canvas.yview_scroll(
@@ -18189,11 +18198,13 @@ class CameraWireTool:
                 type_vars[tc] = v
                 label = self._safe_sym(tc).get("label", tc)
                 cat = self._category_of(tc)
-                # 44-char budget (was 34 — truncated meaningful label
-                # text like 'Door Position Swit').
-                ttk.Checkbutton(inner, text=f"{tc} — {label} [{cat}]"[:44],
-                                variable=v).grid(row=n // 2, column=n % 2,
-                                                 sticky=tk.W, padx=4, pady=1)
+                # The category is in the tooltip (the category toggles
+                # above already group them); the label keeps 40 chars.
+                cb = ttk.Checkbutton(inner, text=f"{tc} — {label}"[:40],
+                                     variable=v)
+                cb.grid(row=n // n_cols, column=n % n_cols,
+                        sticky=tk.W, padx=4, pady=1)
+                Tooltip(cb, f"{label}  ·  category: {cat}")
 
         # --- Render options: symbol size + the page caption (toggle + edit).
         ro = ttk.LabelFrame(col_l, text="Render options")
@@ -18201,11 +18212,13 @@ class CameraWireTool:
         srow = ttk.Frame(ro); srow.pack(fill=tk.X, padx=8, pady=(6, 2))
         ttk.Label(srow, text="Symbol size:").pack(side=tk.LEFT)
         symbol_scale_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(srow, textvariable=symbol_scale_var, from_=0.5, to=4.0,
-                    increment=0.25, width=6, format="%.2f").pack(
-            side=tk.LEFT, padx=(6, 4))
-        ttk.Label(srow, text="×   (1.0 = original; raise to enlarge symbols)",
+        sym_spin = ttk.Spinbox(srow, textvariable=symbol_scale_var, from_=0.5,
+                               to=4.0, increment=0.25, width=6, format="%.2f")
+        sym_spin.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Label(srow, text="×  (1.0 = as drawn)",
                   foreground="#888888").pack(side=tk.LEFT)
+        Tooltip(sym_spin, "1.0 draws symbols at their original size; raise "
+                          "it to enlarge them on the exported map.")
         crow = ttk.Frame(ro); crow.pack(fill=tk.X, padx=8, pady=(2, 6))
         caption_on = tk.BooleanVar(value=True)
         ttk.Checkbutton(crow, text="Page caption (top-left):",
@@ -18214,7 +18227,7 @@ class CameraWireTool:
                             if self._project and self._project.project_name else "")
                            or os.path.splitext(os.path.basename(self.drawio_path))[0])
         caption_var = tk.StringVar(value=default_caption)
-        cap_entry = ttk.Entry(crow, textvariable=caption_var, width=34)
+        cap_entry = ttk.Entry(crow, textvariable=caption_var, width=26)
         cap_entry.pack(side=tk.LEFT, padx=(6, 0))
         def _sync_cap_state(*_):
             cap_entry.configure(
