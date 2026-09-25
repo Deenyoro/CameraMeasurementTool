@@ -11514,29 +11514,68 @@ class CameraWireTool:
     def _convert_cad_drawing(self, src: str) -> str | None:
         """Rasterize a DXF/SVG into a sibling .drawio and return its path.
 
-        Shows a busy cursor (rendering can take a few seconds on a dense
-        plan) and surfaces any failure as a dialog, returning None so the
-        caller aborts without disturbing the current project."""
+        The rendering (seconds on a dense plan — long enough for Windows
+        to call the window "Not Responding") runs on a worker thread
+        while a progress window keeps the UI alive; the Tk thread waits
+        in a local event loop, so callers still get the path back
+        directly. Failures show a dialog and return None so the caller
+        aborts without disturbing the current project. Cancel returns
+        None at once (the drawing is not opened)."""
         kind = os.path.splitext(src)[1].lstrip(".").upper()
         self._flash_status(f"Importing {kind} drawing — rendering…")
-        try:
-            self.root.config(cursor="watch")
-            self.root.update_idletasks()
-        except tk.TclError:
-            pass
-        try:
-            return cad_mod.convert_to_drawio(src)
-        except cad_mod.CadImportError as e:
-            log_error(f"CAD import failed: {src}", e)
+        cancel = threading.Event()
+        prog = _ProgressDialog(self, f"Import {kind} drawing",
+                               f"Importing {os.path.basename(src)}",
+                               on_cancel=cancel.set)
+        with contextlib.suppress(tk.TclError):
+            prog.detail.config(text="Rendering the drawing…")
+            prog.bar.config(mode="indeterminate")
+            prog.bar.start(20)
+        done = tk.BooleanVar(master=self.root, value=False)
+        out: dict = {}
+
+        def work(_report, _is_cancelled):
+            try:
+                return {"path": cad_mod.convert_to_drawio(src)}
+            except cad_mod.CadImportError as e:
+                return {"cad_error": e}
+            except Exception as e:
+                return {"error": e}
+
+        def on_done(res):
+            if not out:
+                out.update(res)
+            with contextlib.suppress(tk.TclError):
+                done.set(True)
+
+        def watch_cancel():
+            if done.get():
+                return
+            if cancel.is_set():
+                on_done({"cancelled": True})
+                return
+            with contextlib.suppress(tk.TclError):
+                self.root.after(100, watch_cancel)
+
+        self._run_in_background(work, on_done, cancel=cancel)
+        self.root.after(100, watch_cancel)
+        with contextlib.suppress(tk.TclError):
+            self.root.wait_variable(done)
+        with contextlib.suppress(tk.TclError):
+            prog.bar.stop()
+        prog.close()
+        if out.get("cancelled"):
+            self._flash_status(f"{kind} import cancelled — nothing was opened.",
+                               ttl_ms=3500)
+            return None
+        err = out.get("cad_error") or out.get("error")
+        if err is not None:
+            log_error(f"CAD import failed: {src}", err)
             messagebox.showerror(
                 "Couldn't import drawing",
-                f"{src}\n\n{e}\n\nThe current project is untouched.")
+                f"{src}\n\n{err}\n\nThe current project is untouched.")
             return None
-        finally:
-            try:
-                self.root.config(cursor="")
-            except tk.TclError:
-                pass
+        return out.get("path")
 
     def _file_open(self) -> None:
         if not self._can_navigate_away():
