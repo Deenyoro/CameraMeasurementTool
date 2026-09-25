@@ -37,27 +37,50 @@ files still load, and the new settings are optional.
   the first thing cut off on a 768 px-tall screen.
 - Dialogs size themselves to their content and to the display scale.
   Before, some lost their buttons at 150 %.
-- The mini-map hides again when the map is too narrow for it.
+- The mini-map hides again when the map is too narrow for it, and sits
+  in the bottom corner that covers the least of the plan (it used to
+  cover the drawing's own legend or key plan).
+- **Closing the window during an export asks first.** It used to kill
+  the export silently. Now you can keep it running, or stop it and
+  close; a stopped export writes nothing.
+- **Importing a DXF or SVG no longer freezes the window.** The drawing
+  renders in the background with a progress window and Cancel.
+- The BOM tab works at 150 % on a laptop. Before, its tables showed
+  headings and no rows, and names were cut to "Card Rea".
+- The Export to PDF dialog fits a 1366x768 screen at 150 %. Before, it
+  was 1764 px wide there.
+- Message boxes open over the dialog you are working in. On Windows
+  they could open behind it and look like a hang.
+- A tax rate of 1 means 1 %, not 100 %.
 
 ### Changed
 
 - The toolbar is one command bar: Open, Save, Undo, Redo, a Move/Wire
-  switch that clearly shows the current mode, Place, a Layers menu, and
-  floor, units, scale and zoom. It wraps to a second row only when the
-  window is too narrow.
+  switch that clearly shows the current mode (bold, with an accent bar
+  under it), Place, a Layers menu, and floor, units, scale and zoom. It
+  wraps to a second row only when the window is too narrow.
 - A "Next step" guide above the map shows the three steps: 1 set the
   scale, 2 draw wires ("n of m cameras wired"), 3 export. You can click
   each step, and you can hide the guide (new `show_steps` setting).
+  The next step is the only highlighted button on screen.
 - A start screen replaces the bare file dialog when there is no project
   to open. It has Open, a list of recent and nearby projects, and the
-  three steps. A file passed on the command line opens directly.
+  three steps. A file passed on the command line opens directly. The
+  list shows when each project was last changed and its folder relative
+  to your user folder.
 - The known-distance dialog is ready to type in, and it also accepts
   values such as `30'-6"`, `30 ft 6 in`, `3.5 m` and `350 cm`.
-- The BOM tab shows the wiring total at the top. All three tables and
-  every button fit on screen. The tax box takes 8 or 0.08 for 8 % and is
-  still saved as the decimal `tax_rate`.
+- The BOM tab shows the wiring total at the top, then one table at a
+  time (Cables, Device types or Models, with row counts) so the table
+  you are reading gets the height. On a short panel the cost breakdown
+  folds into one line. Number columns are never cut: the name column
+  gives way first, and on a very narrow panel the least useful column
+  (such as unit price) is hidden. The tax box takes 8 or 0.08 for 8 %,
+  shows what it means ("= 8 %", in orange above 20 %) and is still
+  saved as the decimal `tax_rate`.
 - The Export to PDF dialog has two columns so that it fits a 768 px
-  screen. After an export, a notice offers Open and Show in folder in
+  screen: what goes in the PDF on the left, floors and what shows on
+  the map on the right. After an export, a notice offers Open and Show in folder in
   place of a modal box.
 - Save dialogs start in the last export folder (new `last_export_dir`
   setting).
