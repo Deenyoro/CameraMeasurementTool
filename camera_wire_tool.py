@@ -5001,8 +5001,6 @@ class CameraWireTool:
             "Cleared missing entries from Open Recent.", ttl_ms=2500)
 
     def _open_recent(self, path: str) -> None:
-        if self._closing:
-            return
         if not os.path.exists(path):
             messagebox.showwarning("Missing", f"File no longer exists:\n{path}")
             return
@@ -5017,8 +5015,7 @@ class CameraWireTool:
             if err:
                 messagebox.showerror("Couldn't open bundle", err)
                 return
-            self._flush_pending_settings()
-            _relaunch(self.root, drawio, bundle_path=path)
+            self._open_in_new_window(drawio, bundle_path=path)
             return
         # Pre-flight parse BEFORE asking about unsaved changes — if the
         # file is malformed, the user shouldn't even be asked to discard
@@ -5031,8 +5028,17 @@ class CameraWireTool:
             return
         if not self._can_navigate_away():
             return
+        self._open_in_new_window(path)
+
+    def _open_in_new_window(self, path: str,
+                            bundle_path: str | None = None) -> None:
+        """Replace this window with one for `path` (Open, Open Recent) —
+        unless the user has chosen to close the app meanwhile (an import
+        that finished while closing must not reopen it)."""
+        if self._closing:
+            return
         self._flush_pending_settings()
-        _relaunch(self.root, path)
+        _relaunch(self.root, path, bundle_path=bundle_path)
 
     # ============================================================ Mode handling
     def _on_mode_radio(self, m: Mode) -> None:
@@ -11835,9 +11841,15 @@ class CameraWireTool:
         with contextlib.suppress(tk.TclError):
             prog.bar.stop()
         prog.close()
+        return self._finish_cad_import(src, kind, out, cancel.is_set())
+
+    def _finish_cad_import(self, src: str, kind: str, out: dict,
+                           cancelled: bool) -> str | None:
+        """Tk-thread half of _convert_cad_drawing: write the rendered
+        drawing and return its path, or say why not and return None."""
         # Cancel (or closing the app, which cancels too) wins over a
         # result that happened to arrive first: the user asked to stop.
-        if cancel.is_set() or out.get("cancelled") or self._closing:
+        if cancelled or out.get("cancelled") or self._closing:
             if not self._closing:
                 self._flash_status(
                     f"{kind} import cancelled — nothing was opened.",
@@ -11905,10 +11917,7 @@ class CameraWireTool:
                     "Couldn't open file",
                     f"{path}\n\n{err}\n\nThe current project is untouched.")
                 return
-        if self._closing:
-            return      # the app is closing; never reopen a window
-        self._flush_pending_settings()
-        _relaunch(self.root, path, bundle_path=bundle_path)
+        self._open_in_new_window(path, bundle_path=bundle_path)
 
     def _file_save_as(self) -> None:
         path = filedialog.asksaveasfilename(
