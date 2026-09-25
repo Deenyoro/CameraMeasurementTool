@@ -50,7 +50,10 @@ files still load, and the new settings are optional.
   cancelled import leaves no `.drawio` file behind, and only one import
   runs at a time.
 - The BOM tab works at 150 % on a laptop. Before, its tables showed
-  headings and no rows, and names were cut to "Card Rea".
+  headings and no rows, and names were cut to "Card Rea". Each table
+  shows its scrollbar, so rows below the fold (and the subtotals) are
+  visibly there, and hovering a row whose name is cut off shows it in
+  full.
 - The Export to PDF dialog fits a 1366x768 screen at 150 %. Before, it
   was 1764 px wide there.
 - Message boxes open over the dialog you are working in. On Windows

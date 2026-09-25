@@ -602,6 +602,60 @@ class Tooltip:
             self.tip = None
 
 
+class TreeTooltip(Tooltip):
+    """Tooltip for a Treeview. Over a row whose text is cut off (or whose
+    text column is hidden on a narrow panel) it shows that row's full
+    text; elsewhere it shows the general help `text`."""
+
+    def __init__(self, tree: ttk.Treeview, text_cols: tuple, text: str):
+        super().__init__(tree, text)
+        self.help = text
+        self.text_cols = text_cols
+        self._row: str | None = None
+        tree._row_tip = self
+        tree.bind("<Motion>", self._on_motion, add="+")
+        tree.bind("<Leave>", lambda _e: setattr(self, "_row", None), add="+")
+
+    def _on_motion(self, event) -> None:
+        try:
+            row = self.widget.identify_row(event.y)
+        except tk.TclError:
+            return
+        if row == self._row:
+            return
+        self._row = row
+        self._hide()
+        self.text = self.row_text(row) or self.help
+        self._schedule()
+
+    def row_text(self, row: str) -> str:
+        """The row's text columns, one per line, if any of them is cut
+        off or hidden; else ''."""
+        tree = self.widget
+        if not row:
+            return ""
+        try:
+            shown = tree.tk.splitlist(tree.cget("displaycolumns"))
+            if tuple(shown) == ("#all",):
+                shown = tree.cget("columns")
+            font = ttk.Style(tree).lookup("Treeview", "font") or "TkDefaultFont"
+            pad = int(round(12 * ui_scale(tree)))
+            parts, cut = [], False
+            for c in self.text_cols:
+                v = str(tree.set(row, c))
+                if not v:
+                    continue
+                if v not in parts:
+                    parts.append(v)
+                if (c not in shown
+                        or int(tree.tk.call("font", "measure", font, v)) + pad
+                        > int(tree.column(c, "width"))):
+                    cut = True
+        except (tk.TclError, ValueError):
+            return ""
+        return "\n".join(parts) if cut else ""
+
+
 # ============================================================ Command pattern (undo/redo)
 class Command(ABC):
     """A reversible operation. `do()` applies, `undo()` reverses."""
@@ -4562,15 +4616,19 @@ class CameraWireTool:
         sb_bom = ttk.Scrollbar(bom_frame, orient=tk.VERTICAL,
                                 command=self._bom_tree.yview)
         self._bom_tree.config(yscrollcommand=sb_bom.set)
-        self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Scrollbar packed FIRST: pack hands out space in packing order,
+        # and a tree packed first with expand took the whole width, so
+        # the scrollbar was never shown and rows past the bottom (MD with
+        # 46 cameras, the subtotals) were reachable only by the wheel.
         sb_bom.pack(side=tk.RIGHT, fill=tk.Y)
-        self._fit_tree_columns(self._bom_tree, "label", flex_chars=8,
+        self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._fit_tree_columns(self._bom_tree, "label",
                                drop_order=("rate", "runs"))
         self._bom_tree.bind("<Button-3>", self._on_bom_cable_rclick)
         # Double-click cable row → jump straight to the most useful action
         # (highlight all wires using that cable). No second click needed.
         self._bom_tree.bind("<Double-Button-1>", self._on_bom_cable_dclick)
-        Tooltip(self._bom_tree,
+        TreeTooltip(self._bom_tree, ("cable", "label"),
                 "Click column headers to sort. Double-click a row to "
                 "highlight every wire that uses that cable. Right-click "
                 "for more actions (edit cable, etc.).")
@@ -4607,6 +4665,7 @@ class CameraWireTool:
         sb_dev = ttk.Scrollbar(dev_frame, orient=tk.VERTICAL,
                                 command=self._bom_devices_tree.yview)
         self._bom_devices_tree.config(yscrollcommand=sb_dev.set)
+        sb_dev.pack(side=tk.RIGHT, fill=tk.Y)       # before the tree
         self._bom_devices_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._fit_tree_columns(self._bom_devices_tree, "label",
                                drop_order=("runs", "cable"))
@@ -4619,8 +4678,7 @@ class CameraWireTool:
         # default action without forcing the user through the right-click.
         self._bom_devices_tree.bind("<Double-Button-1>",
                                      self._on_bom_devices_dclick)
-        sb_dev.pack(side=tk.RIGHT, fill=tk.Y)
-        Tooltip(self._bom_devices_tree,
+        TreeTooltip(self._bom_devices_tree, ("code", "label", "cable"),
                 "Click column headers to sort. Double-click a row to "
                 "select every device of that type on the map. Right-"
                 "click for more actions (zoom-to-fit, edit symbol).")
@@ -4654,11 +4712,13 @@ class CameraWireTool:
         sb_model = ttk.Scrollbar(model_frame, orient=tk.VERTICAL,
                                  command=self._bom_models_tree.yview)
         self._bom_models_tree.config(yscrollcommand=sb_model.set)
+        sb_model.pack(side=tk.RIGHT, fill=tk.Y)     # before the tree
         self._bom_models_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._fit_tree_columns(self._bom_models_tree, "name", flex_chars=10,
-                               drop_order=("unit", "number"))
-        sb_model.pack(side=tk.RIGHT, fill=tk.Y)
-        Tooltip(self._bom_models_tree,
+        # "Model #" goes first on a narrow panel: the model name usually
+        # carries it, and the row tooltip shows it in full.
+        self._fit_tree_columns(self._bom_models_tree, "name",
+                               drop_order=("number", "unit"))
+        TreeTooltip(self._bom_models_tree, ("name", "number"),
                 "Hardware rollup by assigned camera model: quantity, unit "
                 "price, and line subtotal. Click headers to sort.")
 

@@ -177,7 +177,7 @@ def test_numbers_are_never_cut_to_fit_the_name(gui_app):
 
 def test_least_useful_columns_hide_before_numbers_are_cut(app_150):
     """Too narrow for every column even after shrinking: hide the least
-    useful ones (unit price, model number…) instead of cutting the
+    useful ones (model number, unit price…) instead of cutting the
     subtotal off at the right edge; they return when they fit again."""
     app = app_150
     root = app.root
@@ -192,7 +192,9 @@ def test_least_useful_columns_hide_before_numbers_are_cut(app_150):
     tree._refit()
     pump(root, 4)
     shown = _shown(tree)
-    assert "unit" not in shown and "subtotal" in shown and "name" in shown
+    # "Model #" goes first (the name usually carries it; the row tooltip
+    # shows it), then the unit price.
+    assert "number" not in shown and "subtotal" in shown and "name" in shown
     widths = sum(int(tree.column(c, "width")) for c in shown)
     assert widths <= tree.winfo_width()
     # Short values again: every column comes back.
@@ -215,3 +217,51 @@ def test_fit_column_widths_pure():
     # too tight even at minimums: hide in drop order
     hidden, w = cwt.fit_column_widths(180, nat, mins, 100, drop_order=("a", "b"))
     assert hidden == ["a"] and w == {"b": 80}
+
+
+@pytest.mark.parametrize("geometry", ["1280x720+0+0", "1920x1080+0+0"])
+def test_tables_show_their_scrollbar(app_150, geometry):
+    """The scrollbars were packed after an expanding tree and never got
+    any width: rows below the fold (MD with 46 cameras, the subtotals)
+    could only be reached with the mouse wheel, with no sign they
+    existed."""
+    app = app_150
+    root = app.root
+    root.geometry(geometry)
+    app._notebook.select(3)
+    pump(root, 6)
+    for key, tree in (("runs", app._bom_tree),
+                      ("types", app._bom_devices_tree),
+                      ("models", app._bom_models_tree)):
+        app._bom_view_var.set(key)
+        app._show_bom_view()
+        pump(root, 4)
+        sb = next(w for w in tree.master.winfo_children()
+                  if isinstance(w, cwt.ttk.Scrollbar))
+        assert sb.winfo_ismapped(), key
+        assert sb.winfo_width() >= 8, (key, sb.winfo_width())
+        assert (tree.winfo_rootx() + tree.winfo_width()
+                <= sb.winfo_rootx()), key
+
+
+def test_cut_off_row_text_shows_in_full_on_hover(app_150):
+    app = app_150
+    root = app.root
+    root.geometry("1280x720+0+0")
+    app._notebook.select(3)
+    app._bom_view_var.set("models")
+    app._show_bom_view()
+    pump(root, 6)
+    tree = app._bom_models_tree
+    long_name = "Hanwha PNM-C16083RVQ 4x5MP multi-sensor " * 3
+    iid = tree.insert("", "end", values=(long_name, "PNM-C16083RVQ", 2,
+                                         "$1.00", "$2.00"), tags=("model",))
+    short = tree.insert("", "end", values=("Cam", "X1", 1, "$9.00", "$9.00"),
+                        tags=("model",))
+    tree._refit()
+    pump(root, 3)
+    tip = tree._row_tip
+    text = tip.row_text(iid)
+    assert long_name.strip() in text and "PNM-C16083RVQ" in text
+    if "number" in _shown(tree):
+        assert tip.row_text(short) == ""
