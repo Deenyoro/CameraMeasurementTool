@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-A usability pass for Windows users: the window no longer freezes during
-exports, the main window and dialogs fit a 768 px laptop and 150 % display
-scaling, and the scale, wire and export steps are easier to follow.
-Project, drawing and export file formats are unchanged. Older settings
-files still load, and the new settings are optional.
+## [1.2.2] - 2026-09-25
+
+Patch release: a usability pass for Windows users. The window no longer
+freezes during exports and DXF/SVG imports, the main window and dialogs fit
+a 768 px laptop and 150 % display scaling, and the scale, wire and export
+steps are easier to follow. Project, drawing and export file formats are
+unchanged. Older settings files still load, and the new settings are
+optional. The app now reports version 1.2.2.
 
 ### Fixed
 
@@ -131,6 +134,22 @@ files still load, and the new settings are optional.
 - The app icon appears on every window.
 - Menu items no longer use emoji, which showed as empty boxes on
   Windows.
+- Opening a project in a new window (Open, Open Recent) goes through one
+  code path, which refuses once you have chosen to close the app. No
+  visible change.
+- Version bumped to 1.2.2 in `cwt/__init__.py`, `pyproject.toml`, the
+  Flatpak metainfo and the installer's default version.
+
+### Tests
+
+- New GUI tests check the window and dialog layouts at 100 % and 150 %
+  display scaling and at laptop sizes. Every test starts at the same
+  display scale (96 dpi) and un-maximised, so sizes mean the same on any
+  runner. A test that asks for a window larger than the screen is
+  skipped rather than measuring a window the OS shrank.
+- On the Windows CI runner the GUI tests are skipped unless
+  `CAMERA_TOOL_GUI_TESTS=1` is set, so a layout difference there cannot
+  block the release build. CI runs the same tests as in 1.2.1.
 
 ## [1.2.1] - 2026-09-24
 
