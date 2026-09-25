@@ -38,30 +38,45 @@ def test_step_guide_fits_when_narrow(gui_app):
     assert "Export PDF" in last.cget("text")
 
 
+def _zoom_in(app):
+    for _ in range(4):
+        app._zoom_button(+1)
+    pump(app.root, 4)
+
+
 def test_minimap_hides_when_the_map_is_narrow(gui_app):
     app = gui_app
     app._show_minimap.set(True)
     app.root.geometry("1600x800+0+0")
     settle(app.root, 300)
+    _zoom_in(app)
     assert app.minimap.winfo_ismapped()
     _narrow(app)
     assert not app.minimap.winfo_ismapped()
 
 
-def test_minimap_takes_the_bottom_corner_that_covers_least(gui_app):
+def test_minimap_shows_only_while_zoomed_in(gui_app):
+    """While the whole plan fits the view there is nothing to navigate
+    to, and the mini-map only covered part of the drawing (often its
+    Symbols legend or key plan)."""
     app = gui_app
-    app.root.geometry("1600x800+0+0")
     app._show_minimap.set(True)
-    pump(app.root, 6)
-    cw, ch = app.canvas.winfo_width(), app.canvas.winfo_height()
-    app.zoom = 1.0
-    # Plan in the bottom-right corner: the mini-map moves to bottom-left.
-    app.offset_x, app.offset_y = cw - app.img_w, ch - app.img_h
-    assert app._minimap_corner() == "sw"
-    # Plan in the bottom-left corner: it stays bottom-right.
-    app.offset_x, app.offset_y = 0, ch - app.img_h
-    assert app._minimap_corner() == "se"
-    # No overlap either way: bottom-right, as before.
-    app.offset_x, app.offset_y = cw / 2 - 20, 0
-    app.zoom = 0.1
-    assert app._minimap_corner() == "se"
+    app.root.geometry("1600x800+0+0")
+    settle(app.root, 300)
+    app._fit_image()
+    app._redraw()
+    pump(app.root, 4)
+    assert app._whole_plan_in_view()
+    assert not app.minimap.winfo_ismapped()
+    _zoom_in(app)
+    assert not app._whole_plan_in_view()
+    assert app.minimap.winfo_ismapped()
+    app._fit_image()
+    app._redraw()
+    pump(app.root, 4)
+    assert not app.minimap.winfo_ismapped()
+    # Turned off: stays off when zoomed in.
+    app._show_minimap.set(False)
+    app._apply_minimap_visibility()
+    _zoom_in(app)
+    assert not app.minimap.winfo_ismapped()

@@ -2124,8 +2124,8 @@ class CameraWireTool:
         self._cameras_only_var = tk.BooleanVar(value=False)
         # Cross-floor cable drop points layer toggle.
         self._show_drops = tk.BooleanVar(value=True)
-        # Mini-map overlay (top-right of the canvas). Hideable via its
-        # own right-click menu or View → Show Mini-map.
+        # Mini-map overlay (bottom-right of the canvas, while zoomed in).
+        # Hideable via its own right-click menu or the View menu.
         self._show_minimap = tk.BooleanVar(value=True)
         # "Next step" guide strip above the canvas (new optional setting
         # show_steps; absent = shown).
@@ -3865,7 +3865,7 @@ class CameraWireTool:
         view_menu.add_checkbutton(label="Show Alignment Grid",
                                   variable=self._show_grid,
                                   command=self._redraw)
-        view_menu.add_checkbutton(label="Show Mini-map",
+        view_menu.add_checkbutton(label="Show Mini-map When Zoomed In",
                                   variable=self._show_minimap,
                                   command=self._apply_minimap_visibility)
         view_menu.add_checkbutton(label="Show Next-Step Guide",
@@ -4096,7 +4096,7 @@ class CameraWireTool:
         layers_menu.add_checkbutton(label="Cameras only",
                                     variable=self._cameras_only_var,
                                     command=self._on_cameras_only_toggle)
-        layers_menu.add_checkbutton(label="Mini-map",
+        layers_menu.add_checkbutton(label="Mini-map (when zoomed in)",
                                     variable=self._show_minimap,
                                     command=self._apply_minimap_visibility)
         layers_menu.add_separator()
@@ -4224,8 +4224,8 @@ class CameraWireTool:
         self.canvas = tk.Canvas(canvas_frame, bg=canvas_bg, highlightthickness=0,
                                 cursor="hand2")
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        # Mini-map: overview canvas pinned to the canvas's top-right.
-        # Sized comfortably for navigation without dominating the canvas.
+        # Mini-map: overview canvas pinned to the canvas's bottom-right
+        # while zoomed in. Sized comfortably for navigation without dominating the canvas.
         self._minimap_w, self._minimap_h = 240, 150
         self.minimap = tk.Canvas(
             canvas_frame, width=self._minimap_w, height=self._minimap_h,
@@ -4235,8 +4235,8 @@ class CameraWireTool:
         # `place` instead of pack so it floats over the main canvas.
         # Honor the persisted show/hide pref from the previous session.
         # Bottom-right: at the top it covered the mode banner and the
-        # plan's title block. Auto-hidden when the canvas is too narrow
-        # for it to leave the plan readable (see _place_minimap).
+        # plan's title block. Auto-hidden while the whole plan is in view
+        # and when the canvas is too narrow for it (see _place_minimap).
         self.canvas.bind("<Configure>", lambda _e: self._place_minimap(),
                          add="+")
         self._place_minimap()
@@ -7280,7 +7280,7 @@ class CameraWireTool:
         # offset positions the aligned bounding box at the canvas center.
         self.offset_x = (cw - eff_w * self.zoom) / 2 - ax0 * self.zoom
         self.offset_y = (ch - eff_h * self.zoom) / 2 - ay0 * self.zoom
-        # The plan moved: re-pick the mini-map corner that covers least.
+        # The whole plan is in view now: the mini-map steps aside.
         if hasattr(self, "minimap"):
             self._place_minimap()
 
@@ -7719,6 +7719,10 @@ class CameraWireTool:
                 return   # hidden — skip the whole rebuild
         except (AttributeError, tk.TclError):
             pass
+        # Every pan/zoom lands here: show the mini-map only while part
+        # of the plan is out of view (see _place_minimap).
+        if not self._place_minimap():
+            return
         self._build_minimap_image()
         if self._minimap_photo is None:
             return
@@ -7821,11 +7825,15 @@ class CameraWireTool:
             return
         try:
             if self._show_minimap.get():
-                self._place_minimap()
+                shown = self._place_minimap()
                 # Force a rebuild next redraw — its cached layer may be
                 # stale from everything that happened while hidden.
                 self._minimap_state_token = None
                 self._redraw()
+                if not shown and self._whole_plan_in_view():
+                    self._flash_status(
+                        "The mini-map appears when you zoom in.",
+                        ttl_ms=3500)
             else:
                 self.minimap.place_forget()
         except tk.TclError:
@@ -7835,56 +7843,47 @@ class CameraWireTool:
     # the plan (half of it on a 900 px window), so it steps aside.
     _MINIMAP_MIN_CANVAS_W = 760
 
-    def _place_minimap(self) -> None:
-        """Pin the mini-map to the canvas's bottom-right corner when it is
-        enabled and the canvas is wide enough; otherwise unmap it."""
+    def _place_minimap(self) -> bool:
+        """Pin the mini-map to the canvas's bottom-right corner while it is
+        of use: enabled, the canvas wide enough, and the view zoomed in so
+        part of the plan is off screen. While the whole plan fits the view
+        there is nothing to navigate to, and the mini-map would only cover
+        part of the drawing (often its own legend or key plan). Returns
+        whether it is shown."""
         mm = getattr(self, "minimap", None)
         if mm is None:
-            return
+            return False
         try:
             cw = self.canvas.winfo_width()
             show = (self._show_minimap.get()
-                    and (cw <= 1 or cw >= self._MINIMAP_MIN_CANVAS_W))
-            if show:
-                if self._minimap_corner() == "sw":
-                    mm.place(relx=0.0, rely=1.0, anchor="sw", x=10, y=-10)
-                else:
-                    mm.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
-            else:
+                    and not getattr(self, "_minimap_suppressed", False)
+                    and (cw <= 1 or cw >= self._MINIMAP_MIN_CANVAS_W)
+                    and not self._whole_plan_in_view())
+            placed = mm.winfo_manager() == "place"
+            if show and not placed:
+                mm.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+            elif not show and placed:
                 mm.place_forget()
+            return bool(show)
         except tk.TclError:
-            pass
+            return False
 
-    def _minimap_corner(self) -> str:
-        """Bottom corner ("se" or "sw") where the mini-map covers the
-        least of the plan as it is currently fitted, so it doesn't sit on
-        the drawing's own legend or key plan. Bottom-right wins ties; the
-        top corners are never used (the mode banner lives there)."""
-        mm = self.minimap
+    def _whole_plan_in_view(self) -> bool:
+        """True when every corner of the floor plan is on the canvas (the
+        fitted view, or zoomed out further)."""
         try:
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            mw = mm.winfo_width() if mm.winfo_ismapped() else mm.winfo_reqwidth()
-            mh = mm.winfo_height() if mm.winfo_ismapped() else mm.winfo_reqheight()
-            xs, ys = [], []
+            if cw <= 1 or ch <= 1 or not self.img_w or not self.img_h:
+                return False
+            tol = 2.0
             for ix, iy in ((0.0, 0.0), (self.img_w, 0.0),
                            (0.0, self.img_h), (self.img_w, self.img_h)):
                 x, y = self._img_to_canvas(ix, iy)
-                xs.append(x)
-                ys.append(y)
+                if not (-tol <= x <= cw + tol and -tol <= y <= ch + tol):
+                    return False
         except (tk.TclError, AttributeError, TypeError):
-            return "se"
-        if cw <= 1 or ch <= 1:
-            return "se"
-        il, ir, it, ib = min(xs), max(xs), min(ys), max(ys)
-
-        def overlap(x0, y0):
-            w = max(0.0, min(ir, x0 + mw) - max(il, x0))
-            h = max(0.0, min(ib, y0 + mh) - max(it, y0))
-            return w * h
-        y0 = ch - 10 - mh
-        se = overlap(cw - 10 - mw, y0)
-        sw = overlap(10, y0)
-        return "sw" if sw < se else "se"
+            return False
+        return True
 
     def _reflow_toolbar(self) -> None:
         """Put the command bar's right cluster (floor / units / scale /
@@ -7921,8 +7920,8 @@ class CameraWireTool:
             command=lambda: (self._show_minimap.set(False),
                              self._apply_minimap_visibility(),
                              self._flash_status(
-                                 "Mini-map hidden — View → Show Mini-map "
-                                 "to bring it back.", ttl_ms=3500)))
+                                 "Mini-map hidden. Turn it back on in "
+                                 "the View menu.", ttl_ms=3500)))
         menu.add_separator()
         menu.add_command(label="Fit view",
                          command=lambda: (self._fit_image(), self._redraw()))
@@ -17757,6 +17756,7 @@ class CameraWireTool:
             pass
         try:
             if minimap_mapped:
+                self._minimap_suppressed = True
                 self.minimap.place_forget()
             self._redraw()
             self.root.update_idletasks()
@@ -17778,6 +17778,7 @@ class CameraWireTool:
             return None
         finally:
             if minimap_mapped:
+                self._minimap_suppressed = False
                 self._place_minimap()
             self._redraw()
 

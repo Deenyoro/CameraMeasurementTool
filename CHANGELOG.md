@@ -37,9 +37,10 @@ files still load, and the new settings are optional.
   the first thing cut off on a 768 px-tall screen.
 - Dialogs size themselves to their content and to the display scale.
   Before, some lost their buttons at 150 %.
-- The mini-map hides again when the map is too narrow for it, and sits
-  in the bottom corner that covers the least of the plan (it used to
-  cover the drawing's own legend or key plan).
+- The mini-map shows only while you are zoomed in, in the bottom-right
+  corner, and hides when the map is too narrow for it. While the whole
+  plan is in view there is nothing to navigate to, and it used to cover
+  part of the drawing, often its own legend or key plan.
 - **Closing the window during an export or import asks first.** It
   used to kill the export silently. Now you can keep it running, or stop
   it and close; a stopped task writes nothing. The window keeps
