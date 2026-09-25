@@ -54,12 +54,35 @@ def test_toolbar_single_row_when_wide(gui_app):
     assert gui_app._toolbar_wrapped is False
 
 
-def test_active_mode_button_is_accented(gui_app):
+def test_active_mode_button_is_marked(gui_app):
+    """The active mode is bold with an accent bar under it; it no longer
+    uses the accent BUTTON style, which is kept for the one next step."""
     app = gui_app
     app._set_mode(cwt.Mode.WIRE)
     pump(app.root)
-    assert str(app._mode_buttons[cwt.Mode.WIRE].cget("style")) == "Accent.TButton"
-    assert str(app._mode_buttons[cwt.Mode.MOVE].cget("style")) == "TButton"
+    wire, move = cwt.Mode.WIRE, cwt.Mode.MOVE
+    assert str(app._mode_buttons[wire].cget("style")) == "ModeActive.TButton"
+    assert str(app._mode_buttons[move].cget("style")) == "Mode.TButton"
+    assert app._mode_bars[wire].cget("bg") == cwt.ACCENT
+    assert app._mode_bars[move].cget("bg") != cwt.ACCENT
+    accented = [b for b in app._mode_buttons.values()
+                if str(b.cget("style")) == "Accent.TButton"]
+    assert accented == []
+
+
+def test_one_call_to_action_while_the_guide_shows(gui_app):
+    """With the next-step guide visible, "1 Set the scale" is the only
+    accented button; hiding the guide hands the accent back to the
+    toolbar scale button."""
+    app = gui_app
+    app._show_steps.set(True)
+    pump(app.root)
+    assert app.scale_factor is None
+    assert str(app._step_btns[0].cget("style")) == "Accent.TButton"
+    assert str(app.scale_label.cget("style")) == "TButton"
+    app._show_steps.set(False)
+    pump(app.root)
+    assert str(app.scale_label.cget("style")) == "Accent.TButton"
 
 
 def test_step_strip_tracks_progress(gui_app):

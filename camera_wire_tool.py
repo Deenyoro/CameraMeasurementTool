@@ -1564,6 +1564,21 @@ def apply_window_icon(root) -> None:
         pass
 
 
+# Accent colour of the dark theme (sv-ttk's accent blue): the selected
+# mode bar and similar "this one is on" marks.
+ACCENT = "#57c8ff"
+
+
+def _toolbar_bg(widget) -> str:
+    """The themed frame background, for plain tk widgets that sit on ttk
+    frames (the mode-indicator bar when it is off)."""
+    try:
+        bg = ttk.Style(widget).lookup("TFrame", "background")
+    except tk.TclError:
+        bg = ""
+    return bg or "#1c1c1c"
+
+
 def apply_theme(root: tk.Tk) -> None:
     # Route unhandled callback exceptions to the log + a messagebox.
     root.report_callback_exception = _tk_callback_exception
@@ -1578,7 +1593,8 @@ def apply_theme(root: tk.Tk) -> None:
     style = ttk.Style(root)
     try:
         style.configure("Mode.TButton", padding=(10, 4))
-        style.configure("ModeActive.TButton", padding=(10, 4), foreground="#ffffff")
+        style.configure("ModeActive.TButton", padding=(10, 4),
+                        foreground="#ffffff", font="AppStrong")
         style.configure("Muted.TLabel", foreground="#9a9a9a")
         if not _HAS_SVTTK:
             # sv-ttk ships an accent button; give the built-in themes an
@@ -3831,24 +3847,32 @@ class CameraWireTool:
         self._redo_btn = _ttkbtn("Redo", self._redo, "Redo  (Ctrl+Y)")
         _sep(toolbar)
 
-        # Mode switch — the most important control, so it gets a strong
-        # selected state (accent button) instead of a Toolbutton whose
-        # "on" look was indistinguishable from "off" under the dark theme.
+        # Mode switch — the most important control, so the active mode
+        # gets a clear selected state: bold text and an accent bar under
+        # it (a Toolbutton's "on" look was indistinguishable from "off"
+        # under the dark theme). The accent BUTTON style is kept for the
+        # one next-step call to action, so the two never compete.
         seg = ttk.Frame(toolbar)
         seg.pack(side=tk.LEFT, padx=2)
         self._mode_buttons: dict[Mode, ttk.Button] = {}
-        # (Scale has ONE control: the scale button on the right, which
-        # is accented until the scale is set. Three different buttons
-        # used to start calibration.)
+        self._mode_bars: dict[Mode, tk.Frame] = {}
+        # (Scale has ONE control: the scale button on the right. Three
+        # different buttons used to start calibration.)
         for m, label, tip in (
             (Mode.MOVE,       "Move",      "Select and move devices  (M)"),
             (Mode.WIRE,       "Wire",      "Draw a cable route from a device  (W)"),
         ):
-            b = ttk.Button(seg, text=label,
+            cell = ttk.Frame(seg)
+            cell.pack(side=tk.LEFT, padx=1, pady=(2, 0))
+            b = ttk.Button(cell, text=label, style="Mode.TButton",
                            command=lambda mm=m: self._on_mode_radio(mm))
-            b.pack(side=tk.LEFT, padx=1, pady=2)
+            b.pack(side=tk.TOP)
+            ind = tk.Frame(cell, height=max(2, self._px(3)),
+                           bg=_toolbar_bg(self.root), highlightthickness=0)
+            ind.pack(side=tk.TOP, fill=tk.X, padx=self._px(8))
             Tooltip(b, tip)
             self._mode_buttons[m] = b
+            self._mode_bars[m] = ind
         self.mode_var.trace_add("write",
                                 lambda *_: self._refresh_mode_buttons())
         self._refresh_mode_buttons()
@@ -4820,13 +4844,19 @@ class CameraWireTool:
         self._redraw()
 
     def _refresh_mode_buttons(self) -> None:
-        """Accent the toolbar button of the active mode (placing a device
-        or label counts as neither, so no button is lit)."""
+        """Mark the active mode's toolbar button: bold text plus an accent
+        bar underneath (placing a device or label counts as neither, so
+        no button is marked)."""
         cur = self.mode_var.get()
+        bars = getattr(self, "_mode_bars", {})
+        off = _toolbar_bg(self.root)
         for m, b in getattr(self, "_mode_buttons", {}).items():
+            on = m.name == cur
             with contextlib.suppress(tk.TclError):
-                b.configure(style=("Accent.TButton" if m.name == cur
-                                   else "TButton"))
+                b.configure(style=("ModeActive.TButton" if on
+                                   else "Mode.TButton"))
+                if m in bars:
+                    bars[m].configure(bg=ACCENT if on else off)
 
     def _kbd_mode_move(self, event):
         if self._is_text_focus(event):
@@ -8227,8 +8257,14 @@ class CameraWireTool:
         if lbl is None:
             return
         with contextlib.suppress(tk.TclError):
+            # Accented only when the next-step guide is hidden: with the
+            # guide showing, its "1 Set the scale" is THE call to action
+            # and a second loud button next to it just competes.
+            show_steps = getattr(self, "_show_steps", None)
+            guide_on = bool(show_steps.get()) if show_steps is not None else False
             lbl.config(text=self._scale_label_text(),
-                       style=("Accent.TButton" if self.scale_factor is None
+                       style=("Accent.TButton"
+                              if self.scale_factor is None and not guide_on
                               else "TButton"))
         with contextlib.suppress(AttributeError, tk.TclError):
             self._refresh_step_strip()
@@ -11274,6 +11310,7 @@ class CameraWireTool:
                 bar.pack_forget()
         except tk.TclError:
             pass
+        self._refresh_scale_label()
         self._persist_user_settings()
 
     def _step_wire_next_camera(self) -> None:
@@ -13015,8 +13052,8 @@ class CameraWireTool:
                         self._select_devices_group(devs))
             dup_devs = self._selection_or(dev)
             menu.add_command(
-                label=(f"⧉  Duplicate {len(dup_devs)} selected"
-                       if len(dup_devs) > 1 else "⧉  Duplicate device"),
+                label=(f"Duplicate {len(dup_devs)} selected"
+                       if len(dup_devs) > 1 else "Duplicate device"),
                 command=lambda ds=dup_devs: self._duplicate_devices(ds),
                 accelerator="Ctrl+D")
             ct_devs = self._selection_or(dev)
@@ -13028,7 +13065,7 @@ class CameraWireTool:
                     menu=ct_sub)
             if (len(self.selected_devices) <= 1
                     and self._device_is_transformed(dev)):
-                menu.add_command(label="↺  Reset size & rotation",
+                menu.add_command(label="Reset size & rotation",
                                  command=lambda d=dev: self._reset_device_transform(d))
             menu.add_separator()
             if info.get("is_camera"):
@@ -13062,7 +13099,7 @@ class CameraWireTool:
                            else f"Assign model{(' ('+cur_m_name+')') if cur_m_name else ''}"),
                     menu=self._build_assign_model_submenu(menu, cam_targets))
                 menu.add_cascade(
-                    label=f"⭐  Default model for all {dev['type']}",
+                    label=f"Default model for all {dev['type']}",
                     menu=self._build_assign_model_submenu(
                         menu, None, type_code=dev["type"]))
                 menu.add_separator()
@@ -14147,7 +14184,7 @@ class CameraWireTool:
                    else f"Assign model{(' ('+cur_m_name+')') if cur_m_name else ''}"),
             menu=self._build_assign_model_submenu(m, model_targets))
         m.add_cascade(
-            label=f"⭐  Default model for all {device['type']}",
+            label=f"Default model for all {device['type']}",
             menu=self._build_assign_model_submenu(
                 m, None, type_code=device["type"]))
         same_type = [d for d in self.devices if d["type"] == device["type"]]
@@ -14158,8 +14195,8 @@ class CameraWireTool:
                     self._select_devices_group(devs))
         dup_devs = self._selection_or(device)
         m.add_command(
-            label=(f"⧉  Duplicate {len(dup_devs)} selected"
-                   if len(dup_devs) > 1 else "⧉  Duplicate device"),
+            label=(f"Duplicate {len(dup_devs)} selected"
+                   if len(dup_devs) > 1 else "Duplicate device"),
             command=lambda ds=dup_devs: self._duplicate_devices(ds),
             accelerator="Ctrl+D")
         ct_devs = self._selection_or(device)
@@ -14480,10 +14517,10 @@ class CameraWireTool:
                           if devices is not None
                           else (lambda i: self._set_type_default_model(type_code, i)))))
         if devices is not None:
-            sub.add_command(label="↩ Use type default (clear override)",
+            sub.add_command(label="Use type default (clear override)",
                             command=lambda ds=devices: self._clear_device_models(ds))
         sub.add_separator()
-        sub.add_command(label="⚙ Manage models…",
+        sub.add_command(label="Manage models…",
                         command=self._manage_models_dialog)
         return sub
 
@@ -15214,11 +15251,11 @@ class CameraWireTool:
         m.add_command(label="Drag-align (visual)…",
                       command=self._open_drag_align_dialog,
                       state=align_state)
-        m.add_command(label="⇄  Align by anchor points…",
+        m.add_command(label="Align by anchor points…",
                       command=self._open_alignment_dialog,
                       state=align_state)
         m.add_separator()
-        m.add_command(label="↺  Clear alignment on active floor",
+        m.add_command(label="Clear alignment on active floor",
                       command=self._clear_active_floor_alignment,
                       state=(tk.NORMAL if n_floors >= 1 else tk.DISABLED))
         m.add_command(label="Toggle ghost overlay (show other floor)",
@@ -15231,7 +15268,7 @@ class CameraWireTool:
         m.add_command(label="Floor elevations / spacing…",
                       command=self._edit_elevations_dialog,
                       state=manage_state)
-        m.add_command(label="⚙  Manage floors…",
+        m.add_command(label="Manage floors…",
                       command=self._open_floor_manager,
                       state=manage_state)
 
