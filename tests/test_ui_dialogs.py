@@ -104,3 +104,28 @@ def test_export_dialog_fits_a_1366x768_laptop_at_150_percent(tk_root, tmp_path):
     assert dlg.winfo_reqheight() <= work_h, dlg.winfo_reqheight()
     dlg.destroy()
 
+
+def test_message_boxes_open_over_the_modal_dialog(gui_app, monkeypatch):
+    """A message box raised while a modal dialog is open is parented to
+    that dialog, so on Windows it can't open behind it."""
+    seen = {}
+
+    def fake(title=None, message=None, **kw):
+        seen.update(kw)
+    monkeypatch.setattr(cwt._tk_messagebox, "showinfo", fake)
+    # conftest stubs cwt.messagebox.showinfo; go through the real proxy
+    monkeypatch.delattr(cwt.messagebox, "showinfo", raising=False)
+    root = gui_app.root
+    dlg = tk.Toplevel(root)
+    dlg.transient(root)
+    pump(root, 3)
+    dlg.grab_set()
+    try:
+        cwt.messagebox.showinfo("Title", "Body")
+        assert seen["parent"] is dlg
+        seen.clear()
+        cwt.messagebox.showinfo("Title", "Body", parent=root)   # explicit wins
+        assert seen["parent"] is root
+    finally:
+        dlg.grab_release()
+        dlg.destroy()

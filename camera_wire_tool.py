@@ -48,7 +48,8 @@ from enum import Enum, auto
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import colorchooser, filedialog, font as tkfont, messagebox, ttk
+from tkinter import colorchooser, filedialog, font as tkfont, ttk
+from tkinter import messagebox as _tk_messagebox
 
 from PIL import Image, ImageTk
 
@@ -73,6 +74,49 @@ try:
 except ImportError:
     _HAS_EXPORT = False
     export_mod = None  # type: ignore
+
+
+def _active_window():
+    """The window the user is working in: the modal dialog holding the
+    grab, else the toplevel with keyboard focus, else the main window."""
+    root = getattr(tk, "_default_root", None)
+    if root is None:
+        return None
+    try:
+        for w in (root.grab_current(), root.focus_get()):
+            if w is not None:
+                top = w.winfo_toplevel()
+                if top.winfo_viewable():
+                    return top
+        return root if root.winfo_viewable() else None
+    except (tk.TclError, KeyError, AttributeError):
+        return None
+
+
+class _ParentedMessagebox:
+    """tkinter.messagebox, with parent= defaulting to the window the user
+    is working in. Without a parent, a box raised from a modal dialog
+    (Export PDF, Add Floor, Revisions…) could open BEHIND that dialog on
+    Windows and look like a hang. Functions are looked up on every call,
+    so replacing tkinter.messagebox.* (tests, the screenshot harness)
+    still works."""
+
+    def __getattr__(self, name):
+        fn = getattr(_tk_messagebox, name)
+        if not (callable(fn) and name.startswith(("show", "ask"))):
+            return fn
+
+        def call(*args, **kw):
+            if kw.get("parent") is None:
+                kw.pop("parent", None)
+                parent = _active_window()
+                if parent is not None:
+                    kw["parent"] = parent
+            return getattr(_tk_messagebox, name)(*args, **kw)
+        return call
+
+
+messagebox = _ParentedMessagebox()
 
 
 # ============================================================ Constants
@@ -2224,8 +2268,8 @@ class CameraWireTool:
                 sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
                 # Leave room for the taskbar and the title bar.
                 max_w, max_h = sw - self._px(24), sh - self._px(80)
-                w = min(max(rw, min_w), max_w)
-                h = min(max(rh, min_h), max_h)
+                w = min(max(rw, self._px(min_w)), max_w)
+                h = min(max(rh, self._px(min_h)), max_h)
                 parent = dlg.master if dlg.master is not None else self.root
                 try:
                     px_, py_ = parent.winfo_rootx(), parent.winfo_rooty()
@@ -2805,6 +2849,7 @@ class CameraWireTool:
             self._commit_revision(note="export")
             self._flush_revision_commit()
         dest = filedialog.asksaveasfilename(
+            parent=self.root,
             title="Export project bundle",
             initialdir=os.path.dirname(self.project_path),
             initialfile=os.path.basename(sidecar),
@@ -8704,7 +8749,7 @@ class CameraWireTool:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Enter Known Distance")
-        self._autosize_dialog(dlg, 520, 320)
+        self._autosize_dialog(dlg, 360, 0)   # content-sized
         dlg.transient(self.root)
         dlg.grab_set()
         # If the user closes the dialog without committing, reset the
@@ -11581,6 +11626,7 @@ class CameraWireTool:
         if not self._can_navigate_away():
             return
         path = filedialog.askopenfilename(
+            parent=self.root,
             title="Open project or drawing",
             initialdir=os.path.dirname(self.project_path),
             filetypes=[("Project or drawing",
@@ -11629,6 +11675,7 @@ class CameraWireTool:
 
     def _file_save_as(self) -> None:
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="Save .drawio As",
             initialdir=os.path.dirname(self.drawio_path),
             initialfile=os.path.basename(self.drawio_path),
@@ -12615,7 +12662,7 @@ class CameraWireTool:
         list and the autosave file."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Preferences")
-        self._autosize_dialog(dlg, 520, 440)
+        self._autosize_dialog(dlg, 420, 0)   # content-sized
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
@@ -12906,7 +12953,7 @@ class CameraWireTool:
     def _show_about(self) -> None:
         dlg = tk.Toplevel(self.root)
         dlg.title("About Camera Wire Tool")
-        self._autosize_dialog(dlg, 520, 460)
+        self._autosize_dialog(dlg, 420, 0)   # content-sized
         dlg.transient(self.root); dlg.grab_set()
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
