@@ -7167,6 +7167,9 @@ class CameraWireTool:
         # offset positions the aligned bounding box at the canvas center.
         self.offset_x = (cw - eff_w * self.zoom) / 2 - ax0 * self.zoom
         self.offset_y = (ch - eff_h * self.zoom) / 2 - ay0 * self.zoom
+        # The plan moved: re-pick the mini-map corner that covers least.
+        if hasattr(self, "minimap"):
+            self._place_minimap()
 
     def _get_viewport_image(self):
         cw = self.canvas.winfo_width() or 800
@@ -7730,11 +7733,45 @@ class CameraWireTool:
             show = (self._show_minimap.get()
                     and (cw <= 1 or cw >= self._MINIMAP_MIN_CANVAS_W))
             if show:
-                mm.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+                if self._minimap_corner() == "sw":
+                    mm.place(relx=0.0, rely=1.0, anchor="sw", x=10, y=-10)
+                else:
+                    mm.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
             else:
                 mm.place_forget()
         except tk.TclError:
             pass
+
+    def _minimap_corner(self) -> str:
+        """Bottom corner ("se" or "sw") where the mini-map covers the
+        least of the plan as it is currently fitted, so it doesn't sit on
+        the drawing's own legend or key plan. Bottom-right wins ties; the
+        top corners are never used (the mode banner lives there)."""
+        mm = self.minimap
+        try:
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            mw = mm.winfo_width() if mm.winfo_ismapped() else mm.winfo_reqwidth()
+            mh = mm.winfo_height() if mm.winfo_ismapped() else mm.winfo_reqheight()
+            xs, ys = [], []
+            for ix, iy in ((0.0, 0.0), (self.img_w, 0.0),
+                           (0.0, self.img_h), (self.img_w, self.img_h)):
+                x, y = self._img_to_canvas(ix, iy)
+                xs.append(x)
+                ys.append(y)
+        except (tk.TclError, AttributeError, TypeError):
+            return "se"
+        if cw <= 1 or ch <= 1:
+            return "se"
+        il, ir, it, ib = min(xs), max(xs), min(ys), max(ys)
+
+        def overlap(x0, y0):
+            w = max(0.0, min(ir, x0 + mw) - max(il, x0))
+            h = max(0.0, min(ib, y0 + mh) - max(it, y0))
+            return w * h
+        y0 = ch - 10 - mh
+        se = overlap(cw - 10 - mw, y0)
+        sw = overlap(10, y0)
+        return "sw" if sw < se else "se"
 
     def _reflow_toolbar(self) -> None:
         """Put the command bar's right cluster (floor / units / scale /
@@ -19541,7 +19578,10 @@ class StartScreen:
         box = ttk.LabelFrame(outer, text="Recent and nearby projects",
                              padding=(8, 4))
         box.grid(row=4, column=0, sticky="nsew", pady=(16, 0))
-        outer.rowconfigure(4, weight=1)
+        if items:
+            # Only a real list takes the spare height; an empty state is
+            # one line, not a big empty box.
+            outer.rowconfigure(4, weight=1)
         self.items = items
         self.tree = None
         if not items:
@@ -19549,16 +19589,21 @@ class StartScreen:
                       style="Muted.TLabel").pack(anchor="w", pady=4)
         else:
             k = ui_scale(root)
-            tree = ttk.Treeview(box, columns=("name", "folder"), show="headings",
+            tree = ttk.Treeview(box, columns=("name", "modified", "folder"),
+                                show="headings",
                                 height=min(len(items), self.MAX_ITEMS),
                                 selectmode="browse")
             tree.heading("name", text="Project", anchor="w")
+            tree.heading("modified", text="Modified", anchor="w")
             tree.heading("folder", text="Folder", anchor="w")
-            tree.column("name", width=round(240 * k), stretch=False, anchor="w")
-            tree.column("folder", width=round(380 * k), stretch=True, anchor="w")
+            tree.column("name", width=round(220 * k), stretch=False, anchor="w")
+            tree.column("modified", width=round(130 * k), stretch=False,
+                        anchor="w")
+            tree.column("folder", width=round(320 * k), stretch=True, anchor="w")
             for n, path in enumerate(items):
                 tree.insert("", "end", iid=str(n), values=(
-                    os.path.basename(path), os.path.dirname(path)))
+                    os.path.basename(path), self._modified_text(path),
+                    self._folder_text(path)))
             tree.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
             tree.bind("<Double-1>", lambda _e: self.open_selected())
             ttk.Label(box, text="Double-click a project, or select it and "
@@ -19574,6 +19619,39 @@ class StartScreen:
         ]
         with contextlib.suppress(tk.TclError):
             self.open_btn.focus_set()
+
+    @staticmethod
+    def _modified_text(path: str, now: float | None = None) -> str:
+        """'Today 14:05', 'Yesterday 09:12' or '2026-09-03' for a file."""
+        try:
+            ts = os.path.getmtime(path)
+        except OSError:
+            return ""
+        when = datetime.fromtimestamp(ts)
+        today = datetime.fromtimestamp(now if now is not None
+                                       else time.time()).date()
+        days = (today - when.date()).days
+        if days == 0:
+            return f"Today {when:%H:%M}"
+        if days == 1:
+            return f"Yesterday {when:%H:%M}"
+        return f"{when:%Y-%m-%d}"
+
+    @staticmethod
+    def _folder_text(path: str) -> str:
+        """The folder, relative to the user's home folder when it is inside
+        it (Documents > Jobs > Site, without the C:/Users/<name> prefix),
+        so the part that tells projects apart is what fits in the
+        column."""
+        folder = os.path.dirname(path)
+        home = os.path.expanduser("~")
+        try:
+            if home and os.path.commonpath([home, folder]) == home:
+                rest = os.path.relpath(folder, home)
+                return os.path.basename(home) if rest == "." else rest
+        except ValueError:            # different drives on Windows
+            pass
+        return folder
 
     def _on_return(self, _e=None) -> None:
         if (self.tree is not None and self.tree.selection()

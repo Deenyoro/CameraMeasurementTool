@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 
 import pytest
 
@@ -98,3 +99,24 @@ def test_opening_a_bundle_records_the_bundle_in_recents(tk_root, tmp_path):
     pump(tk_root)
     recents = json.loads(cwt.RECENT_FILES_PATH.read_text(encoding="utf-8"))
     assert recents[0] == str(zs)
+
+
+def test_start_screen_modified_and_short_folder(tmp_path, monkeypatch):
+    f = tmp_path / "Site.zsmt"
+    f.write_text("x")
+    now = time.mktime((2026, 9, 24, 15, 0, 0, 0, 0, -1))
+    os.utime(f, (now - 3600, now - 3600))
+    assert cwt.StartScreen._modified_text(str(f), now=now) == "Today 14:00"
+    os.utime(f, (now - 86400, now - 86400))
+    assert cwt.StartScreen._modified_text(str(f), now=now).startswith("Yesterday")
+    os.utime(f, (now - 30 * 86400, now - 30 * 86400))
+    assert cwt.StartScreen._modified_text(str(f), now=now) == "2026-08-25"
+    assert cwt.StartScreen._modified_text(str(tmp_path / "gone.zsmt")) == ""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    sub = tmp_path / "Jobs"
+    sub.mkdir()
+    assert cwt.StartScreen._folder_text(str(sub / "A.zsmt")) == "Jobs"
+    assert cwt.StartScreen._folder_text(str(f)) == tmp_path.name
+    other = "/elsewhere/Site/A.zsmt" if os.name != "nt" else r"Z:\Site\A.zsmt"
+    assert cwt.StartScreen._folder_text(other) == os.path.dirname(other)
