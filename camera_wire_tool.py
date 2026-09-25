@@ -1539,6 +1539,30 @@ def _init_fonts(root) -> None:
             "Treeview", rowheight=line + round(6 * ui_scale(root)))
 
 
+def fit_column_widths(avail: int, natural: dict, mins: dict,
+                      want_flex: int, drop_order=()) -> tuple[list, dict]:
+    """Widths for a table's fixed columns so the stretchy one keeps
+    `want_flex` px of `avail`: each column shrinks from `natural` towards
+    `mins` in proportion to its slack, and if the minimums still leave
+    too little, columns are hidden in `drop_order`. Returns (hidden
+    columns, {column: width} for the shown fixed columns)."""
+    hidden: list = []
+    for c in drop_order:
+        if sum(m for k, m in mins.items() if k not in hidden) + want_flex <= avail:
+            break
+        hidden.append(c)
+    shown = [c for c in natural if c not in hidden]
+    widths = {c: natural[c] for c in shown}
+    nat_sum = sum(widths.values())
+    if avail - nat_sum < want_flex:
+        slack = sum(natural[c] - mins[c] for c in shown)
+        need = nat_sum - max(0, avail - want_flex)
+        ratio = min(1.0, need / slack) if slack > 0 else 0.0
+        for c in shown:
+            widths[c] = int(natural[c] - (natural[c] - mins[c]) * ratio)
+    return hidden, widths
+
+
 def _app_icon_path() -> str | None:
     """The app icon PNG when running from source (frozen builds use the
     icon embedded in the exe instead)."""
@@ -2253,20 +2277,81 @@ class CameraWireTool:
             else:
                 frame.pack_configure(side=tk.BOTTOM)
 
-    def _fit_tree_columns(self, tree, flex_col: str) -> None:
-        """Keep a Treeview's columns inside its width: `flex_col` takes
-        whatever the other columns leave (ttk never shrinks a column below
-        its set width, so the right-most numbers used to be cut off)."""
-        def _on_configure(event):
+    def _fit_tree_columns(self, tree, flex_col: str,
+                          flex_chars: int = 14,
+                          drop_order: tuple = ()) -> None:
+        """Keep a Treeview's columns inside its width: `flex_col` (the
+        name column) takes whatever the other columns leave (ttk never
+        shrinks a column below its set width, so the right-most numbers
+        used to be cut off). When the panel is narrow, the other columns
+        give up width first, down to what their heading and values need,
+        so the name keeps about `flex_chars` characters instead of
+        "Card Rea". If even that does not fit, the columns in
+        `drop_order` are hidden one by one (least useful first) rather
+        than cutting numbers off at the right edge; they come back when
+        the panel is wider. Re-run after the rows change via
+        tree._refit()."""
+        cols = list(tree.cget("columns"))
+        natural = {c: int(tree.column(c, "width")) for c in cols}
+        style = ttk.Style(tree)
+        try:
+            hfont = style.lookup("Treeview.Heading", "font") or "TkHeadingFont"
+            bfont = style.lookup("Treeview", "font") or "TkDefaultFont"
+        except tk.TclError:
+            hfont, bfont = "TkHeadingFont", "TkDefaultFont"
+
+        def _measure(font, text: str) -> int:
             try:
-                cols = tree.cget("columns")
-                others = sum(int(tree.column(c, "width"))
-                             for c in cols if c != flex_col)
-                minw = int(tree.column(flex_col, "minwidth"))
-                tree.column(flex_col, width=max(minw, event.width - others - 4))
+                return int(tree.tk.call("font", "measure", font, text))
+            except (tk.TclError, ValueError):
+                return 7 * len(text)
+
+        def _needs(c, i):
+            # (heading incl. sort arrow, widest value) + cell padding
+            text = str(tree.heading(c, "text")).rstrip(" ▲▼")
+            head = _measure(hfont, text + " ▲")
+            val = 0
+            for iid in tree.get_children():
+                if "empty" in (tree.item(iid, "tags") or ()):
+                    continue            # placeholder message, not data
+                vals = tree.item(iid, "values")
+                if i < len(vals):
+                    val = max(val, _measure(bfont, str(vals[i])))
+            pad = self._px(10)
+            return head + pad, val + pad
+
+        def _fit(width):
+            try:
+                flex_min = int(tree.column(flex_col, "minwidth"))
+                want_flex = max(flex_min, _measure(hfont, "0") * flex_chars)
+                # A value wider than the designed width widens its column
+                # (it is never cut); the heading may shrink to fit.
+                nat, mins = {}, {}
+                for i, c in enumerate(cols):
+                    if c != flex_col:
+                        head, val = _needs(c, i)
+                        nat[c] = max(natural[c], val)
+                        mins[c] = min(nat[c], max(head, val))
+                hidden, widths = fit_column_widths(
+                    width - 4, nat, mins, want_flex, drop_order)
+                target = (tuple(c for c in cols if c not in hidden)
+                          if hidden else ("#all",))
+                if tuple(tree.tk.splitlist(tree.cget("displaycolumns"))) != target:
+                    tree.configure(displaycolumns=target)
+                for c, w in widths.items():
+                    tree.column(c, width=w)
+                rest = width - 4 - sum(widths.values())
+                tree.column(flex_col, width=max(flex_min, rest))
             except tk.TclError:
                 pass
-        tree.bind("<Configure>", _on_configure, add="+")
+
+        def _refit():
+            with contextlib.suppress(tk.TclError):
+                w = tree.winfo_width()
+                if w > 1:
+                    _fit(w)
+        tree._refit = _refit
+        tree.bind("<Configure>", lambda e: _fit(e.width), add="+")
 
     def _px(self, n: float) -> int:
         """Scale a 100 %-DPI pixel size (column widths, fixed boxes) to the
@@ -4365,8 +4450,9 @@ class CameraWireTool:
         # --- Tab 4: BOM ---
         tab_bom = ttk.Frame(notebook)
         notebook.add(tab_bom, text="BOM")
-        ttk.Label(tab_bom, text="Bill of Materials",
-                  font="AppHeading").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self._bom_heading = ttk.Label(tab_bom, text="Bill of Materials",
+                                      font="AppHeading")
+        self._bom_heading.pack(anchor=tk.W, padx=6, pady=(6, 2))
 
         # Cost adjustment row
         adj = ttk.Frame(tab_bom)
@@ -4377,10 +4463,14 @@ class CameraWireTool:
         Tooltip(ws_entry, "Waste multiplier (1.10 = 10% extra material)")
         ttk.Label(adj, text="Tax rate").pack(side=tk.LEFT)
         tax_entry = ttk.Entry(adj, textvariable=self._bom_tax_var, width=5)
-        tax_entry.pack(side=tk.LEFT, padx=(2, 8))
+        tax_entry.pack(side=tk.LEFT, padx=(2, 2))
         tax_entry.bind("<FocusOut>", self._normalize_tax_entry, add="+")
         tax_entry.bind("<Return>", self._normalize_tax_entry, add="+")
         Tooltip(tax_entry, "Sales tax rate: type 8 or 0.08 for 8 %")
+        # Live read-back of what the box means ("= 8 %"), so 0.5 vs 0.5 %
+        # is never a surprise; shown in the warning colour above 20 %.
+        self._bom_tax_hint = ttk.Label(adj, text="", style="Muted.TLabel")
+        self._bom_tax_hint.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(adj, text="Currency").pack(side=tk.LEFT)
         cur_entry = ttk.Entry(adj, textvariable=self._bom_currency_var, width=4)
         cur_entry.pack(side=tk.LEFT, padx=2)
@@ -4391,21 +4481,11 @@ class CameraWireTool:
         # change via _post_command_refresh; the variables also trigger a
         # refresh when their values change.)
 
-        # BOM table (Treeview) — cable totals
-        # The three tables share the space in a vertical split the user can
-        # drag, so all three stay on screen on a laptop (the third was
-        # squeezed out entirely at 768 px).
-        tables = ttk.PanedWindow(tab_bom, orient=tk.VERTICAL)
-        tables.pack(fill=tk.BOTH, expand=True)
-        pane_w = ttk.Frame(tables)
-        pane_d = ttk.Frame(tables)
-        pane_m = ttk.Frame(tables)
-        tables.add(pane_w, weight=1)
-        tables.add(pane_d, weight=2)
-        tables.add(pane_m, weight=1)
-        wiring_lbl = ttk.Label(pane_w, text="Wiring — cable runs",
-                               font="AppStrong")
-        wiring_lbl.pack(anchor=tk.W, padx=6, pady=(4, 0))
+        # BOM tables. ONE table is shown at a time, picked with a segmented
+        # switch, and it gets all the height left under the totals. Three
+        # stacked panes starved each other on a laptop: at 150 % the
+        # device and cable tables showed a header and zero rows.
+        switch, pane_w, pane_d, pane_m = self._build_bom_switch(tab_bom)
         bom_frame = ttk.Frame(pane_w)
         bom_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         cols = ("cable", "label", "runs", "ft", "rate", "subtotal")
@@ -4439,7 +4519,8 @@ class CameraWireTool:
         self._bom_tree.config(yscrollcommand=sb_bom.set)
         self._bom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb_bom.pack(side=tk.RIGHT, fill=tk.Y)
-        self._fit_tree_columns(self._bom_tree, "label")
+        self._fit_tree_columns(self._bom_tree, "label", flex_chars=8,
+                               drop_order=("rate", "runs"))
         self._bom_tree.bind("<Button-3>", self._on_bom_cable_rclick)
         # Double-click cable row → jump straight to the most useful action
         # (highlight all wires using that cable). No second click needed.
@@ -4450,8 +4531,6 @@ class CameraWireTool:
                 "for more actions (edit cable, etc.).")
 
         # Devices-by-symbol Treeview — count + cable + wire totals per type
-        ttk.Label(pane_d, text="By device type",
-                  font="AppStrong").pack(anchor=tk.W, padx=6, pady=(8, 0))
         dev_frame = ttk.Frame(pane_d)
         dev_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         dev_cols = ("code", "label", "count", "cable", "runs", "wire")
@@ -4484,7 +4563,8 @@ class CameraWireTool:
                                 command=self._bom_devices_tree.yview)
         self._bom_devices_tree.config(yscrollcommand=sb_dev.set)
         self._bom_devices_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._fit_tree_columns(self._bom_devices_tree, "label")
+        self._fit_tree_columns(self._bom_devices_tree, "label",
+                               drop_order=("runs", "cable"))
         # Right-click → jump-to / select all of this type. Without this
         # the device-inventory tree was display-only — asymmetric with
         # the cable tree above which DOES have a right-click menu.
@@ -4501,8 +4581,6 @@ class CameraWireTool:
                 "click for more actions (zoom-to-fit, edit symbol).")
 
         # By-camera-model Treeview — qty + unit price + subtotal per model
-        ttk.Label(pane_m, text="By camera model",
-                  font="AppStrong").pack(anchor=tk.W, padx=6, pady=(8, 0))
         model_frame = ttk.Frame(pane_m)
         model_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         model_cols = ("name", "number", "qty", "unit", "subtotal")
@@ -4532,7 +4610,8 @@ class CameraWireTool:
                                  command=self._bom_models_tree.yview)
         self._bom_models_tree.config(yscrollcommand=sb_model.set)
         self._bom_models_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._fit_tree_columns(self._bom_models_tree, "name")
+        self._fit_tree_columns(self._bom_models_tree, "name", flex_chars=10,
+                               drop_order=("unit", "number"))
         sb_model.pack(side=tk.RIGHT, fill=tk.Y)
         Tooltip(self._bom_models_tree,
                 "Hardware rollup by assigned camera model: quantity, unit "
@@ -4544,13 +4623,21 @@ class CameraWireTool:
         # The totals sit ABOVE the tables (the grand total is what people
         # open this tab for; at the bottom it was off-screen on a 768 px
         # laptop), and the buttons are pinned to the bottom edge.
-        ttk.Label(tab_bom,
-                  text="Cable cost (excludes camera hardware)",
-                  font="AppStrong",
-                  foreground="#7fc4ff").pack(anchor=tk.W, padx=8, pady=(6, 0),
-                                             before=tables)
+        self._bom_cost_caption = ttk.Label(
+            tab_bom, text="Cable cost (excludes camera hardware)",
+            font="AppStrong", foreground="#7fc4ff")
+        self._bom_cost_caption.pack(anchor=tk.W, padx=8, pady=(6, 0),
+                                    before=switch)
         totals_frame = ttk.Frame(tab_bom)
-        totals_frame.pack(fill=tk.X, padx=8, pady=(2, 0), before=tables)
+        totals_frame.pack(fill=tk.X, padx=8, pady=(2, 0), before=switch)
+        self._bom_totals_frame = totals_frame
+        # Short panels (a 768 px laptop, 150 % scaling) show the breakdown
+        # as this one line instead of the two-line pills and caption, so
+        # the table below keeps room for its rows.
+        self._bom_breakdown_line = ttk.Label(tab_bom, text="",
+                                             style="Muted.TLabel")
+        self._bom_compact = False
+        tab_bom.bind("<Configure>", self._on_bom_tab_configure, add="+")
         # Use plain tk.Label so we can color the pills individually
         self._bom_pill_subtotal = tk.Label(
             totals_frame, text="Cable Subtotal\n—", padx=10, pady=4,
@@ -4599,11 +4686,12 @@ class CameraWireTool:
                                             foreground="#FF8C42",
                                             font="AppBody")
         self._bom_totals_label.pack(anchor=tk.W, padx=8, pady=(0, 4),
-                                     fill=tk.X, before=tables)
+                                     fill=tk.X, before=switch)
+        self._show_bom_view()
 
         bom_btns = ttk.Frame(tab_bom)
         bom_btns.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6,
-                      before=tables)
+                      before=switch)
         # Two rows of two so all four fit the side panel: exports first.
         bom_btns.columnconfigure((0, 1), weight=1, uniform="bombtn")
         ct_btn = ttk.Button(bom_btns, text="Cable Types…",
@@ -13307,9 +13395,10 @@ class CameraWireTool:
     # ============================================================ BOM tab
     @staticmethod
     def _as_tax_rate(value: float) -> float:
-        """The tax field takes 8 or 0.08 for 8 %: anything above 1 is a
+        """The tax field takes 8 or 0.08 for 8 %: 1 or more is a
         percentage. Stored (tax_rate) as the decimal, as before."""
-        return value / 100.0 if value > 1 else value
+        # 1 or more is a percentage ("1" is 1 %, never 100 % tax).
+        return value / 100.0 if value >= 1 else value
 
     def _tax_rate(self) -> float:
         try:
@@ -13324,8 +13413,127 @@ class CameraWireTool:
             v = float(self._bom_tax_var.get())
         except (tk.TclError, ValueError):
             return
-        if v > 1:
+        if v >= 1:
             self._bom_tax_var.set(round(self._as_tax_rate(v), 6))
+
+    # ---------------- BOM tab layout: one table at a time + compact totals
+    def _build_bom_switch(self, tab_bom):
+        """The BOM tab's table switch and the stack of three table panes
+        (one shown at a time). Returns (switch, runs, types, models)."""
+        self._bom_view_var = tk.StringVar(value="runs")
+        switch = ttk.Frame(tab_bom)
+        switch.pack(fill=tk.X, padx=6, pady=(6, 0))
+        self._bom_view_btns: dict[str, ttk.Radiobutton] = {}
+        for key, text, tip in (
+            ("runs", "Cables",
+             "Cable totals per cable type: runs, feet, cost."),
+            ("types", "Device types",
+             "Count, cable and wire footage per device type."),
+            ("models", "Models",
+             "Hardware quantity and price per camera model."),
+        ):
+            rb = ttk.Radiobutton(switch, text=text, value=key,
+                                 variable=self._bom_view_var,
+                                 style="Toolbutton",
+                                 command=self._show_bom_view)
+            rb.pack(side=tk.LEFT, padx=(0, 2))
+            Tooltip(rb, tip)
+            self._bom_view_btns[key] = rb
+        # Selected-view marker under the switch (the Toolbutton "selected"
+        # look alone is too faint on the dark theme).
+        self._bom_view_bar = tk.Frame(switch, height=max(2, self._px(3)),
+                                      bg=ACCENT, highlightthickness=0)
+        tables = ttk.Frame(tab_bom)
+        tables.pack(fill=tk.BOTH, expand=True)
+        tables.rowconfigure(0, weight=1)
+        tables.columnconfigure(0, weight=1)
+        pane_w = ttk.Frame(tables)
+        pane_d = ttk.Frame(tables)
+        pane_m = ttk.Frame(tables)
+        for pane in (pane_w, pane_d, pane_m):
+            pane.grid(row=0, column=0, sticky="nsew")
+        self._bom_panes = {"runs": pane_w, "types": pane_d, "models": pane_m}
+        return switch, pane_w, pane_d, pane_m
+
+    _BOM_VIEW_TITLES = {"runs": "Cables", "types": "Device types",
+                        "models": "Models"}
+
+    def _show_bom_view(self) -> None:
+        """Raise the BOM table picked in the switch and move the accent
+        marker under its button."""
+        key = self._bom_view_var.get()
+        pane = getattr(self, "_bom_panes", {}).get(key)
+        if pane is None:
+            return
+        with contextlib.suppress(tk.TclError):
+            pane.tkraise()
+            btn = self._bom_view_btns[key]
+            bar = self._bom_view_bar
+            bar.place(in_=btn, relx=0, rely=1.0, relwidth=1.0,
+                      y=-bar.winfo_reqheight(), anchor="nw")
+            bar.lift()
+
+    def _refresh_bom_view_labels(self, report, cur: str = "$") -> None:
+        """Row counts in the switch labels ("Device types (13)"), the
+        one-line cost breakdown and the tax read-back."""
+        btns = getattr(self, "_bom_view_btns", None)
+        if not btns:
+            return
+        with contextlib.suppress(tk.TclError):
+            self._bom_breakdown_line.config(
+                text=f"Cable {cur}{report.subtotal:,.2f}  +  waste "
+                     f"{cur}{report.waste_added:,.2f}  +  tax "
+                     f"{cur}{report.tax_amount:,.2f}")
+            pct = report.tax_rate * 100
+            self._bom_tax_hint.config(
+                text=f"= {pct:g} %" if pct else "",
+                foreground=("#FF8C42" if pct > 20 else ""))
+
+        def _rows(tree, tags):
+            n = 0
+            for iid in tree.get_children():
+                if set(tree.item(iid, "tags") or ()) & tags:
+                    n += 1
+            return n
+        try:
+            counts = {
+                "runs": len(report.lines),
+                "types": _rows(self._bom_devices_tree, {"cam", "other"}),
+                "models": _rows(self._bom_models_tree, {"model"}),
+            }
+            for key, btn in btns.items():
+                title = self._BOM_VIEW_TITLES[key]
+                n = counts.get(key, 0)
+                btn.configure(text=f"{title} ({n})" if n else title)
+        except (tk.TclError, AttributeError):
+            pass
+        self._show_bom_view()
+
+    def _on_bom_tab_configure(self, event) -> None:
+        """Switch the totals block between the full layout (caption and
+        pills) and a compact one-line breakdown when the panel is short."""
+        compact = event.height < self._px(520)
+        if compact == self._bom_compact:
+            return
+        self._bom_compact = compact
+        with contextlib.suppress(tk.TclError):
+            if compact:
+                self._bom_heading.pack_forget()
+                self._bom_cost_caption.pack_forget()
+                self._bom_totals_frame.pack_forget()
+                self._bom_breakdown_line.pack(anchor=tk.W, padx=8,
+                                              pady=(0, 2),
+                                              before=self._bom_totals_label)
+            else:
+                self._bom_breakdown_line.pack_forget()
+                first = self._bom_pill_total.master.pack_slaves()[0]
+                self._bom_heading.pack(anchor=tk.W, padx=6, pady=(6, 2),
+                                       before=first)
+                self._bom_cost_caption.pack(anchor=tk.W, padx=8,
+                                            pady=(6, 0),
+                                            before=self._bom_pill_total)
+                self._bom_totals_frame.pack(fill=tk.X, padx=8, pady=(2, 0),
+                                            before=self._bom_totals_label)
 
     def _build_bom_report(self) -> bom_mod.BomReport:
         try:
@@ -13402,7 +13610,7 @@ class CameraWireTool:
             self._bom_tree.insert(
                 "", tk.END,
                 values=("—", "(no wire runs yet — draw a wire first)",
-                        "", "", "", ""))
+                        "", "", "", ""), tags=("empty",))
 
         # Per-symbol inventory (cameras + access + intrusion etc.)
         if hasattr(self, "_bom_devices_tree"):
@@ -13456,7 +13664,7 @@ class CameraWireTool:
                 self._bom_devices_tree.insert(
                     "", tk.END,
                     values=("—", "(no devices placed yet)",
-                            "", "", "", ""))
+                            "", "", "", ""), tags=("empty",))
             else:
                 # Subtotal rows
                 self._bom_devices_tree.insert(
@@ -13515,10 +13723,13 @@ class CameraWireTool:
                 hw_total += line.subtotal
                 hw_qty += line.count
             if not models:
+                # The message goes in the stretchy Model column; in the
+                # narrow Model # column it was cut off mid-sentence.
                 self._bom_models_tree.insert(
                     "", tk.END,
-                    values=("—", "(no models assigned — set models in the "
-                            "Devices tab or right-click a camera)", "", "", ""))
+                    values=("(no models assigned — set models in the "
+                            "Devices tab or right-click a camera)",
+                            "", "", "", ""), tags=("empty",))
             else:
                 self._bom_models_tree.insert(
                     "", tk.END,
@@ -13541,6 +13752,12 @@ class CameraWireTool:
                      f"{cur}{report.tax_amount:,.2f}")
             self._bom_pill_total.config(
                 text=f"Wiring total  {cur}{report.grand_total:,.2f}")
+        self._refresh_bom_view_labels(report, cur)
+        for tree in (self._bom_tree, getattr(self, "_bom_devices_tree", None),
+                     getattr(self, "_bom_models_tree", None)):
+            refit = getattr(tree, "_refit", None)
+            if refit is not None:
+                refit()
         # Bottom warning band: scale-not-set + unassigned-wires warnings
         # both surface here. Stale text is reset every refresh — without
         # the reset a fixed problem leaves the warning lingering.
