@@ -577,13 +577,12 @@ class Tooltip:
         # was hovered). winfo_rootx() raises TclError on a dead widget;
         # silently bail rather than spamming the log.
         try:
-            x = self.widget.winfo_rootx() + 20
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            x, below, above = self._anchor()
             self.tip = tk.Toplevel(self.widget)
         except tk.TclError:
             return
+        self.tip.withdraw()             # placed once its size is known
         self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{x}+{y}")
         lbl = tk.Label(
             self.tip, text=self.text, justify=tk.LEFT,
             background="#2d2d2d", foreground="#e0e0e0",
@@ -591,6 +590,40 @@ class Tooltip:
             padx=8, pady=4, wraplength=int(420 * ui_scale(self.widget)),
         )
         lbl.pack()
+        try:
+            self.tip.update_idletasks()
+            w, h = self.tip.winfo_reqwidth(), self.tip.winfo_reqheight()
+            sw = self.widget.winfo_screenwidth()
+            sh = self.widget.winfo_screenheight()
+            x, y = self.place_on_screen(x, below, above, size=(w, h),
+                                        screen=(sw, sh))
+            self.tip.wm_geometry(f"+{x}+{y}")
+            self.tip.deiconify()
+        except tk.TclError:
+            self._hide()
+
+    def _anchor(self) -> tuple[int, int, int]:
+        """(x, top edge if shown below, bottom edge if shown above), in
+        screen pixels: under the widget, a little in from its left."""
+        wx, wy = self.widget.winfo_rootx(), self.widget.winfo_rooty()
+        return wx + 20, wy + self.widget.winfo_height() + 4, wy - 4
+
+    @staticmethod
+    def place_on_screen(x: int, below: int, above: int, *,
+                        size: tuple[int, int],
+                        screen: tuple[int, int]) -> tuple[int, int]:
+        """Top-left corner for a w x h tip: below the anchor, or above it
+        when it would run off the bottom, and never past the right or
+        left edge. Anchors beyond the (primary) screen size are left
+        alone: that is a second monitor."""
+        (w, h), (sw, sh) = size, screen
+        margin = 4
+        if 0 <= x < sw:
+            x = max(margin, min(x, sw - w - margin))
+        y = below
+        if above < sh and below + h > sh - margin and above - h >= 0:
+            y = above - h
+        return x, y
 
     def _hide(self, _event=None):
         self._cancel()
@@ -624,6 +657,11 @@ class ElidingLabel(ttk.Label):
                 super().configure(**kw)
             self._elide()
             return None
+        if cnf in ("text", "-text") and not kw:
+            # The option query, like cget: the full text, not the
+            # shortened one on screen.
+            info = super().configure("text")
+            return (*info[:-1], self._full)
         return super().configure(cnf, **kw)
 
     config = configure
@@ -673,6 +711,7 @@ class TreeTooltip(Tooltip):
         self._row: str | None = None
         tree._row_tip = self
         tree.bind("<Motion>", self._on_motion, add="+")
+        tree.bind("<Enter>", self._on_motion, add="+")
         tree.bind("<Leave>", lambda _e: setattr(self, "_row", None), add="+")
 
     def _on_motion(self, event) -> None:
@@ -686,6 +725,12 @@ class TreeTooltip(Tooltip):
         self._hide()
         self.text = self.row_text(row) or self.help
         self._schedule()
+
+    def _anchor(self) -> tuple[int, int, int]:
+        # Next to the pointer, over the hovered row, not under the whole
+        # (tall) table where it covered the buttons below.
+        px, py = self.widget.winfo_pointerxy()
+        return px + 12, py + 20, py - 8
 
     def row_text(self, row: str) -> str:
         """The row's text columns, one per line, if any of them is cut
@@ -20092,6 +20137,21 @@ def _resolve_open_target(root, path: str) -> tuple[str, str | None] | None:
     return path, None
 
 
+class _PathTooltip(TreeTooltip):
+    """Row tooltip for the start screen's project list: the project's
+    full path (the Folder column shows a shortened one)."""
+
+    def __init__(self, tree, paths: list[str], text: str) -> None:
+        super().__init__(tree, (), text)
+        self.paths = paths
+
+    def row_text(self, row: str) -> str:
+        try:
+            return self.paths[int(row)]
+        except (ValueError, IndexError):
+            return ""
+
+
 class StartScreen:
     """What the app shows when it has no single obvious project to open:
     Open, recent and nearby projects, and the three steps of the job.
@@ -20154,28 +20214,7 @@ class StartScreen:
             ttk.Label(box, text="Nothing yet. Projects you open appear here.",
                       style="Muted.TLabel").pack(anchor="w", pady=4)
         else:
-            k = ui_scale(root)
-            tree = ttk.Treeview(box, columns=("name", "modified", "folder"),
-                                show="headings",
-                                height=min(len(items), self.MAX_ITEMS),
-                                selectmode="browse")
-            tree.heading("name", text="Project", anchor="w")
-            tree.heading("modified", text="Modified", anchor="w")
-            tree.heading("folder", text="Folder", anchor="w")
-            tree.column("name", width=round(220 * k), stretch=False, anchor="w")
-            tree.column("modified", width=round(130 * k), stretch=False,
-                        anchor="w")
-            tree.column("folder", width=round(320 * k), stretch=True, anchor="w")
-            for n, path in enumerate(items):
-                tree.insert("", "end", iid=str(n), values=(
-                    os.path.basename(path), self._modified_text(path),
-                    self._folder_text(path)))
-            tree.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
-            tree.bind("<Double-1>", lambda _e: self.open_selected())
-            ttk.Label(box, text="Double-click a project, or select it and "
-                                "press Enter.",
-                      style="Muted.TLabel").pack(anchor="w")
-            self.tree = tree
+            self._build_list(box, items)
 
         self._binds = [
             ("<Return>", root.bind("<Return>", self._on_return)),
@@ -20185,9 +20224,71 @@ class StartScreen:
         ]
         with contextlib.suppress(tk.TclError):
             self.open_btn.focus_set()
-        if not items:
-            # First run: nothing to list, so no big empty window either.
+        if len(items) < self.MAX_ITEMS:
+            # First run, or a short list: size the window to what it
+            # shows instead of leaving a big empty area under it.
             self._fit_to_content()
+
+    def _build_list(self, box, items: list[str]) -> None:
+        """The recent/nearby projects table, with its hint underneath."""
+        k = ui_scale(self.root)
+        tree = ttk.Treeview(box, columns=("name", "modified", "folder"),
+                            show="headings",
+                            height=min(len(items), self.MAX_ITEMS),
+                            selectmode="browse")
+        tree.heading("name", text="Project", anchor="w")
+        tree.heading("modified", text="Modified", anchor="w")
+        tree.heading("folder", text="Folder", anchor="w")
+        tree.column("name", width=round(220 * k), stretch=False, anchor="w")
+        tree.column("modified", width=round(130 * k), stretch=False,
+                    anchor="w")
+        tree.column("folder", width=round(320 * k), stretch=True, anchor="w")
+        for n, path in enumerate(items):
+            tree.insert("", "end", iid=str(n), values=(
+                os.path.basename(path), self._modified_text(path),
+                self._folder_text(path)))
+        tree.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
+        tree.bind("<Double-1>", lambda _e: self.open_selected())
+        # A folder too long for its column ends in "…" instead of
+        # being cut mid-name, and hovering a row shows its full path.
+        tree.bind("<Configure>", lambda _e: self._elide_folders(),
+                  add="+")
+        _PathTooltip(tree, items, "")
+        ttk.Label(box, text="Double-click a project, or select it and "
+                            "press Enter.",
+                  style="Muted.TLabel").pack(anchor="w")
+        self.tree = tree
+
+    def _elide_folders(self) -> None:
+        """Show each row's folder, shortened from the left with "…" when
+        it is wider than the Folder column (the end of the path is the
+        part that tells projects apart)."""
+        tree = self.tree
+        if tree is None:
+            return
+        try:
+            font = ttk.Style(tree).lookup("Treeview", "font") or "TkDefaultFont"
+            width = int(tree.column("folder", "width")) - round(
+                12 * ui_scale(tree))
+
+            def fits(t: str) -> bool:
+                return int(tree.tk.call("font", "measure", font, t)) <= width
+            for n, path in enumerate(self.items):
+                full = self._folder_text(path)
+                shown = full
+                if width > 0 and not fits(full):
+                    lo, hi = 0, len(full)      # fewest chars to drop
+                    while lo < hi:
+                        mid = (lo + hi) // 2
+                        if fits("…" + full[mid:]):
+                            hi = mid
+                        else:
+                            lo = mid + 1
+                    shown = "…" + full[lo:]
+                if tree.set(str(n), "folder") != shown:
+                    tree.set(str(n), "folder", shown)
+        except (tk.TclError, ValueError):
+            pass
 
     def _fit_to_content(self) -> None:
         r = self.root
