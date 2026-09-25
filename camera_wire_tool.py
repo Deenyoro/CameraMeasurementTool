@@ -19837,6 +19837,10 @@ class StartScreen:
     def _fit_to_content(self) -> None:
         r = self.root
         with contextlib.suppress(tk.TclError):
+            # The main window's minimum size (900x600) would keep the
+            # empty space; close() puts it back for the project window.
+            self._saved_minsize = r.minsize()
+            r.minsize(1, 1)
             r.update_idletasks()
             w = max(r.winfo_width(), self.frame.winfo_reqwidth())
             h = self.frame.winfo_reqheight()
@@ -19927,6 +19931,10 @@ class StartScreen:
         return _launch_app(self.root, *resolved)
 
     def close(self) -> None:
+        saved = getattr(self, "_saved_minsize", None)
+        if saved:
+            with contextlib.suppress(tk.TclError):
+                self.root.minsize(*saved)
         for seq, fid in self._binds:
             with contextlib.suppress(tk.TclError):
                 self.root.unbind(seq, fid)

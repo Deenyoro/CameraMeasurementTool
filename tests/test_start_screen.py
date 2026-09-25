@@ -125,8 +125,12 @@ def test_start_screen_modified_and_short_folder(tmp_path, monkeypatch):
 def test_empty_start_screen_is_sized_to_its_content(tk_root, tmp_path):
     """With no projects to list, the window used to be about two-thirds
     empty."""
+    tk_root.minsize(900, 600)           # as make_root() sets it
     start = cwt.StartScreen(tk_root, initial_dir=str(tmp_path))
     pump(tk_root, 4)
     assert start.items == []
+    assert tk_root.winfo_height() < 600
     assert tk_root.winfo_height() <= start.frame.winfo_reqheight() + 2
     assert start.open_btn.winfo_ismapped()
+    start.close()                       # the project window gets it back
+    assert tuple(tk_root.minsize()) == (900, 600)
