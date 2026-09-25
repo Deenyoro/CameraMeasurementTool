@@ -126,10 +126,15 @@ def render_dxf(path: str) -> Image.Image:
             "Install them with:\n    pip install ezdxf matplotlib"
         ) from e
 
+    # A bare Figure on its own Agg canvas, not pyplot: pyplot keeps
+    # global state that is not thread-safe, and the app renders on a
+    # worker thread. It also never touches the app's Tk loop. (ezdxf
+    # imports pyplot itself, so still keep that on the headless backend.)
     import matplotlib  # noqa: PLC0415
 
-    matplotlib.use("Agg")  # headless; never touches the app's Tk loop
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    matplotlib.use("Agg")
+    from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
+    from matplotlib.figure import Figure  # noqa: PLC0415
 
     try:
         doc = ezdxf.readfile(path)
@@ -152,7 +157,8 @@ def render_dxf(path: str) -> Image.Image:
     fig_w_in = _TARGET_LONG_PX / dpi
     fig_h_in = max(0.5, min(fig_w_in * aspect, _MAX_LONG_PX / dpi))
 
-    fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+    fig = Figure(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+    FigureCanvasAgg(fig)
     ax = fig.add_axes((0, 0, 1, 1))
     ax.set_axis_off()
     try:
@@ -162,8 +168,6 @@ def render_dxf(path: str) -> Image.Image:
         fig.savefig(buf, dpi=dpi, facecolor="white")
     except Exception as e:
         raise CadImportError(f"Could not render DXF:\n{e}") from e
-    finally:
-        plt.close(fig)
 
     buf.seek(0)
     img = Image.open(buf)
@@ -246,15 +250,19 @@ def _unique_path(path: str) -> str:
     return f"{base} ({i}){ext}"
 
 
-def convert_to_drawio(path: str, out_path: str | None = None) -> str:
-    """Render a DXF/SVG to a PNG-backed ``.drawio`` and return its path.
-
-    The drawio is written next to the source (uniquified so an existing
-    file isn't overwritten) because the app re-reads it from disk on every
-    Save."""
+def render_to_drawio_xml(path: str) -> str:
+    """Render a DXF/SVG to the XML of a PNG-backed ``.drawio`` without
+    writing anything, so a cancelled import leaves no file behind. This
+    is the slow part; run it off the UI thread."""
     img = render_cad(path)
     name = os.path.splitext(os.path.basename(path))[0]
-    xml = image_to_drawio_xml(img, diagram_name=name or "Floor")
+    return image_to_drawio_xml(img, diagram_name=name or "Floor")
+
+
+def write_drawio_xml(path: str, xml: str, out_path: str | None = None) -> str:
+    """Write `xml` (from :func:`render_to_drawio_xml`) next to the source
+    drawing `path` and return the new file's path. The name is uniquified
+    so an earlier import isn't overwritten."""
     if out_path is None:
         out_path = _unique_path(os.path.splitext(path)[0] + ".drawio")
 
@@ -272,3 +280,12 @@ def convert_to_drawio(path: str, out_path: str | None = None) -> str:
             pass
         raise CadImportError(f"Could not write converted drawing:\n{e}") from e
     return out_path
+
+
+def convert_to_drawio(path: str, out_path: str | None = None) -> str:
+    """Render a DXF/SVG to a PNG-backed ``.drawio`` and return its path.
+
+    The drawio is written next to the source (uniquified so an existing
+    file isn't overwritten) because the app re-reads it from disk on every
+    Save."""
+    return write_drawio_xml(path, render_to_drawio_xml(path), out_path)

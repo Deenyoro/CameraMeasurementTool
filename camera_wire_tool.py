@@ -4881,6 +4881,8 @@ class CameraWireTool:
             "Cleared missing entries from Open Recent.", ttl_ms=2500)
 
     def _open_recent(self, path: str) -> None:
+        if self._closing:
+            return
         if not os.path.exists(path):
             messagebox.showwarning("Missing", f"File no longer exists:\n{path}")
             return
@@ -5549,14 +5551,20 @@ class CameraWireTool:
         return (bool(getattr(self, "_pdf_export_busy", False))
                 or (t is not None and t.is_alive()))
 
-    def _stop_background_work(self, timeout: float = 15.0) -> bool:
-        """Cancel a running export and wait for its worker to stop, so
-        closing never kills it halfway through writing a file. Returns
-        False if the worker was still busy after `timeout` seconds."""
+    def _cancel_background_work(self) -> None:
+        """Ask a running export or import to stop (it stops at its next
+        check; nothing waits here)."""
         for name in ("_pdf_export_cancel", "_background_cancel"):
             ev = getattr(self, name, None)
             if ev is not None:
                 ev.set()
+
+    def _stop_background_work(self, timeout: float = 15.0) -> bool:
+        """Cancel a running export and wait for its worker to stop, so
+        closing never kills it halfway through writing a file. Returns
+        False if the worker was still busy after `timeout` seconds.
+        (Closing the window polls instead; see _on_close.)"""
+        self._cancel_background_work()
         t = getattr(self, "_background_thread", None)
         if t is None or not t.is_alive():
             return True
@@ -5570,11 +5578,23 @@ class CameraWireTool:
             return False
         return True
 
+    # How long closing waits for a stopped export/import to finish its
+    # current step before closing anyway.
+    _CLOSE_WAIT_S = 15.0
+    # _closing: the user chose to close; nothing may open a window now.
+    # _close_pending: waiting for a stopped task before closing.
+    _closing = False
+    _close_pending = False
+
     def _on_close(self) -> None:
         # Closing used to kill a running export silently: the PDF was
         # never written and nothing said so. Ask first, then stop it
         # cleanly (it writes to a .tmp and renames, so a stopped export
-        # leaves no half-written file behind).
+        # leaves no half-written file behind). The wait is polled with
+        # after(), not join(), so the window keeps painting and Windows
+        # never shows "Not Responding" while the user is quitting.
+        if self._close_pending:
+            return                      # already stopping; close follows
         if self._background_work_running():
             if not messagebox.askyesno(
                     "Still working",
@@ -5583,8 +5603,41 @@ class CameraWireTool:
                     "from the stopped task.",
                     parent=self.root):
                 return
-            self._stop_background_work()
+            # From here on nothing may open another window: an import
+            # that finishes while we wait must not relaunch the app.
+            self._closing = True
+            self._close_pending = True
+            self._cancel_background_work()
+            self._flash_status("Stopping the running task, then closing…",
+                               ttl_ms=int(self._CLOSE_WAIT_S * 1000))
+            with contextlib.suppress(tk.TclError):
+                self.root.config(cursor="watch")
+            deadline = time.monotonic() + self._CLOSE_WAIT_S
+
+            def wait_then_close():
+                t = getattr(self, "_background_thread", None)
+                if (t is not None and t.is_alive()
+                        and time.monotonic() < deadline):
+                    with contextlib.suppress(tk.TclError):
+                        self.root.after(100, wait_then_close)
+                    return
+                if t is not None and t.is_alive():
+                    log_error("Export worker still running at close",
+                              RuntimeError(f"no stop after "
+                                           f"{self._CLOSE_WAIT_S:.0f} s"))
+                self._close_pending = False
+                with contextlib.suppress(tk.TclError):
+                    self.root.config(cursor="")
+                self._finish_close()
+            with contextlib.suppress(tk.TclError):
+                self.root.after(50, wait_then_close)
+            return
+        self._finish_close()
+
+    def _finish_close(self) -> None:
+        self._closing = True
         if not self._can_navigate_away():
+            self._closing = False       # the user chose to stay
             return
         self._flush_pending_settings()
         # Daemon thread would be killed mid-zip on interpreter exit,
@@ -11602,8 +11655,24 @@ class CameraWireTool:
         in a local event loop, so callers still get the path back
         directly. Failures show a dialog and return None so the caller
         aborts without disturbing the current project. Cancel returns
-        None at once (the drawing is not opened)."""
+        None at once (the drawing is not opened).
+
+        The worker only renders; the .drawio is written here, on the Tk
+        thread, and only when the import was not cancelled — so a
+        cancelled import (or closing the app) leaves no file behind.
+        Only one conversion runs at a time: a cancelled one keeps
+        rendering until it finishes, and the renderer is not safe to run
+        twice at once."""
         kind = os.path.splitext(src)[1].lstrip(".").upper()
+        if self._closing:
+            return None
+        prev = getattr(self, "_cad_thread", None)
+        if prev is not None and prev.is_alive():
+            messagebox.showinfo(
+                "Still stopping the last import",
+                "The drawing you cancelled is still being stopped.\n\n"
+                "Try again in a few seconds.", parent=self.root)
+            return None
         self._flash_status(f"Importing {kind} drawing — rendering…")
         cancel = threading.Event()
         prog = _ProgressDialog(self, f"Import {kind} drawing",
@@ -11618,7 +11687,7 @@ class CameraWireTool:
 
         def work(_report, _is_cancelled):
             try:
-                return {"path": cad_mod.convert_to_drawio(src)}
+                return {"xml": cad_mod.render_to_drawio_xml(src)}
             except cad_mod.CadImportError as e:
                 return {"cad_error": e}
             except Exception as e:
@@ -11640,24 +11709,34 @@ class CameraWireTool:
                 self.root.after(100, watch_cancel)
 
         self._run_in_background(work, on_done, cancel=cancel)
+        self._cad_thread = self._background_thread
         self.root.after(100, watch_cancel)
         with contextlib.suppress(tk.TclError):
             self.root.wait_variable(done)
         with contextlib.suppress(tk.TclError):
             prog.bar.stop()
         prog.close()
-        if out.get("cancelled"):
-            self._flash_status(f"{kind} import cancelled — nothing was opened.",
-                               ttl_ms=3500)
+        # Cancel (or closing the app, which cancels too) wins over a
+        # result that happened to arrive first: the user asked to stop.
+        if cancel.is_set() or out.get("cancelled") or self._closing:
+            if not self._closing:
+                self._flash_status(
+                    f"{kind} import cancelled — nothing was opened.",
+                    ttl_ms=3500)
             return None
         err = out.get("cad_error") or out.get("error")
-        if err is not None:
-            log_error(f"CAD import failed: {src}", err)
-            messagebox.showerror(
-                "Couldn't import drawing",
-                f"{src}\n\n{err}\n\nThe current project is untouched.")
-            return None
-        return out.get("path")
+        if err is None:
+            try:
+                return cad_mod.write_drawio_xml(src, out["xml"])
+            except cad_mod.CadImportError as e:
+                err = e
+            except (KeyError, TypeError) as e:
+                err = e
+        log_error(f"CAD import failed: {src}", err)
+        messagebox.showerror(
+            "Couldn't import drawing",
+            f"{src}\n\n{err}\n\nThe current project is untouched.")
+        return None
 
     def _file_open(self) -> None:
         if not self._can_navigate_away():
@@ -11694,7 +11773,7 @@ class CameraWireTool:
             # Conversion doubles as the pre-flight: a failure leaves the
             # current session intact.
             converted = self._convert_cad_drawing(path)
-            if not converted:
+            if not converted or self._closing:
                 return
             path = converted
         else:
@@ -11707,6 +11786,8 @@ class CameraWireTool:
                     "Couldn't open file",
                     f"{path}\n\n{err}\n\nThe current project is untouched.")
                 return
+        if self._closing:
+            return      # the app is closing; never reopen a window
         self._flush_pending_settings()
         _relaunch(self.root, path, bundle_path=bundle_path)
 
@@ -15718,7 +15799,7 @@ class CameraWireTool:
         # so a project started from CAD can add its other floors from CAD.
         if cad_mod.is_cad_drawing(path):
             converted = self._convert_cad_drawing(path)
-            if not converted:
+            if not converted or self._closing:
                 return
             path = converted
         # Pre-flight parse — same UX as _file_open + _open_recent. A

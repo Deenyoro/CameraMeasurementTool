@@ -53,10 +53,32 @@ def test_close_during_export_stops_the_worker_then_quits(gui_app, monkeypatch):
     seen = _start_slow_job(app)
     t0 = time.monotonic()
     app._on_close()
-    assert time.monotonic() - t0 < 5
+    # The Tk thread is not blocked while the worker stops (no "Not
+    # Responding"); the window closes once it has.
+    assert time.monotonic() - t0 < 0.5
+    assert quits == []
+    ticks = 0
+    while not quits and time.monotonic() - t0 < 5:
+        pump(app.root, 1)
+        ticks += 1
+        time.sleep(0.02)
     assert seen["v"] is True                 # cancelled, not killed
     assert not app._background_thread.is_alive()
     assert quits == [1]
+    assert ticks >= 1
+
+
+def test_second_close_while_stopping_does_not_ask_again(gui_app, monkeypatch):
+    app = gui_app
+    monkeypatch.setattr(app.root, "quit", lambda: None)
+    asked = []
+    monkeypatch.setattr(cwt.messagebox, "askyesno",
+                        lambda *a, **k: asked.append(a) or True)
+    _start_slow_job(app)
+    app._on_close()
+    app._on_close()
+    assert len(asked) == 1
+    app._background_thread.join(5)
     pump(app.root)
 
 

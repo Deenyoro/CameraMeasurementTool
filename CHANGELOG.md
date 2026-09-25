@@ -40,11 +40,15 @@ files still load, and the new settings are optional.
 - The mini-map hides again when the map is too narrow for it, and sits
   in the bottom corner that covers the least of the plan (it used to
   cover the drawing's own legend or key plan).
-- **Closing the window during an export asks first.** It used to kill
-  the export silently. Now you can keep it running, or stop it and
-  close; a stopped export writes nothing.
+- **Closing the window during an export or import asks first.** It
+  used to kill the export silently. Now you can keep it running, or stop
+  it and close; a stopped task writes nothing. The window keeps
+  responding while the task stops, and closing during a DXF/SVG import
+  can no longer reopen the app with the imported drawing.
 - **Importing a DXF or SVG no longer freezes the window.** The drawing
-  renders in the background with a progress window and Cancel.
+  renders in the background with a progress window and Cancel. A
+  cancelled import leaves no `.drawio` file behind, and only one import
+  runs at a time.
 - The BOM tab works at 150 % on a laptop. Before, its tables showed
   headings and no rows, and names were cut to "Card Rea".
 - The Export to PDF dialog fits a 1366x768 screen at 150 %. Before, it
