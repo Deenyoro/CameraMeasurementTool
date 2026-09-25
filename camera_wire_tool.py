@@ -13976,7 +13976,131 @@ class CameraWireTool:
         for pane in (pane_w, pane_d, pane_m):
             pane.grid(row=0, column=0, sticky="nsew")
         self._bom_panes = {"runs": pane_w, "types": pane_d, "models": pane_m}
+        # A tall panel (a 1080 p screen at 150 %) has room for all three
+        # tables at once: then they are stacked, each under its own title,
+        # and the switch is hidden. See _on_bom_tables_configure.
+        self._bom_switch = switch
+        self._bom_tables = tables
+        self._bom_stacked = False
+        self._bom_stack_compact = False     # stacked, with one-line totals
+        self._bom_pane_titles = {
+            key: ttk.Label(pane, text=self._BOM_VIEW_TITLES[key],
+                           font="AppStrong")
+            for key, pane in self._bom_panes.items()}
+        tables.bind("<Configure>", self._on_bom_tables_configure, add="+")
         return switch, pane_w, pane_d, pane_m
+
+    # Rows each table must be able to show before the tables are stacked.
+    _BOM_STACK_MIN_ROWS = 4
+
+    def _bom_stack_needed_height(self) -> int:
+        """Height the three stacked tables need: per table a title, a
+        heading row and _BOM_STACK_MIN_ROWS rows, plus padding."""
+        try:
+            rowh = int(ttk.Style(self.root).lookup("Treeview", "rowheight")
+                       or 0)
+        except (tk.TclError, ValueError):
+            rowh = 0
+        if rowh <= 0:
+            rowh = self._px(24)
+        try:
+            title_h = int(self.root.tk.call("font", "metrics", "AppStrong",
+                                            "-linespace"))
+        except (tk.TclError, ValueError):
+            title_h = self._px(18)
+        # title and its padding, the table frame's padding, the heading
+        # row (a little taller than a row) and the rows themselves
+        per_table = (title_h + 4 + 8 + rowh + self._px(4)
+                     + self._BOM_STACK_MIN_ROWS * rowh)
+        return 3 * per_table
+
+    def _on_bom_tables_configure(self, event) -> None:
+        """Stack the three BOM tables when each can show at least
+        _BOM_STACK_MIN_ROWS rows; otherwise show one at a time with the
+        switch. Stacked, the switch is hidden and the totals use their
+        one-line form; the height compared counts what those would free,
+        so the switch cannot flip the decision back and forth."""
+        switch = self._bom_switch
+        try:
+            switch_h = (0 if self._bom_stacked
+                        else switch.winfo_height() + 6)
+        except tk.TclError:
+            return
+        extra = self._bom_full_totals_extra()
+        # Height the tables would get with the switch hidden and the
+        # totals in their one-line form.
+        avail = event.height + switch_h + (0 if self._bom_compact else extra)
+        need = self._bom_stack_needed_height()
+        slack = self._px(8) if self._bom_stacked else 0      # hysteresis
+        stack = avail >= need - slack
+        # Keep the full totals when there is room for them as well.
+        full_slack = self._px(8) if not self._bom_stack_compact else 0
+        squeeze = stack and avail - extra < need - full_slack
+        if (stack, squeeze) != (self._bom_stacked, self._bom_stack_compact):
+            self._bom_stack_compact = squeeze
+            self._set_bom_stacked(stack)
+
+    def _set_bom_stacked(self, stacked: bool) -> None:
+        self._bom_stacked = stacked
+        tables = self._bom_tables
+        panes = list(self._bom_panes.items())
+        with contextlib.suppress(tk.TclError):
+            if stacked:
+                self._bom_switch.pack_forget()
+                for i, (key, pane) in enumerate(panes):
+                    pane.grid_configure(row=i)
+                    title = self._bom_pane_titles[key]
+                    first = pane.pack_slaves()
+                    kw = {"before": first[0]} if first else {}
+                    title.pack(anchor=tk.W, padx=6, pady=(4, 0), **kw)
+            else:
+                for i, (key, pane) in enumerate(panes):
+                    pane.grid_configure(row=0)
+                    self._bom_pane_titles[key].pack_forget()
+                    if i:
+                        tables.rowconfigure(i, weight=0, minsize=0)
+                tables.rowconfigure(0, weight=1, minsize=0)
+                self._bom_switch.pack(fill=tk.X, padx=6, pady=(6, 0),
+                                      before=tables)
+        self._bom_fit_stacked_rows()
+        with contextlib.suppress(tk.TclError):
+            tab = self._bom_pill_total.master
+            self._set_bom_compact(tab.winfo_height() < self._px(520)
+                                  or self._bom_stack_compact)
+        self._show_bom_view()
+
+    def _bom_stack_trees(self):
+        return {"runs": self._bom_tree, "types": self._bom_devices_tree,
+                "models": self._bom_models_tree}
+
+    def _bom_fit_stacked_rows(self) -> None:
+        """Share the stacked tables' height by how many rows each has
+        (one cable type does not need as much room as 13 device types),
+        while every table keeps room for its heading and up to
+        _BOM_STACK_MIN_ROWS rows. Single-table mode puts back the
+        trees' own row counts."""
+        trees = self._bom_stack_trees()
+        if not hasattr(self, "_bom_tree_rows"):
+            self._bom_tree_rows = {k: int(t.cget("height"))
+                                   for k, t in trees.items()}
+        tables = self._bom_tables
+        with contextlib.suppress(tk.TclError):
+            if not self._bom_stacked:
+                for k, t in trees.items():
+                    t.configure(height=self._bom_tree_rows[k])
+                return
+            per_table = self._bom_stack_needed_height() // 3
+            rowh = (per_table // (self._BOM_STACK_MIN_ROWS + 2)) or 1
+            with contextlib.suppress(tk.TclError, ValueError):
+                rowh = int(ttk.Style(self.root).lookup("Treeview",
+                                                       "rowheight")) or rowh
+            overhead = per_table - self._BOM_STACK_MIN_ROWS * rowh
+            for i, t in enumerate(trees.values()):
+                n = max(1, len(t.get_children()))
+                t.configure(height=1)       # the grid decides the height
+                tables.rowconfigure(
+                    i, weight=n, uniform="",
+                    minsize=overhead + min(n, self._BOM_STACK_MIN_ROWS) * rowh)
 
     _BOM_VIEW_TITLES = {"runs": "Cables", "types": "Device types",
                         "models": "Models"}
@@ -13988,6 +14112,8 @@ class CameraWireTool:
         pane = getattr(self, "_bom_panes", {}).get(key)
         if pane is None:
             return
+        if getattr(self, "_bom_stacked", False):
+            return                  # all three are on screen; no switch
         with contextlib.suppress(tk.TclError):
             pane.tkraise()
             btn = self._bom_view_btns[key]
@@ -14028,14 +14154,37 @@ class CameraWireTool:
                 title = self._BOM_VIEW_TITLES[key]
                 n = counts.get(key, 0)
                 btn.configure(text=f"{title} ({n})" if n else title)
+                lbl = getattr(self, "_bom_pane_titles", {}).get(key)
+                if lbl is not None:
+                    lbl.configure(text=f"{title} ({n})" if n else title)
         except (tk.TclError, AttributeError):
             pass
+        if getattr(self, "_bom_stacked", False):
+            self._bom_fit_stacked_rows()
         self._show_bom_view()
 
     def _on_bom_tab_configure(self, event) -> None:
         """Switch the totals block between the full layout (caption and
         pills) and a compact one-line breakdown when the panel is short."""
-        compact = event.height < self._px(520)
+        # While all three tables are stacked they need the room more than
+        # the two-line pills do (the one-line breakdown says the same).
+        compact = (event.height < self._px(520)
+                   or getattr(self, "_bom_stack_compact", False))
+        self._set_bom_compact(compact)
+
+    def _bom_full_totals_extra(self) -> int:
+        """How much taller the full totals block (heading, caption and
+        pills) is than the compact one-line breakdown."""
+        try:
+            full = (self._bom_heading.winfo_reqheight() + 8
+                    + self._bom_cost_caption.winfo_reqheight() + 6
+                    + self._bom_totals_frame.winfo_reqheight() + 2)
+            return max(0, full - (self._bom_breakdown_line.winfo_reqheight()
+                                  + 2))
+        except (tk.TclError, AttributeError):
+            return 0
+
+    def _set_bom_compact(self, compact: bool) -> None:
         if compact == self._bom_compact:
             return
         self._bom_compact = compact
