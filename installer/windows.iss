@@ -7,7 +7,7 @@
 ;   CameraWireTool-<version>-windows-x64-setup.exe
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.2.2"
+  #define MyAppVersion "1.2.3"
 #endif
 
 #define MyAppName "Camera Wire Tool"

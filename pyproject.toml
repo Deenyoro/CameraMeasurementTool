@@ -1,6 +1,6 @@
 [project]
 name = "camera-wire-tool"
-version = "1.2.2"
+version = "1.2.3"
 description = "Tkinter desktop tool for security-camera wire estimation on draw.io floor plans"
 readme = "README.md"
 license = { file = "LICENSE" }

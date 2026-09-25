@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-25
+
+- CI: pipelines run on merge requests (tests/Linux builds; Windows/macOS
+  manual; nothing published).
+
 ## [1.2.2] - 2026-09-25
 
 Patch release: a usability pass for Windows users. The window no longer
