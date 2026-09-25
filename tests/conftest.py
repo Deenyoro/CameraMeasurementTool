@@ -36,8 +36,19 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-# `tk scaling` of the first Tk root in this process (100 % here).
-_INITIAL_SCALING: dict = {}
+# `tk scaling` for 100 % of 96 dpi. Every GUI test starts here, whatever
+# the display's own dpi is, so the size checks mean the same everywhere.
+_SCALING_96_DPI = 96 / 72
+
+# The Windows release job (build-windows) runs the whole suite on a
+# runner whose desktop size, display scale and Tk version nobody picks.
+# The GUI tests measure pixel layouts and were written against Xvfb, so
+# there they skip unless asked for (CAMERA_TOOL_GUI_TESTS=1). The Linux
+# CI test job has no display and skips them anyway.
+_SKIP_GUI_ON_WINDOWS_CI = (
+    sys.platform == "win32"
+    and bool(os.environ.get("GITLAB_CI") or os.environ.get("CI"))
+    and os.environ.get("CAMERA_TOOL_GUI_TESTS") != "1")
 
 
 def _unzoom_before_resizing(root) -> None:
@@ -51,6 +62,15 @@ def _unzoom_before_resizing(root) -> None:
 
     def geometry(new_geometry=None):
         if new_geometry and new_geometry[:1].isdigit():
+            # A window larger than the desktop gets shrunk on Windows (Tk
+            # keeps it within `wm maxsize`), so the test would measure a
+            # different size than it asked for: skip it there instead.
+            w, _, rest = new_geometry.partition("x")
+            h = rest.split("+")[0].split("-")[0]
+            if w.isdigit() and h.isdigit() and (
+                    int(w) > root.winfo_screenwidth()
+                    or int(h) > root.winfo_screenheight()):
+                pytest.skip(f"window {w}x{h} does not fit this desktop")
             with contextlib.suppress(tk.TclError):
                 if root.state() == "zoomed":
                     root.state("normal")
@@ -61,15 +81,16 @@ def _unzoom_before_resizing(root) -> None:
 
 @pytest.fixture
 def tk_root(isolated_home):
+    if _SKIP_GUI_ON_WINDOWS_CI:
+        pytest.skip("GUI layout tests do not run on the Windows CI runner "
+                    "(set CAMERA_TOOL_GUI_TESTS=1 to run them)")
     try:
         root = tk.Tk()
     except tk.TclError as e:
         pytest.skip(f"no display for Tk: {e}")
     # X11 Tk keeps `tk scaling` per display, so a test that set 150 %
     # would leave every later test at 150 %: start each test at 100 %.
-    scaling = _INITIAL_SCALING.setdefault(
-        "v", float(root.tk.call("tk", "scaling")))
-    root.tk.call("tk", "scaling", scaling)
+    root.tk.call("tk", "scaling", _SCALING_96_DPI)
     cwt.apply_theme(root)
     _unzoom_before_resizing(root)
     yield root
