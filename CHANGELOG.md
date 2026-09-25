@@ -45,11 +45,32 @@ files still load, and the new settings are optional.
   used to kill the export silently. Now you can keep it running, or stop
   it and close; a stopped task writes nothing. The window keeps
   responding while the task stops, and closing during a DXF/SVG import
-  can no longer reopen the app with the imported drawing.
+  can no longer reopen the app with the imported drawing. Closing during
+  an import closes the window at once (the import writes nothing).
+  While a stopped export finishes, a small "Closing" window keeps you
+  from starting new work that would be cut off.
 - **Importing a DXF or SVG no longer freezes the window.** The drawing
   renders in the background with a progress window and Cancel. A
   cancelled import leaves no `.drawio` file behind, and only one import
-  runs at a time.
+  runs at a time. This also applies to a drawing opened from the start
+  screen or from Explorer, which used to freeze the window for about
+  11 s on the sample DXF.
+- **The app no longer offers DXF and SVG files it cannot open.** The
+  Windows app is built without the DXF/SVG importers. The start screen,
+  the Open and Add Floor dialogs and the File menu now list DXF and SVG
+  only when the importers are installed. If you open one anyway (for
+  example from Explorer), the app explains in plain words what to do
+  instead: ask for a `.drawio` or `.zsmt` file, or export the plan as an
+  image from the CAD program. It no longer tells you to run a `pip`
+  command.
+- Tooltips stay on the screen. Near the right or bottom edge they move
+  left or show above the control. A BOM row's tooltip appears next to
+  the pointer instead of below the whole table, where it covered the
+  Export buttons.
+- Windows built after start-up, such as the start screen shown after a
+  failed open, have the dark background. They used to show light grey
+  behind the dark-themed controls. Secondary text, such as hints and the
+  one-line cost breakdown, now uses the intended muted grey everywhere.
 - The BOM tab works at 150 % on a laptop. Before, its tables showed
   headings and no rows, and names were cut to "Card Rea". Each table
   shows its scrollbar, so rows below the fold (and the subtotals) are
@@ -75,8 +96,9 @@ files still load, and the new settings are optional.
   to open. It has Open, a list of recent and nearby projects, and the
   three steps. A file passed on the command line opens directly. The
   list shows when each project was last changed and its folder relative
-  to your user folder. With nothing to list yet, the start screen is
-  only as big as its content.
+  to your user folder. A long folder is shortened from the left with
+  "…", and hovering a project shows its full path. With only a few
+  projects (or none), the start screen is only as big as its content.
 - Long status-bar hints end in "…" after a whole word instead of being
   cut mid-word; hover to read the full text.
 - The known-distance dialog is ready to type in, and it also accepts
@@ -88,7 +110,11 @@ files still load, and the new settings are optional.
   gives way first, and on a very narrow panel the least useful column
   (such as unit price) is hidden. The tax box takes 8 or 0.08 for 8 %,
   shows what it means ("= 8 %", in orange above 20 %) and is still
-  saved as the decimal `tax_rate`.
+  saved as the decimal `tax_rate`. When the panel is tall enough for
+  every table to show at least four rows (for example 1920x1080 at
+  150 %), all three tables are shown at once, each under its own title,
+  and the switch is hidden. The height is shared according to how many
+  rows each table has.
 - The Export to PDF dialog has two columns so that it fits a 768 px
   screen: what goes in the PDF on the left, floors and what shows on
   the map on the right. After an export, a notice offers Open and Show in folder in
