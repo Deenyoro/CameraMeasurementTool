@@ -75,7 +75,10 @@ files still load, and the new settings are optional.
   to open. It has Open, a list of recent and nearby projects, and the
   three steps. A file passed on the command line opens directly. The
   list shows when each project was last changed and its folder relative
-  to your user folder.
+  to your user folder. With nothing to list yet, the start screen is
+  only as big as its content.
+- Long status-bar hints end in "…" after a whole word instead of being
+  cut mid-word; hover to read the full text.
 - The known-distance dialog is ready to type in, and it also accepts
   values such as `30'-6"`, `30 ft 6 in`, `3.5 m` and `350 cm`.
 - The BOM tab shows the wiring total at the top, then one table at a

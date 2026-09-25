@@ -120,3 +120,13 @@ def test_start_screen_modified_and_short_folder(tmp_path, monkeypatch):
     assert cwt.StartScreen._folder_text(str(f)) == tmp_path.name
     other = "/elsewhere/Site/A.zsmt" if os.name != "nt" else r"Z:\Site\A.zsmt"
     assert cwt.StartScreen._folder_text(other) == os.path.dirname(other)
+
+
+def test_empty_start_screen_is_sized_to_its_content(tk_root, tmp_path):
+    """With no projects to list, the window used to be about two-thirds
+    empty."""
+    start = cwt.StartScreen(tk_root, initial_dir=str(tmp_path))
+    pump(tk_root, 4)
+    assert start.items == []
+    assert tk_root.winfo_height() <= start.frame.winfo_reqheight() + 2
+    assert start.open_btn.winfo_ismapped()

@@ -101,3 +101,32 @@ def test_settings_write_keeps_unknown_keys(gui_app):
     data = cwt.load_settings()
     assert data["from_a_newer_version"] == 42
     assert data["show_steps"] is True
+
+
+def test_long_status_hint_ends_in_an_ellipsis_at_a_word(gui_app):
+    """Long hints were cut mid-word ("press Esc to sto") on a laptop or
+    at 150 %. Now they end in "…" after a whole word; the full text is
+    still what cget returns and what the tooltip shows."""
+    app = gui_app
+    root = app.root
+    root.geometry("1000x600+0+0")
+    pump(root, 6)
+    lbl = app.status_label
+    text = ("Wire added for MD-12: 148 ft 6 in.  +14 ft vertical riser "
+            "(D1, D2) Click the next camera, or Esc to stop. " * 3).strip()
+    lbl.config(text=text)
+    pump(root, 4)
+    shown = str(cwt.ttk.Label.cget(lbl, "text"))
+    assert lbl.cget("text") == text
+    assert shown.endswith("…") and len(shown) < len(text)
+    assert text.startswith(shown[:-1])
+    # Ends on a whole word of the original text.
+    assert text[len(shown) - 1] in " ,.;:" or shown[-2] in ",.;:"
+    font = lbl.cget("font")
+    assert int(root.tk.call("font", "measure", font, shown)) <= lbl.winfo_width()
+    # Short text is shown unchanged.
+    lbl.config(text="Saved.")
+    pump(root, 2)
+    assert str(cwt.ttk.Label.cget(lbl, "text")) == "Saved."
+    # The live totals keep their place.
+    assert _inside(app.total_toolbar_label, root)

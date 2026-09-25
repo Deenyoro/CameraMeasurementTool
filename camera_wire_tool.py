@@ -602,6 +602,65 @@ class Tooltip:
             self.tip = None
 
 
+class ElidingLabel(ttk.Label):
+    """A one-line label that ends in "…" at a word boundary when its text
+    is wider than the label, instead of being cut mid-word ("press Esc
+    to sto"). cget("text") still returns the full text, and hovering
+    shows it in full when it was shortened."""
+
+    def __init__(self, master, **kw):
+        self._full = str(kw.pop("text", ""))
+        super().__init__(master, text=self._full, **kw)
+        self._tip = Tooltip(self, "")
+        self.bind("<Configure>", lambda _e: self._elide(), add="+")
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+            cnf = None
+        if "text" in kw:
+            self._full = str(kw.pop("text"))
+            if kw:
+                super().configure(**kw)
+            self._elide()
+            return None
+        return super().configure(cnf, **kw)
+
+    config = configure
+
+    def cget(self, key):
+        if key == "text":
+            return self._full
+        return super().cget(key)
+
+    __getitem__ = cget
+
+    def _elide(self) -> None:
+        text = self._full
+        try:
+            width = self.winfo_width()
+            font = self.cget("font") or "TkDefaultFont"
+
+            def fits(t: str) -> bool:
+                return int(self.tk.call("font", "measure", font, t)) <= width - 4
+            shown = text
+            if width > 1 and not fits(text):
+                words = text.split(" ")
+                lo, hi = 0, len(words)      # longest word prefix that fits
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if fits(" ".join(words[:mid]).rstrip(" ,.;:—-") + "…"):
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                shown = " ".join(words[:lo]).rstrip(" ,.;:—-") + "…"
+            if str(super().cget("text")) != shown:
+                super().configure(text=shown)
+            self._tip.text = text if shown != text else ""
+        except tk.TclError:
+            pass
+
+
 class TreeTooltip(Tooltip):
     """Tooltip for a Treeview. Over a row whose text is cut off (or whose
     text column is hidden on a narrow panel) it shows that row's full
@@ -4852,8 +4911,9 @@ class CameraWireTool:
         ttk.Separator(self._statusbar, orient=tk.HORIZONTAL).grid(
             row=0, column=0, columnspan=4, sticky="ew")
         self._statusbar.columnconfigure(0, weight=1)
-        self.status_label = ttk.Label(self._statusbar, text="", anchor=tk.W,
-                                       font="AppBody")
+        # Long hints end in "…" at a word instead of being cut mid-word.
+        self.status_label = ElidingLabel(self._statusbar, text="",
+                                         anchor=tk.W, font="AppBody")
         self.status_label.grid(row=1, column=0, sticky="ew", padx=8, pady=2)
         self.cursor_label = ttk.Label(self._statusbar, text="", anchor=tk.E,
                                        font="AppMono", foreground="#888888")
@@ -10347,8 +10407,8 @@ class CameraWireTool:
                   if real_in is not None else "")
         riser = (f"  +{self._format_length(vert_in)} vertical riser "
                  f"({', '.join(drop_ids)})" if vert_in > 0 else "")
-        nxt = ("Click the next camera to wire it, or press Esc to stop."
-               if device_id else "Click to start a new one, or press Esc to stop.")
+        nxt = ("Click the next camera, or Esc to stop."
+               if device_id else "Click to start another, or Esc to stop.")
         self.status_label.config(
             text=f"Wire added{dev_label}{length}.{riser} {nxt}")
 
@@ -19761,6 +19821,20 @@ class StartScreen:
         ]
         with contextlib.suppress(tk.TclError):
             self.open_btn.focus_set()
+        if not items:
+            # First run: nothing to list, so no big empty window either.
+            self._fit_to_content()
+
+    def _fit_to_content(self) -> None:
+        r = self.root
+        with contextlib.suppress(tk.TclError):
+            r.update_idletasks()
+            w = max(r.winfo_width(), self.frame.winfo_reqwidth())
+            h = self.frame.winfo_reqheight()
+            sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+            w, h = min(w, sw), min(h, sh)
+            r.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}"
+                       f"+{max((sh - h) // 3, 0)}")
 
     @staticmethod
     def _modified_text(path: str, now: float | None = None) -> str:
