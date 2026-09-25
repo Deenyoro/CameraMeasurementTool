@@ -36,13 +36,42 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
+# `tk scaling` of the first Tk root in this process (100 % here).
+_INITIAL_SCALING: dict = {}
+
+
+def _unzoom_before_resizing(root) -> None:
+    """The app maximises its window ("zoomed"). On Windows, geometry() on
+    a zoomed window does not resize it, so the size-dependent GUI tests
+    would measure a maximised window there (the Windows CI job runs them).
+    Make root.geometry("WxH...") leave the zoomed state first, as a user
+    un-maximising the window would. No effect on X11, which has no
+    "zoomed" state."""
+    orig = root.geometry
+
+    def geometry(new_geometry=None):
+        if new_geometry and new_geometry[:1].isdigit():
+            with contextlib.suppress(tk.TclError):
+                if root.state() == "zoomed":
+                    root.state("normal")
+        return orig(new_geometry)
+
+    root.geometry = root.wm_geometry = geometry
+
+
 @pytest.fixture
 def tk_root(isolated_home):
     try:
         root = tk.Tk()
     except tk.TclError as e:
         pytest.skip(f"no display for Tk: {e}")
+    # X11 Tk keeps `tk scaling` per display, so a test that set 150 %
+    # would leave every later test at 150 %: start each test at 100 %.
+    scaling = _INITIAL_SCALING.setdefault(
+        "v", float(root.tk.call("tk", "scaling")))
+    root.tk.call("tk", "scaling", scaling)
     cwt.apply_theme(root)
+    _unzoom_before_resizing(root)
     yield root
     with contextlib.suppress(tk.TclError):
         for aid in root.tk.splitlist(root.tk.call("after", "info")):
