@@ -96,3 +96,25 @@ def gui_app(tk_root, tmp_path):
     tk_root.geometry("1200x700+0+0")
     settle(tk_root)
     return app
+
+
+@pytest.fixture
+def cad_backends(monkeypatch):
+    """Act as a copy of the app that has the DXF/SVG importers, whether
+    or not this test environment installed them (the CI test job does
+    not). Tests using it stub the renderer itself. Afterwards, wait for
+    a render the test left running (closing during an import does not
+    wait for it), so the next test is not told "still stopping"."""
+    monkeypatch.setattr(cwt._CadFormats, "exts", (".dxf", ".svg"))
+    yield
+    t = cwt._CAD_RENDER.get("thread")
+    if t is not None:
+        t.join(15)
+
+
+@pytest.fixture
+def no_cad_backends(monkeypatch):
+    """Act as the Windows .exe, which ships without the CAD importers."""
+    for m in ("ezdxf", "matplotlib", "fitz", "pymupdf"):
+        monkeypatch.setitem(sys.modules, m, None)
+    monkeypatch.setattr(cwt._CadFormats, "exts", None)

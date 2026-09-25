@@ -7,10 +7,13 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
 from PIL import Image
 
 import camera_wire_tool as cwt
 from tests.gui_support import pump
+
+pytestmark = pytest.mark.usefixtures("cad_backends")
 
 
 def _xml() -> str:
@@ -158,9 +161,58 @@ def test_closing_during_add_floor_import_adds_nothing(gui_app, tmp_path,
                         lambda **k: str(dxf))
     monkeypatch.setattr(app.root, "quit", lambda: None)
     monkeypatch.setattr(cwt.messagebox, "askyesno", lambda *a, **k: True)
+    floors_before = _floor_count(app)
     app.root.after(150, app._on_close)
     app._add_floor_dialog()
     pump(app.root)
     assert not any(isinstance(w, cwt.tk.Toplevel) and w.winfo_exists()
                    and w.title() == "New floor"
                    for w in app.root.winfo_children())
+    app._cad_thread.join(5)
+    pump(app.root)
+    assert list(tmp_path.glob("Level3*.drawio")) == []
+    assert _floor_count(app) == floors_before
+
+
+def _floor_count(app) -> int:
+    return len(app._project.floors) if app._project is not None else 1
+
+
+def test_closing_during_import_closes_at_once(gui_app, tmp_path,
+                                              monkeypatch):
+    """A DXF render cannot be stopped mid-way and writes nothing, so
+    "Stop it and close" closes right away instead of leaving a usable
+    window up until the render ends (about 10 s on the sample DXF)."""
+    app = gui_app
+    dxf = tmp_path / "Level2.dxf"
+    dxf.write_text("0\nEOF\n")
+    release = threading.Event()
+
+    def stuck(src):
+        release.wait(10)
+        return _xml()
+    monkeypatch.setattr(cwt.cad_mod, "render_to_drawio_xml", stuck)
+    monkeypatch.setattr(cwt.filedialog, "askopenfilename",
+                        lambda **k: str(dxf))
+    monkeypatch.setattr(cwt, "_relaunch", lambda *a, **k: None)
+    quits = []
+    monkeypatch.setattr(app.root, "quit",
+                        lambda: quits.append(time.monotonic()))
+    monkeypatch.setattr(cwt.messagebox, "askyesno", lambda *a, **k: True)
+    app._dirty = False
+    asked_at = []
+
+    def close():
+        asked_at.append(time.monotonic())
+        app._on_close()
+    app.root.after(150, close)
+    app._file_open()
+    try:
+        assert quits, "the window should close without waiting"
+        assert quits[0] - asked_at[0] < 1.0
+        assert app._close_pending is False
+    finally:
+        release.set()
+        app._cad_thread.join(5)
+    pump(app.root)
+    assert list(tmp_path.glob("Level2*.drawio")) == []

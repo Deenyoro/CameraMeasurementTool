@@ -2040,6 +2040,14 @@ class _ProgressDialog:
             self.msg.config(text="Cancelling…")
         self._cancel_cb()
 
+    def busy(self, detail: str) -> None:
+        """An indeterminate bar with `detail` under the message, for work
+        with no steps to count."""
+        with contextlib.suppress(tk.TclError):
+            self.detail.config(text=detail)
+            self.bar.config(mode="indeterminate")
+            self.bar.start(20)
+
     def update(self, done: int, total: int, detail: str = "") -> None:
         with contextlib.suppress(tk.TclError):
             self.bar.config(maximum=max(1, total), value=done)
@@ -2048,10 +2056,161 @@ class _ProgressDialog:
 
     def close(self) -> None:
         with contextlib.suppress(tk.TclError):
+            self.bar.stop()             # ends an indeterminate bar's timer
+        with contextlib.suppress(tk.TclError):
             self.app.root.config(cursor="")
         with contextlib.suppress(tk.TclError):
             self.top.grab_release()
             self.top.destroy()
+
+
+def _run_worker(root, work, on_done, *, progress=None, cancel=None,
+                name: str = "cwt-export") -> threading.Thread:
+    """Run `work(report, is_cancelled)` on a daemon thread and hand its
+    return value to `on_done(result)` on the Tk thread; returns the
+    (started) thread.
+
+    The worker must never call Tk: it reports progress through
+    `report(done, total, text)`, which only queues a message; the Tk
+    thread polls the queue with after() and updates `progress` (a
+    _ProgressDialog). Tk calls from other threads crash on Windows."""
+    q: queue.Queue = queue.Queue()
+    cancel = cancel or threading.Event()
+
+    def report(done, total, text=""):
+        q.put(("progress", done, total, text))
+
+    def run():
+        try:
+            res = work(report, cancel.is_set)
+        except Exception as e:     # work() should catch; belt and braces
+            res = {"error": e}
+        q.put(("done", res))
+
+    t = threading.Thread(target=run, daemon=True, name=name)
+    t.start()
+
+    def poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                if msg[0] == "progress":
+                    if progress is not None:
+                        progress.update(msg[1], msg[2], msg[3])
+                else:
+                    on_done(msg[1])
+                    return
+        except queue.Empty:
+            pass
+        with contextlib.suppress(tk.TclError):
+            root.after(80, poll)
+    root.after(80, poll)
+    return t
+
+
+def _cancel_on_window_close(root, cancel, closed: dict) -> str:
+    """Make closing `root` cancel an import (and note that it was closed)
+    instead of destroying the window under it; returns the previous
+    close handler, for putting back."""
+    old = ""
+    with contextlib.suppress(tk.TclError):
+        old = root.protocol("WM_DELETE_WINDOW")
+
+        def on_close():
+            closed["v"] = True
+            cancel.set()
+        root.protocol("WM_DELETE_WINDOW", on_close)
+    return old
+
+
+# The one DXF/SVG render that may be running (shared by every window:
+# the renderer is not safe to run twice at once).
+_CAD_RENDER: dict = {"thread": None}
+
+
+def render_cad_with_progress(host, src: str, *, on_start=None,
+                             cancel_on_close: bool = False) -> dict:
+    """Render a DXF/SVG on a worker thread while a progress window with
+    Cancel keeps the UI alive, and return the outcome:
+    {"xml": ...}, {"cad_error": e}, {"error": e}, {"cancelled": True}
+    or {"busy": True} (a cancelled render is still stopping; the user has
+    been told). Nothing is written here: the caller writes the .drawio
+    on the Tk thread, and only when the import was not cancelled.
+
+    `host` is the app, or a _RootHost for a window with no project open
+    (the start screen); only its root, _px and _autosize_dialog are used.
+    The Tk thread waits in a local event loop, so callers get the result
+    directly. `on_start(thread, cancel_event)` runs once the worker has
+    started. With `cancel_on_close`, closing the window cancels the
+    import and then closes the window."""
+    root = host.root
+    ext = os.path.splitext(src)[1].lower()
+    if ext not in cad_open_exts():
+        # This copy has no importer for it (the Windows .exe): say what to
+        # do instead, without a progress window flashing up first.
+        return {"cad_error": cad_mod.CadImportError(
+            cad_mod.missing_backend_message(ext))}
+    prev = _CAD_RENDER["thread"]
+    if prev is not None and prev.is_alive():
+        messagebox.showinfo(
+            "Still stopping the last import",
+            "The drawing you cancelled is still being stopped.\n\n"
+            "Try again in a few seconds.", parent=root)
+        return {"busy": True}
+    kind = ext.lstrip(".").upper()
+    cancel = threading.Event()
+    prog = _ProgressDialog(host, f"Import {kind} drawing",
+                           f"Importing {os.path.basename(src)}",
+                           on_cancel=cancel.set)
+    prog.busy("Rendering the drawing…")
+    done = tk.BooleanVar(master=root, value=False)
+    out: dict = {}
+    closed = {"v": False}
+    old_close = (_cancel_on_window_close(root, cancel, closed)
+                 if cancel_on_close else None)
+
+    def work(_report, _is_cancelled):
+        try:
+            return {"xml": cad_mod.render_to_drawio_xml(src)}
+        except cad_mod.CadImportError as e:
+            return {"cad_error": e}
+        except Exception as e:
+            return {"error": e}
+
+    def on_done(res):
+        if not out:
+            out.update(res)
+        with contextlib.suppress(tk.TclError):
+            done.set(True)
+
+    def watch_cancel():
+        if done.get():
+            return
+        if cancel.is_set():
+            on_done({"cancelled": True})
+            return
+        with contextlib.suppress(tk.TclError):
+            root.after(100, watch_cancel)
+
+    t = _run_worker(root, work, on_done, cancel=cancel, name="cwt-cad-import")
+    _CAD_RENDER["thread"] = t
+    if on_start is not None:
+        on_start(t, cancel)
+    root.after(100, watch_cancel)
+    with contextlib.suppress(tk.TclError):
+        root.wait_variable(done)
+    prog.close()
+    if cancel_on_close:
+        with contextlib.suppress(tk.TclError):
+            root.protocol("WM_DELETE_WINDOW", old_close or "")
+    if closed["v"]:
+        with contextlib.suppress(tk.TclError):
+            root.destroy()
+    # Cancel (or closing the app, which cancels too) wins over a result
+    # that happened to arrive first: the user asked to stop.
+    if cancel.is_set():
+        return {"cancelled": True}
+    return out
 
 
 # ============================================================ Main app
@@ -3767,7 +3926,9 @@ class CameraWireTool:
             except tk.TclError:
                 pass
         file_menu.config(postcommand=_refresh_file_menu_state)
-        file_menu.add_command(label="Open… (.zsmt / .drawio / .dxf / .svg)",
+        file_menu.add_command(label="Open… ("
+                              + " / ".join((".zsmt", ".drawio",
+                                            *cad_open_exts())) + ")",
                               command=self._file_open, accelerator="Ctrl+O")
         self._recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
@@ -4083,7 +4244,8 @@ class CameraWireTool:
                 side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
 
         _ttkbtn("Open", self._file_open,
-                "Open a project (.zsmt) or drawing (.drawio / .dxf / .svg)  (Ctrl+O)")
+                "Open a project (.zsmt) or drawing ("
+                + " / ".join((".drawio", *cad_open_exts())) + ")  (Ctrl+O)")
         _ttkbtn("Save", self._save_drawio, "Save  (Ctrl+S)")
         _sep(toolbar)
         self._undo_btn = _ttkbtn("Undo", self._undo, "Undo  (Ctrl+Z)")
@@ -5732,12 +5894,20 @@ class CameraWireTool:
             # From here on nothing may open another window: an import
             # that finishes while we wait must not relaunch the app.
             self._closing = True
-            self._close_pending = True
             self._cancel_background_work()
+            if not self._background_writes_files():
+                # A DXF/SVG render writes nothing and cannot be stopped
+                # mid-way; it is a daemon thread, so just close now
+                # instead of leaving a usable window up for seconds.
+                self._finish_close()
+                return
+            self._close_pending = True
             self._flash_status("Stopping the running task, then closing…",
                                ttl_ms=int(self._CLOSE_WAIT_S * 1000))
-            with contextlib.suppress(tk.TclError):
-                self.root.config(cursor="watch")
+            # A modal "Closing…" window: until the export has stopped the
+            # main window must not start new work (another export, File >
+            # Open) that would then be cut off.
+            closing_dlg = self._show_closing_window()
             deadline = time.monotonic() + self._CLOSE_WAIT_S
 
             def wait_then_close():
@@ -5752,13 +5922,39 @@ class CameraWireTool:
                               RuntimeError(f"no stop after "
                                            f"{self._CLOSE_WAIT_S:.0f} s"))
                 self._close_pending = False
-                with contextlib.suppress(tk.TclError):
-                    self.root.config(cursor="")
+                if closing_dlg is not None:
+                    closing_dlg.close()
                 self._finish_close()
             with contextlib.suppress(tk.TclError):
                 self.root.after(50, wait_then_close)
             return
         self._finish_close()
+
+    def _background_writes_files(self) -> bool:
+        """True if the running task writes files (an export), so closing
+        must wait for it to stop cleanly. A DXF/SVG import only renders;
+        its .drawio is written on the Tk thread after it finishes."""
+        if getattr(self, "_pdf_export_busy", False):
+            return True
+        t = getattr(self, "_background_thread", None)
+        return (t is not None and t.is_alive()
+                and t is not getattr(self, "_cad_thread", None))
+
+    def _show_closing_window(self):
+        """A small modal window that says the app is closing, with no
+        buttons; returns it (a _ProgressDialog) or None."""
+        try:
+            dlg = _ProgressDialog(self, "Closing",
+                                  "Stopping the export, then closing…",
+                                  on_cancel=lambda: None)
+        except tk.TclError:
+            return None
+        with contextlib.suppress(tk.TclError):
+            dlg.cancel_btn.master.pack_forget()
+            dlg.top.protocol("WM_DELETE_WINDOW", lambda: None)
+            dlg.top.unbind("<Escape>")
+        dlg.busy("Nothing from the stopped export is saved.")
+        return dlg
 
     def _finish_close(self) -> None:
         self._closing = True
@@ -11791,57 +11987,16 @@ class CameraWireTool:
         kind = os.path.splitext(src)[1].lstrip(".").upper()
         if self._closing:
             return None
-        prev = getattr(self, "_cad_thread", None)
-        if prev is not None and prev.is_alive():
-            messagebox.showinfo(
-                "Still stopping the last import",
-                "The drawing you cancelled is still being stopped.\n\n"
-                "Try again in a few seconds.", parent=self.root)
+
+        def on_start(t, cancel):
+            self._cad_thread = self._background_thread = t
+            self._background_cancel = cancel
+            self._flash_status(f"Importing {kind} drawing — rendering…")
+        out = render_cad_with_progress(self, src, on_start=on_start)
+        if out.get("busy"):
             return None
-        self._flash_status(f"Importing {kind} drawing — rendering…")
-        cancel = threading.Event()
-        prog = _ProgressDialog(self, f"Import {kind} drawing",
-                               f"Importing {os.path.basename(src)}",
-                               on_cancel=cancel.set)
-        with contextlib.suppress(tk.TclError):
-            prog.detail.config(text="Rendering the drawing…")
-            prog.bar.config(mode="indeterminate")
-            prog.bar.start(20)
-        done = tk.BooleanVar(master=self.root, value=False)
-        out: dict = {}
-
-        def work(_report, _is_cancelled):
-            try:
-                return {"xml": cad_mod.render_to_drawio_xml(src)}
-            except cad_mod.CadImportError as e:
-                return {"cad_error": e}
-            except Exception as e:
-                return {"error": e}
-
-        def on_done(res):
-            if not out:
-                out.update(res)
-            with contextlib.suppress(tk.TclError):
-                done.set(True)
-
-        def watch_cancel():
-            if done.get():
-                return
-            if cancel.is_set():
-                on_done({"cancelled": True})
-                return
-            with contextlib.suppress(tk.TclError):
-                self.root.after(100, watch_cancel)
-
-        self._run_in_background(work, on_done, cancel=cancel)
-        self._cad_thread = self._background_thread
-        self.root.after(100, watch_cancel)
-        with contextlib.suppress(tk.TclError):
-            self.root.wait_variable(done)
-        with contextlib.suppress(tk.TclError):
-            prog.bar.stop()
-        prog.close()
-        return self._finish_cad_import(src, kind, out, cancel.is_set())
+        return self._finish_cad_import(src, kind, out,
+                                       bool(out.get("cancelled")))
 
     def _finish_cad_import(self, src: str, kind: str, out: dict,
                            cancelled: bool) -> str | None:
@@ -11876,11 +12031,7 @@ class CameraWireTool:
             parent=self.root,
             title="Open project or drawing",
             initialdir=os.path.dirname(self.project_path),
-            filetypes=[("Project or drawing",
-                        f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
-                       ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
-                       ("Draw.io files", "*.drawio"),
-                       ("CAD / vector drawing", "*.dxf *.svg")])
+            filetypes=open_filetypes())
         if not path:
             return
         bundle_path: str | None = None
@@ -15918,9 +16069,7 @@ class CameraWireTool:
             parent=self.root,
             title="Pick the drawing for the new floor",
             initialdir=os.path.dirname(self.drawio_path),
-            filetypes=[("Drawing", "*.drawio *.dxf *.svg"),
-                       ("Draw.io files", "*.drawio"),
-                       ("CAD / vector drawing", "*.dxf *.svg")])
+            filetypes=floor_filetypes())
         if not path:
             return
         # A DXF/SVG floor is converted the same way File > Open does it,
@@ -18988,39 +19137,10 @@ class CameraWireTool:
         `report(done, total, text)`, which only queues a message; the Tk
         thread polls the queue with after() and updates `progress` (a
         _ProgressDialog). Tk calls from other threads crash on Windows."""
-        q: queue.Queue = queue.Queue()
         cancel = cancel or threading.Event()
-
-        def report(done, total, text=""):
-            q.put(("progress", done, total, text))
-
-        def run():
-            try:
-                res = work(report, cancel.is_set)
-            except Exception as e:     # work() should catch; belt and braces
-                res = {"error": e}
-            q.put(("done", res))
-
-        t = threading.Thread(target=run, daemon=True, name="cwt-export")
-        self._background_thread = t
         self._background_cancel = cancel
-        t.start()
-
-        def poll():
-            try:
-                while True:
-                    msg = q.get_nowait()
-                    if msg[0] == "progress":
-                        if progress is not None:
-                            progress.update(msg[1], msg[2], msg[3])
-                    else:
-                        on_done(msg[1])
-                        return
-            except queue.Empty:
-                pass
-            with contextlib.suppress(tk.TclError):
-                self.root.after(80, poll)
-        self.root.after(80, poll)
+        self._background_thread = _run_worker(
+            self.root, work, on_done, progress=progress, cancel=cancel)
 
     # ---------------- Export completion + remembered export folder
     def _export_initialdir(self) -> str:
@@ -19606,11 +19726,57 @@ class ProjectOpenError(Exception):
     (start screen or current project) instead of exiting."""
 
 
-_OPEN_FILETYPES = [("Project or drawing",
-                    f"*{bundle_mod.BUNDLE_EXT} *.drawio *.dxf *.svg"),
-                   ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
-                   ("Draw.io files", "*.drawio"),
-                   ("CAD / vector drawing", "*.dxf *.svg")]
+class _CadFormats:
+    """Which CAD formats this copy can open; filled in on first use."""
+
+    exts: tuple[str, ...] | None = None
+
+
+def cad_open_exts() -> tuple[str, ...]:
+    """The CAD formats (".dxf", ".svg") this copy of the app can open,
+    checked once. The Windows .exe ships without the CAD importers, so
+    there the answer is () and the app does not offer those files."""
+    if _CadFormats.exts is None:
+        _CadFormats.exts = cad_mod.available_exts()
+    return _CadFormats.exts
+
+
+def _cad_patterns() -> str:
+    return " ".join(f"*{e}" for e in cad_open_exts())
+
+
+def open_filetypes() -> list[tuple[str, str]]:
+    """File-dialog filters for Open: projects and drawings, plus DXF/SVG
+    only when this copy can import them."""
+    cad = _cad_patterns()
+    out = [("Project or drawing",
+            f"*{bundle_mod.BUNDLE_EXT} *.drawio" + (f" {cad}" if cad else "")),
+           ("Project bundle", f"*{bundle_mod.BUNDLE_EXT}"),
+           ("Draw.io files", "*.drawio")]
+    if cad:
+        out.append(("CAD / vector drawing", cad))
+    return out
+
+
+def floor_filetypes() -> list[tuple[str, str]]:
+    """File-dialog filters for Add Floor (drawings only)."""
+    cad = _cad_patterns()
+    out = [("Drawing", "*.drawio" + (f" {cad}" if cad else "")),
+           ("Draw.io files", "*.drawio")]
+    if cad:
+        out.append(("CAD / vector drawing", cad))
+    return out
+
+
+def open_formats_text(sep: str = ", ", last: str = " or ") -> str:
+    """".zsmt project, .drawio, .dxf or .svg" — only what can be opened."""
+    parts = [".zsmt project", ".drawio", *cad_open_exts()]
+    return sep.join(parts[:-1]) + last + parts[-1]
+
+
+# Kept for callers that read the list directly; the dialogs call
+# open_filetypes() so they match what this copy can open.
+_OPEN_FILETYPES = open_filetypes()
 
 
 def make_root() -> tk.Tk:
@@ -19699,6 +19865,45 @@ def _path_from_argv(argv: list[str]) -> str | None:
     return None
 
 
+class _RootHost:
+    """What render_cad_with_progress and _ProgressDialog need from the
+    app (root, _px, _autosize_dialog), for a window with no project open
+    yet: the start screen."""
+
+    def __init__(self, root) -> None:
+        self.root = root
+
+    def _px(self, n: float) -> int:
+        return int(round(n * ui_scale(self.root)))
+
+    def _autosize_dialog(self, dlg, min_w: int = 0, min_h: int = 0) -> None:
+        CameraWireTool._autosize_dialog(self, dlg, min_w, min_h)
+
+
+def _import_cad_for_open(root, path: str) -> str | None:
+    """Convert a DXF/SVG opened from the start screen or the command line
+    into a .drawio and return its path; None if cancelled or it failed
+    (after saying why). Rendered in the background with a progress
+    window and Cancel, like File > Open in the main window: a dense DXF
+    takes seconds, long enough for Windows to call the window "Not
+    Responding"."""
+    out = render_cad_with_progress(_RootHost(root), path,
+                                   cancel_on_close=True)
+    if out.get("busy") or out.get("cancelled"):
+        return None
+    err = out.get("cad_error") or out.get("error")
+    if err is None:
+        try:
+            return cad_mod.write_drawio_xml(path, out["xml"])
+        except (cad_mod.CadImportError, KeyError, TypeError) as e:
+            err = e
+    log_error(f"CAD import failed: {path}", err)
+    with contextlib.suppress(tk.TclError):
+        messagebox.showerror("Couldn't import drawing", f"{path}\n\n{err}",
+                             parent=root)
+    return None
+
+
 def _resolve_open_target(root, path: str) -> tuple[str, str | None] | None:
     """(drawing to open, bundle or None) for a project, drawing or CAD
     file; or None after telling the user why it can't be opened."""
@@ -19717,18 +19922,10 @@ def _resolve_open_target(root, path: str) -> tuple[str, str | None] | None:
             return None
         path = drawio
     elif cad_mod.is_cad_drawing(path):
-        with contextlib.suppress(tk.TclError):
-            root.config(cursor="watch")
-            root.update_idletasks()
-        try:
-            path = cad_mod.convert_to_drawio(path)
-        except cad_mod.CadImportError as e:
-            messagebox.showerror("Couldn't import drawing", f"{path}\n\n{e}",
-                                 parent=root)
+        converted = _import_cad_for_open(root, path)
+        if converted is None:
             return None
-        finally:
-            with contextlib.suppress(tk.TclError):
-                root.config(cursor="")
+        path = converted
     err = _preflight_drawio(path)
     if err:
         messagebox.showerror("Couldn't open file", f"{path}\n\n{err}",
@@ -19768,7 +19965,7 @@ class StartScreen:
             actions, text="Open project or drawing…", style="Accent.TButton",
             default="active", command=self.open_dialog, underline=0)
         self.open_btn.pack(side=tk.LEFT)
-        ttk.Label(actions, text="  .zsmt project, .drawio, .dxf or .svg",
+        ttk.Label(actions, text="  " + open_formats_text(),
                   style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
         # How it works: the same three steps the main window's guide shows.
@@ -19918,7 +20115,7 @@ class StartScreen:
     def open_dialog(self) -> None:
         chosen = filedialog.askopenfilename(
             parent=self.root, title="Open Camera Wire Tool project",
-            initialdir=self.initial_dir, filetypes=_OPEN_FILETYPES)
+            initialdir=self.initial_dir, filetypes=open_filetypes())
         if chosen:
             self.open_path(chosen)
 
@@ -19967,13 +20164,22 @@ def main() -> None:
     # The one obvious project opens straight away. With none, several, or
     # one that can't be opened (after saying why), show the start screen
     # instead of quitting.
+    nearby = bundles + [p for p in drawio_files
+                        if not _bundle_for_work_drawing(p)]
+    if target and cad_mod.is_cad_drawing(target):
+        # A DXF/SVG from Explorer: import it from the start screen, so the
+        # progress window has a real window behind it and a failed or
+        # cancelled import leaves the user somewhere useful.
+        start = StartScreen(root, initial_dir=os.path.dirname(target),
+                            nearby=nearby)
+        root.after(150, lambda: start.open_path(target))
+        root.mainloop()
+        return
     resolved = _resolve_open_target(root, target) if target else None
     if resolved is not None:
         _launch_app(root, *resolved)
     else:
-        StartScreen(root, initial_dir=initial,
-                    nearby=bundles + [p for p in drawio_files
-                                      if not _bundle_for_work_drawing(p)])
+        StartScreen(root, initial_dir=initial, nearby=nearby)
     root.mainloop()
 
 

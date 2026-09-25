@@ -92,3 +92,27 @@ def test_close_without_export_does_not_ask(gui_app, monkeypatch):
     app._on_close()
     assert asked == []
     assert quits == [1]
+
+
+def test_window_is_blocked_while_the_export_stops(gui_app, monkeypatch):
+    """While closing waits for an export to stop, a modal "Closing"
+    window keeps the user from starting new work that would then be cut
+    off (another export, File > Open); it goes away when the app
+    closes."""
+    app = gui_app
+    quits = []
+    monkeypatch.setattr(app.root, "quit", lambda: quits.append(1))
+    monkeypatch.setattr(cwt.messagebox, "askyesno", lambda *a, **k: True)
+    _start_slow_job(app)
+    app._on_close()
+    pump(app.root, 2)
+    tops = [w for w in app.root.winfo_children()
+            if isinstance(w, cwt.tk.Toplevel) and w.winfo_exists()]
+    assert tops and tops[-1].title() == "Closing"
+    assert app.root.grab_current() is tops[-1]
+    end = time.monotonic() + 5
+    while not quits and time.monotonic() < end:
+        pump(app.root, 1)
+        time.sleep(0.02)
+    assert quits == [1]
+    assert not tops[-1].winfo_exists()

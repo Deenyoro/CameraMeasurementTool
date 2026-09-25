@@ -12,15 +12,20 @@ The heavy rendering backends are optional and imported lazily:
 * DXF  → ``ezdxf`` + ``matplotlib`` (Agg)
 * SVG  → ``PyMuPDF`` (``fitz``)
 
-A missing backend raises :class:`CadImportError` carrying an actionable
-``pip install`` hint, so the base app still runs without them.
+A missing backend raises :class:`CadImportError` that says, in plain
+language, what to do instead (and, when running from source, which
+package to install), so the base app still runs without them.
+:func:`available_exts` tells the UI up front which formats this copy of
+the app can open, so it only offers those.
 """
 
 from __future__ import annotations
 
 import base64
+import importlib.util
 import io
 import os
+import sys
 import xml.etree.ElementTree as ET
 
 from PIL import Image
@@ -36,8 +41,51 @@ _TARGET_LONG_PX = 3000
 _MAX_LONG_PX = 6000
 
 
+# The modules each format needs. The Windows .exe is built without them
+# (they would add well over 100 MB), so there they are simply absent.
+_BACKENDS = {
+    ".dxf": ("ezdxf", "matplotlib"),
+    ".svg": ("fitz",),
+}
+_PIP_NAMES = {".dxf": "ezdxf matplotlib", ".svg": "pymupdf"}
+
+
 class CadImportError(RuntimeError):
     """A DXF/SVG could not be rendered into a drawio background."""
+
+
+def _module_present(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def available_exts() -> tuple[str, ...]:
+    """The drawing extensions this copy of the app can open (a subset of
+    :data:`SUPPORTED_CAD_EXTS`). Only checks that the backends can be
+    found; nothing heavy is imported."""
+    return tuple(ext for ext in SUPPORTED_CAD_EXTS
+                 if all(_module_present(m) for m in _BACKENDS[ext]))
+
+
+def missing_backend_message(ext: str) -> str:
+    """Why a .dxf/.svg can't be opened here and what to do instead, for
+    someone who has never used a command line. The pip hint is only
+    given when running from source, where it can actually be followed."""
+    ext = ext.lower()
+    kind = ext.lstrip(".").upper()
+    msg = (f"This copy of Camera Wire Tool can't open {kind} drawings.\n\n"
+           "What you can do instead:\n"
+           "  \u2022  Ask whoever sent the plan for a .drawio file or a "
+           "Camera Wire Tool project (.zsmt).\n"
+           f"  \u2022  Or open the {kind} in your CAD program, export the "
+           "plan as a PNG image, place that image in draw.io "
+           "(File > Import), save it as .drawio, and open that here.")
+    if not getattr(sys, "frozen", False) and ext in _PIP_NAMES:
+        msg += ("\n\nRunning from source? Install the importer with:\n"
+                f"    pip install {_PIP_NAMES[ext]}")
+    return msg
 
 
 def is_cad_drawing(path: str) -> bool:
@@ -78,10 +126,7 @@ def render_svg(path: str) -> Image.Image:
     try:
         import fitz  # PyMuPDF  # noqa: PLC0415 (optional backend, lazy by design)
     except ImportError as e:
-        raise CadImportError(
-            "Opening SVG files needs PyMuPDF.\n\n"
-            "Install it with:\n    pip install pymupdf"
-        ) from e
+        raise CadImportError(missing_backend_message(".svg")) from e
 
     try:
         doc = fitz.open(path)
@@ -121,10 +166,7 @@ def render_dxf(path: str) -> Image.Image:
         from ezdxf.addons.drawing import Frontend, RenderContext  # noqa: PLC0415
         from ezdxf.addons.drawing.matplotlib import MatplotlibBackend  # noqa: PLC0415
     except ImportError as e:
-        raise CadImportError(
-            "Opening DXF files needs ezdxf and matplotlib.\n\n"
-            "Install them with:\n    pip install ezdxf matplotlib"
-        ) from e
+        raise CadImportError(missing_backend_message(".dxf")) from e
 
     # A bare Figure on its own Agg canvas, not pyplot: pyplot keeps
     # global state that is not thread-safe, and the app renders on a

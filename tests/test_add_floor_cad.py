@@ -3,8 +3,12 @@ converted first) and refuses a drawing with no floor-plan image."""
 
 from __future__ import annotations
 
+import pytest
+
 import camera_wire_tool as cwt
 from tests.gui_support import pump, write_drawio
+
+pytestmark = pytest.mark.usefixtures("cad_backends")
 
 
 def _dialogs(root):
