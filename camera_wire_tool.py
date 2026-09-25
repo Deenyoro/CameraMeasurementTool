@@ -1768,6 +1768,15 @@ def apply_theme(root: tk.Tk) -> None:
             sv_ttk.set_theme("dark")
         except tk.TclError:
             pass
+        # sv-ttk colours the window background and the classic-widget
+        # palette from a <<ThemeChanged>> binding, which only fires for
+        # windows that already exist. A window whose content is built
+        # later (the start screen after a failed open, an import started
+        # from it) kept Tk's light grey behind its ttk widgets. Apply the
+        # colours now.
+        with contextlib.suppress(tk.TclError):
+            if root.tk.call("info", "procs", "configure_colors"):
+                root.tk.call("configure_colors")
     _init_fonts(root)
     apply_window_icon(root)
     # Touch up a few colors via ttk style for our custom segmented control
