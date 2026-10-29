@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-10-28
+
+Patch release: a usability pass on what a field installer sees on a
+laptop screen, plus safer opening of drawings from other people. Project,
+drawing and export file formats are unchanged. The app now reports
+version 1.2.4.
+
+### Fixed
+
+- **The blue Wire banner fits the map.** On a 1280 or 1366 px laptop it
+  ran off both ends, so "right-click to finish" and "Esc to cancel" were
+  cut off. Every mode banner now shows a shorter version when the map is
+  narrow. The Wire banner also tells you what really works: click a
+  camera to start, click along the route, right-click to finish.
+- **Every button on the Wires and Symbols tabs is visible.** The "Show
+  wires on map" box was hidden at common window sizes and "+ Run Point"
+  was cut in half. The buttons now wrap onto a second row on a narrow
+  side panel, and so do the BOM tab's waste, tax and currency boxes.
+- **Typing 10 in the waste box adds 10 %.** It used to multiply the whole
+  cable cost by ten. The box takes 1.10, 10 or 0.10 for 10 % extra and
+  shows what it means ("= +10 %"). A value it can't read uses 10 % and
+  says so in orange. A negative tax rate counts as no tax.
+- **The map legend fits its labels.** Long device names and their counts
+  ran out of the Symbols box over the floor plan, on screen and in PDF
+  and PNG exports. The box now grows to fit.
+- The known-distance box no longer accepts "inf" or "nan", which set a
+  scale that made every wire length unusable.
+- The Keyboard Shortcuts list wraps long descriptions instead of cutting
+  them off, and scrolls with the mouse wheel.
+- The drag-align "View %" box shows a whole number (it showed
+  14.1114718…).
+- A settings file with a word where a number belongs no longer stops
+  projects from opening.
+
+### Changed
+
+- The status bar no longer shows a lone "—" when there are no wires, and
+  before the scale is set the wire length says "px (scale not set)".
+- Empty BOM tables say "No wires yet" or "None yet: right-click a camera"
+  in a few words that fit the column. The Wires tab explains the one way
+  to add a wire: press W, click a camera, click the route, right-click.
+- Opening a file that isn't a readable drawing says so in plain words.
+  A drawing saved with draw.io's "Compressed" option explains how to
+  save it uncompressed.
+
+### Security
+
+- `.drawio` files are read with a hardened XML parser (defusedxml) that
+  refuses DTDs and entity declarations, which draw.io never writes. A
+  crafted drawing could otherwise try to read local files or expand into
+  gigabytes of memory. `defusedxml` is a new required dependency and is
+  bundled into the Windows and Linux builds.
+
 ## [1.2.3] - 2026-09-25
 
 - CI: pipelines run on merge requests (tests/Linux builds; Windows/macOS

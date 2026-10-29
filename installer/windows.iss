@@ -1,13 +1,13 @@
 ; Inno Setup script for Camera Wire Tool (Windows installer).
 ; Built in CI after PyInstaller produces dist\CameraWireTool.exe:
-;   ISCC.exe /DMyAppVersion=1.2.3 installer\windows.iss
+;   ISCC.exe /DMyAppVersion=1.2.4 installer\windows.iss
 ; The app is a single self-contained exe (Python, Tk, sv_ttk, reportlab all
 ; bundled), so the installer just places it, makes shortcuts, and registers
 ; an uninstaller. Output: installer\installer_out\
 ;   CameraWireTool-<version>-windows-x64-setup.exe
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.2.3"
+  #define MyAppVersion "1.2.4"
 #endif
 
 #define MyAppName "Camera Wire Tool"
