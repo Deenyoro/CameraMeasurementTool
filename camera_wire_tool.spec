@@ -28,7 +28,8 @@ hiddenimports = []
 # PyInstaller's import analysis alone would miss:
 #   sv_ttk     - the Sun Valley theme's .tcl/.png files
 #   reportlab  - PDF export (fonts, lazily imported modules)
-# Both are REQUIRED: the build fails if either is not installed. (Before,
+#   defusedxml - safe .drawio (XML) parsing
+# All are REQUIRED: the build fails if either is not installed. (Before,
 # this was best-effort, and because collect_all() on a missing package
 # just returns empty lists, CI shipped an exe without reportlab and PDF
 # export only said "requires reportlab" at runtime.)
@@ -37,7 +38,7 @@ hiddenimports = []
 # (ezdxf + matplotlib for DXF, PyMuPDF for SVG) are left out of the build
 # (PyMuPDF is excluded below) and the app reports them as unavailable.
 # packaging/check_bundle.py verifies the finished binary in CI.
-REQUIRED_PACKAGES = ("sv_ttk", "reportlab")
+REQUIRED_PACKAGES = ("sv_ttk", "reportlab", "defusedxml")
 for pkg in REQUIRED_PACKAGES:
     if importlib.util.find_spec(pkg) is None:
         raise SystemExit(

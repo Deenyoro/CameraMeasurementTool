@@ -24,6 +24,7 @@ REQUIRED_MODULES = [
     "sv_ttk",
     "reportlab.pdfgen.canvas",
     "reportlab.platypus",
+    "defusedxml.ElementTree",
     "PIL.ImageTk",
     "PIL._tkinter_finder",
 ]

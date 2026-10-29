@@ -75,6 +75,37 @@ except ImportError:
     _HAS_EXPORT = False
     export_mod = None  # type: ignore
 
+try:
+    # Hardened XML parser for .drawio files, which often come from
+    # someone else (an architect, another installer).
+    from defusedxml import ElementTree as _safe_et
+except ImportError:  # an old environment without it: see _parse_xml_file
+    _safe_et = None
+
+_XML_DECL_RE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+def _parse_xml_file(path: str) -> ET.ElementTree:
+    """Parse a .drawio (XML) file, refusing DTDs and entity declarations.
+    draw.io never writes them; a crafted file could use them to read
+    local files (XXE) or to expand into gigabytes ("billion laughs").
+    Raises ET.ParseError for a refused or malformed file, OSError when
+    it can't be read."""
+    if _safe_et is not None:
+        try:
+            return _safe_et.parse(path, forbid_dtd=True)
+        except ValueError as e:     # defusedxml's DTDForbidden & co.
+            raise ET.ParseError(
+                "the file contains a DTD or entity declaration, which a "
+                "draw.io drawing never has") from e
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if _XML_DECL_RE.search(data):
+        raise ET.ParseError(
+            "the file contains a DTD or entity declaration, which a "
+            "draw.io drawing never has")
+    return ET.ElementTree(ET.fromstring(data))
+
 
 def _active_window():
     """The window the user is working in: the modal dialog holding the
@@ -346,10 +377,12 @@ def detect_color(style: str) -> str:
 def parse_drawio(filepath: str):
     """Parse a .drawio file. Returns (bg_image, page_w, page_h, devices, symbol_types, legend_box_info)."""
     try:
-        tree = ET.parse(filepath)
+        tree = _parse_xml_file(filepath)
     except ET.ParseError as e:
         log_error(f"XML parse error in {filepath}", e)
-        raise RuntimeError(f"Could not parse .drawio XML:\n{e}") from e
+        raise RuntimeError(
+            "This file isn't a readable draw.io drawing. It may be "
+            f"damaged, or not a .drawio file at all.\n\nDetails: {e}") from e
     except OSError as e:
         log_error(f"OS error reading {filepath}", e)
         raise RuntimeError(f"Could not read file:\n{e}") from e
@@ -360,6 +393,13 @@ def parse_drawio(filepath: str):
         raise RuntimeError("No <diagram> element found in .drawio file")
     model = diagram.find("mxGraphModel")
     if model is None:
+        if (diagram.text or "").strip():
+            # draw.io's "Compressed" file option stores the diagram as
+            # base64 text instead of XML.
+            raise RuntimeError(
+                "This drawing was saved compressed by draw.io. In draw.io, "
+                "open File > Properties, untick \"Compressed\", save, and "
+                "open it here again.")
         raise RuntimeError("No <mxGraphModel> element found in .drawio file")
 
     # Drawio's pageWidth/pageHeight are integer XML attributes. Hand-
@@ -695,6 +735,87 @@ class ElidingLabel(ttk.Label):
             if str(super().cget("text")) != shown:
                 super().configure(text=shown)
             self._tip.text = text if shown != text else ""
+        except tk.TclError:
+            pass
+
+
+def flow_rows(widths: list[int], avail: int) -> list[int]:
+    """Row number for each item when items of `widths` are laid out left
+    to right and wrap onto a new row once `avail` pixels are used. An
+    item wider than `avail` gets a row of its own."""
+    rows: list[int] = []
+    row = used = 0
+    for w in widths:
+        if used and used + w > avail:
+            row += 1
+            used = 0
+        rows.append(row)
+        used += w
+    return rows
+
+
+class FlowFrame(ttk.Frame):
+    """A row of buttons that wraps onto a second row when the side panel
+    is too narrow for all of them, instead of cutting the last ones off.
+    Children are laid out with add(); each keeps its own natural width."""
+
+    def __init__(self, master, *, padx: int = 2, pady: int = 2, **kw):
+        super().__init__(master, **kw)
+        self._items: list[tk.Widget] = []
+        self._padx, self._pady = padx, pady
+        self._rows: list[int] | None = None
+        self._lines: list[ttk.Frame] = []
+        self._pending: str | None = None
+        self.bind("<Configure>", lambda _e: self._schedule(), add="+")
+
+    def add(self, widget: tk.Widget) -> tk.Widget:
+        self._items.append(widget)
+        self._rows = None
+        # A group whose text changes ("= +10 %") changes width too.
+        widget.bind("<Configure>", lambda _e: self._schedule(), add="+")
+        self.relayout()
+        return widget
+
+    def _schedule(self) -> None:
+        # Once per idle round, never from inside a geometry event: doing
+        # the repacking straight from <Configure> fed back into itself.
+        if self._pending is None:
+            with contextlib.suppress(tk.TclError):
+                self._pending = self.after_idle(self._run_pending)
+
+    def _run_pending(self) -> None:
+        self._pending = None
+        self.relayout()
+
+    def relayout(self) -> None:
+        try:
+            avail = self.winfo_width()
+            if avail <= 1:
+                # Not mapped yet: one row, and the panel's real width
+                # rearranges it on the first <Configure>.
+                avail = 10 ** 6
+            widths = [w.winfo_reqwidth() + 2 * self._padx
+                      for w in self._items]
+            rows = flow_rows(widths, avail)
+            if rows == self._rows:
+                return
+            self._rows = rows
+            n = (max(rows) + 1) if rows else 0
+            while len(self._lines) < n:
+                self._lines.append(ttk.Frame(self))
+            for i, line in enumerate(self._lines):
+                if i < n:
+                    line.pack(fill=tk.X, anchor=tk.W)
+                else:
+                    line.pack_forget()
+            for w, r in zip(self._items, rows, strict=True):
+                w.pack_forget()
+                w.pack(in_=self._lines[r], side=tk.LEFT,
+                       padx=self._padx, pady=self._pady)
+                # The row frames are created after the buttons, so they
+                # would sit on top of them in the stacking order. Raising
+                # each in turn keeps their order (and so the Tab order).
+                w.lift()
         except tk.TclError:
             pass
 
@@ -2433,10 +2554,16 @@ class CameraWireTool:
 
         # BOM tab inputs — defaults overridden by persisted user prefs
         prefs = load_settings()
-        self._bom_waste_var = tk.DoubleVar(
-            value=float(prefs.get("waste_factor", 1.10)))
+        # A hand-edited settings file with a word or NaN here used to
+        # stop the app from opening any project.
+        _w = self._as_waste_factor(prefs.get("waste_factor", 1.10))
+        self._bom_waste_var = tk.DoubleVar(value=1.10 if _w is None else _w)
+        try:
+            _t = float(prefs.get("tax_rate", 0.0))
+        except (TypeError, ValueError):
+            _t = 0.0
         self._bom_tax_var = tk.DoubleVar(
-            value=float(prefs.get("tax_rate", 0.0)))
+            value=_t if math.isfinite(_t) and _t >= 0 else 0.0)
         self._bom_currency_var = tk.StringVar(
             value=str(prefs.get("currency", "$")))
         # If a previous session set a unit, prefer it over the per-project
@@ -4631,10 +4758,9 @@ class CameraWireTool:
         # Big hint banner so users know the easy way to add wires.
         hint = ttk.Label(
             tab_wire,
-            text=("Tip:  right-click any device on the map → "
-                  "\"Draw wire from here…\" → click route points → "
-                  "right-click to finish.\n"
-                  "Or press W with a device selected, then click points."),
+            text=("To add a wire: press W (Wire), click a camera, click "
+                  "along the route, then right-click to finish. "
+                  "Esc cancels."),
             justify=tk.LEFT, foreground="#7fc4ff",
             font="AppHint",
             wraplength=self._px(360),
@@ -4695,30 +4821,32 @@ class CameraWireTool:
         # dev_listbox binding (Return → Center).
         self.wire_listbox.bind("<Return>", lambda _e: self._reassign_selected_wire())
 
-        wbtns = ttk.Frame(tab_wire)
-        wbtns.pack(fill=tk.X, padx=6, pady=4)
+        # Wraps onto a second row on a narrow panel; with pack the last
+        # buttons and the "Show wires on map" box were simply cut off.
+        wbtns = FlowFrame(tab_wire)
+        wbtns.pack(fill=tk.X, padx=4, pady=4)
         del_btn = ttk.Button(wbtns, text="Delete",
                               command=self._delete_selected_wire)
-        del_btn.pack(side=tk.LEFT)
+        wbtns.add(del_btn)
         Tooltip(del_btn,
                 "Delete the selected wire(s) from the project.\n"
                 "Undo with Ctrl+Z.")
         ra_btn = ttk.Button(wbtns, text="Reassign…",
                              command=self._reassign_selected_wire)
-        ra_btn.pack(side=tk.LEFT, padx=4)
+        wbtns.add(ra_btn)
         Tooltip(ra_btn,
                 "Re-associate this wire with a different device (or "
                 "leave it unassigned). Double-click a wire row to open "
                 "the same dialog.")
         rr_btn = ttk.Button(wbtns, text="Re-route",
                              command=self._reroute_selected_wire)
-        rr_btn.pack(side=tk.LEFT, padx=4)
+        wbtns.add(rr_btn)
         Tooltip(rr_btn,
                 "Delete this wire and start drawing a fresh route from "
                 "its source device. Original is restorable with Ctrl+Z.")
         simp_btn = ttk.Button(wbtns, text="Simplify",
                                command=self._simplify_selected_wire)
-        simp_btn.pack(side=tk.LEFT, padx=4)
+        wbtns.add(simp_btn)
         Tooltip(simp_btn,
                 "Remove redundant collinear waypoints from this wire.\n"
                 "Same shape, fewer handles.")
@@ -4728,7 +4856,7 @@ class CameraWireTool:
         show_wires_cb = ttk.Checkbutton(
             wbtns, text="Show wires on map",
             variable=self._show_wires, command=self._redraw)
-        show_wires_cb.pack(side=tk.RIGHT)
+        wbtns.add(show_wires_cb)
         Tooltip(show_wires_cb,
                 "Hide / show ALL wires on the map without hiding devices. "
                 "Mirrors the toolbar 'Wires' toggle.")
@@ -4775,33 +4903,33 @@ class CameraWireTool:
         self.sym_listbox.bind("<Button-3>", self._on_sym_listbox_rclick)
         self.sym_listbox.bind("<Return>", lambda _e: self._edit_symbol_type())
 
-        sym_btns = ttk.Frame(tab_sym)
+        sym_btns = FlowFrame(tab_sym)      # wraps instead of clipping
         sym_btns.pack(fill=tk.X, padx=4, pady=4)
         pl_btn = ttk.Button(sym_btns, text="Place on Map",
                              command=self._place_symbol_from_listbox)
-        pl_btn.pack(side=tk.LEFT, padx=2)
+        sym_btns.add(pl_btn)
         Tooltip(pl_btn,
                 "Drop an instance of the selected symbol on the map. "
                 "Hold Shift while clicking to place several in a row.")
         ed_btn = ttk.Button(sym_btns, text="Edit",
                              command=self._edit_symbol_type)
-        ed_btn.pack(side=tk.LEFT, padx=2)
+        sym_btns.add(ed_btn)
         Tooltip(ed_btn,
                 "Edit the selected symbol type's label / color / shape / "
                 "cable. Changes propagate to every instance on the map.")
         ad_btn = ttk.Button(sym_btns, text="Add…",
                              command=self._add_symbol_type)
-        ad_btn.pack(side=tk.LEFT, padx=2)
+        sym_btns.add(ad_btn)
         Tooltip(ad_btn, "Create a brand-new symbol type.")
         de_btn = ttk.Button(sym_btns, text="Delete",
                              command=self._delete_symbol_type)
-        de_btn.pack(side=tk.LEFT, padx=2)
+        sym_btns.add(de_btn)
         Tooltip(de_btn,
                 "Delete the symbol type AND every instance of it on the "
                 "map. Associated wires are removed too. Undo with Ctrl+Z.")
         rp_btn = ttk.Button(sym_btns, text="+ Run Point",
                              command=self._add_run_point_type)
-        rp_btn.pack(side=tk.LEFT, padx=2)
+        sym_btns.add(rp_btn)
         Tooltip(rp_btn,
                 "Quick-create an IDF / NVR / switch (wire-run-point) symbol.\n"
                 "Run points get a yellow halo on the map.")
@@ -4829,28 +4957,40 @@ class CameraWireTool:
         self._bom_heading.pack(anchor=tk.W, padx=6, pady=(6, 2))
 
         # Cost adjustment row
-        adj = ttk.Frame(tab_bom)
+        # Waste / tax / currency wrap as groups on a narrow panel (each
+        # box stays next to its label and its "= +10 %" read-back).
+        adj = FlowFrame(tab_bom, padx=0, pady=1)
+        g_waste, g_tax, g_cur = (ttk.Frame(adj) for _ in range(3))
         adj.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(adj, text="Waste ×").pack(side=tk.LEFT)
-        ws_entry = ttk.Entry(adj, textvariable=self._bom_waste_var, width=5)
-        ws_entry.pack(side=tk.LEFT, padx=(2, 8))
-        Tooltip(ws_entry, "Waste multiplier (1.10 = 10% extra material)")
-        ttk.Label(adj, text="Tax rate").pack(side=tk.LEFT)
-        tax_entry = ttk.Entry(adj, textvariable=self._bom_tax_var, width=5)
+        ttk.Label(g_waste, text="Waste ×").pack(side=tk.LEFT)
+        ws_entry = ttk.Entry(g_waste, textvariable=self._bom_waste_var, width=5)
+        ws_entry.pack(side=tk.LEFT, padx=(2, 2))
+        ws_entry.bind("<FocusOut>", self._normalize_waste_entry, add="+")
+        ws_entry.bind("<Return>", self._normalize_waste_entry, add="+")
+        Tooltip(ws_entry, "Extra cable for waste: type 1.10, 10 or 0.10 "
+                          "for 10 % extra")
+        # Live read-back ("= +10 %"), like the tax box: typing 10 used to
+        # multiply the whole cable cost by ten.
+        self._bom_waste_hint = ttk.Label(g_waste, text="", style="Muted.TLabel")
+        self._bom_waste_hint.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(g_tax, text="Tax rate").pack(side=tk.LEFT)
+        tax_entry = ttk.Entry(g_tax, textvariable=self._bom_tax_var, width=5)
         tax_entry.pack(side=tk.LEFT, padx=(2, 2))
         tax_entry.bind("<FocusOut>", self._normalize_tax_entry, add="+")
         tax_entry.bind("<Return>", self._normalize_tax_entry, add="+")
         Tooltip(tax_entry, "Sales tax rate: type 8 or 0.08 for 8 %")
         # Live read-back of what the box means ("= 8 %"), so 0.5 vs 0.5 %
         # is never a surprise; shown in the warning colour above 20 %.
-        self._bom_tax_hint = ttk.Label(adj, text="", style="Muted.TLabel")
+        self._bom_tax_hint = ttk.Label(g_tax, text="", style="Muted.TLabel")
         self._bom_tax_hint.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(adj, text="Currency").pack(side=tk.LEFT)
-        cur_entry = ttk.Entry(adj, textvariable=self._bom_currency_var, width=4)
+        ttk.Label(g_cur, text="Currency").pack(side=tk.LEFT)
+        cur_entry = ttk.Entry(g_cur, textvariable=self._bom_currency_var, width=4)
         cur_entry.pack(side=tk.LEFT, padx=2)
         Tooltip(cur_entry,
                 "Symbol prepended to every cost in the BOM + exports "
                 "($ / € / £ / ¥ / kr / etc.). Persisted to Preferences.")
+        for g in (g_waste, g_tax, g_cur):
+            adj.add(g)
         # (No explicit refresh button — the BOM auto-refreshes on every state
         # change via _post_command_refresh; the variables also trigger a
         # refresh when their values change.)
@@ -8280,8 +8420,25 @@ class CameraWireTool:
         cw = self.canvas.winfo_width() or 800
         if cw < 50:
             return
-        msg = ""
-        bg = "#FFD060"; fg = "#202020"
+        msgs = self._mode_banner_texts()
+        if not msgs:
+            return
+        bg = {Mode.CALIBRATE: "#FF8C42",
+              Mode.WIRE: "#7fc4ff"}.get(self.mode, "#FFD060")
+        msg = self._fit_banner_text(msgs, cw - self._px(16))
+        # Banner background bar
+        self.canvas.create_rectangle(0, 0, cw, 32, fill=bg, outline="",
+                                     tags="mode_banner")
+        self.canvas.create_text(cw / 2, 16, text=msg, fill="#202020",
+                                font="AppHeading",
+                                tags="mode_banner")
+
+    def _mode_banner_texts(self) -> list[str]:
+        """The banner for the current mode, longest first. Each shorter
+        version keeps the next click and how to finish or cancel; the
+        banner shows the longest one that fits the map's width (on a
+        1366 px laptop the old single text ran off both ends, cutting
+        off "right-click to finish" and "Esc")."""
         if self.mode == Mode.PLACE_DEVICE and self._place_type:
             if self._place_type == "__annotation__":
                 # Special-case the annotation sentinel — the user picked
@@ -8289,41 +8446,63 @@ class CameraWireTool:
                 # '__annotation__' code in the banner.
                 ann_text = (self._placing_annotation or {}).get("text", "")
                 preview = f" '{ann_text}'" if ann_text else ""
-                msg = (f"PLACEMENT MODE — click on the map to drop "
-                       f"annotation{preview}.   Esc to cancel.")
-            else:
-                info = self._safe_sym(self._place_type)
-                label = info.get("label", self._place_type)
-                msg = (f"PLACEMENT MODE — click anywhere on the map to drop a "
-                       f"'{self._place_type}' ({label}).   Esc to cancel.")
-        elif self.mode == Mode.CALIBRATE:
+                return [f"PLACE LABEL — click on the map to drop{preview}. "
+                        f"Esc to cancel.",
+                        "PLACE LABEL — click the map. Esc cancels."]
+            info = self._safe_sym(self._place_type)
+            label = info.get("label", self._place_type)
+            return [f"PLACE — click on the map to drop a '{self._place_type}' "
+                    f"({label}). Shift-click to place several. Esc to cancel.",
+                    f"PLACE — click on the map to drop a "
+                    f"'{self._place_type}' ({label}). Esc to cancel.",
+                    f"PLACE '{self._place_type}' — click the map. Esc cancels."]
+        if self.mode == Mode.CALIBRATE:
             n = len(self.cal_points)
-            msg = (f"CALIBRATE — click point {n+1} of 2 on a known dimension. "
-                   f"Esc to cancel.")
-            bg = "#FF8C42"
-        elif self.mode == Mode.WIRE:
+            return [f"SET SCALE — click point {n + 1} of 2 on a dimension "
+                    f"you know (e.g. a door or a dimension line). "
+                    f"Esc to cancel.",
+                    f"SET SCALE — click point {n + 1} of 2 on a known "
+                    f"dimension. Esc to cancel.",
+                    f"SET SCALE — point {n + 1} of 2. Esc cancels."]
+        if self.mode == Mode.WIRE:
             n = len(self.current_wire_points)
             if self._wire_awaiting_source and not n:
-                msg = ("WIRE MODE — click the next camera (or a drop point) "
-                       "to start its wire. Esc to stop.")
-            elif self.selected_device is not None:
-                msg = (f"WIRE MODE — drawing for {self.selected_device['id']}. "
-                       f"Click route points ({n} so far). Right-click to finish, "
-                       f"Esc to cancel.")
-            else:
-                msg = ("WIRE MODE — click points to draw a wire. "
-                       "Tip: right-click a device → 'Draw wire from here…' "
-                       "to associate the wire with a device. Right-click to "
-                       "finish, Esc to cancel.")
-            bg = "#7fc4ff"
-        if not msg:
-            return
-        # Banner background bar
-        self.canvas.create_rectangle(0, 0, cw, 32, fill=bg, outline="",
-                                     tags="mode_banner")
-        self.canvas.create_text(cw / 2, 16, text=msg, fill=fg,
-                                font="AppHeading",
-                                tags="mode_banner")
+                return ["WIRE — click the next camera (or a drop point) to "
+                        "start its wire. Esc to stop.",
+                        "WIRE — click the next camera. Esc to stop."]
+            if n:
+                who = (f" for {self.selected_device['id']}"
+                       if self.selected_device is not None else "")
+                pts = self._plural(n, "point")
+                return [f"WIRE{who} — click along the route ({pts} so "
+                        f"far). Right-click to finish, Esc to cancel, "
+                        f"Ctrl+Z removes the last point.",
+                        f"WIRE{who} — click along the route ({pts}). "
+                        f"Right-click to finish, Esc to cancel.",
+                        "WIRE — right-click to finish, Esc to cancel."]
+            return ["WIRE — click a camera to start its wire, click along "
+                    "the route, then right-click to finish. Esc to cancel.",
+                    "WIRE — click a camera, click the route, right-click "
+                    "to finish. Esc cancels.",
+                    "WIRE — click a camera to start. Esc cancels."]
+        return []
+
+    def _fit_banner_text(self, msgs: list[str], width: int) -> str:
+        """The first of `msgs` that fits `width` pixels in the banner
+        font; the last one, shortened with "…", when none does."""
+        def measure(t: str) -> int:
+            try:
+                return int(self.canvas.tk.call("font", "measure",
+                                               "AppHeading", t))
+            except (tk.TclError, ValueError):
+                return 0
+        for m in msgs:
+            if measure(m) <= width:
+                return m
+        last = msgs[-1]
+        while len(last) > 4 and measure(last + "…") > width:
+            last = last[:-1]
+        return last.rstrip() + "…"
 
     def _draw_legend(self) -> None:
         box = self.legend_box
@@ -8348,22 +8527,43 @@ class CameraWireTool:
         cw = cx2 - cx
         ch = cy2 - cy
 
-        self.canvas.create_rectangle(cx, cy, cx + cw, cy + ch,
-                                     fill="white", outline="#0000FF", width=2, tags="legend")
-
         title_fs = max(C.LEGEND_TITLE_FONT_MIN,
                        min(C.LEGEND_TITLE_FONT_MAX,
                            int(14 * self.zoom * self.dx_scale)))
+        icon_fs = max(C.LEGEND_ICON_FONT_MIN, min(C.LEGEND_ICON_FONT_MAX,
+                                                  int(8 * self.zoom * self.dx_scale)))
+        text_fs = max(C.LEGEND_TEXT_FONT_MIN, min(C.LEGEND_TEXT_FONT_MAX,
+                                                  int(11 * self.zoom * self.dx_scale)))
+        labels = {}
+        for code in sorted_codes:
+            count = sum(1 for d in self.devices if d["type"] == code)
+            labels[code] = f'{self._safe_sym(code)["label"]}  ({count})'
+        # The labels start 55 units in. When the text is wider than the
+        # box drawn in draw.io (or the minimum font size keeps it large
+        # while zoomed out), widen the box instead of letting the labels
+        # run out over the floor plan.
+        tx0, _ = self._img_to_canvas(*self._drawio_to_img(box["x"] + 55,
+                                                          box["y"]))
+        try:
+            longest = max((int(self.canvas.tk.call(
+                "font", "measure", ("Segoe UI", text_fs), t))
+                for t in labels.values()), default=0)
+        except (tk.TclError, ValueError):
+            longest = 0
+        need_w = (tx0 - cx) + longest + 8
+        if cw > 0 and need_w > cw:
+            self._legend_img_bbox = (bx, by, bx + bw * need_w / cw,
+                                     by + needed_h)
+            cw = need_w
+
+        self.canvas.create_rectangle(cx, cy, cx + cw, cy + ch,
+                                     fill="white", outline="#0000FF", width=2, tags="legend")
+
         self.canvas.create_text(
             cx + cw / 2, cy + 10 * self.zoom * self.dy_scale,
             text=box["title"], font=("Segoe UI", title_fs, "bold"),
             fill="black", anchor=tk.N, tags="legend",
         )
-
-        icon_fs = max(C.LEGEND_ICON_FONT_MIN, min(C.LEGEND_ICON_FONT_MAX,
-                                                  int(8 * self.zoom * self.dx_scale)))
-        text_fs = max(C.LEGEND_TEXT_FONT_MIN, min(C.LEGEND_TEXT_FONT_MAX,
-                                                  int(11 * self.zoom * self.dx_scale)))
 
         for i, code in enumerate(sorted_codes):
             info = self._safe_sym(code)
@@ -8390,9 +8590,7 @@ class CameraWireTool:
             text_dy = box["y"] + 38 + i * C.LEGEND_ROW_H
             tx, ty = self._drawio_to_img(text_dx, text_dy)
             tcx, tcy = self._img_to_canvas(tx, ty)
-            count = sum(1 for d in self.devices if d["type"] == code)
-            label_text = f'{info["label"]}  ({count})'
-            self.canvas.create_text(tcx, tcy + ich / 2, text=label_text,
+            self.canvas.create_text(tcx, tcy + ich / 2, text=labels[code],
                                     font=("Segoe UI", text_fs), fill="black",
                                     anchor=tk.W, tags="legend")
 
@@ -9282,7 +9480,9 @@ class CameraWireTool:
                         parent=dlg)
                     a_entry.focus_set()
                     return
-            if total_in <= 0:
+            if not math.isfinite(total_in) or total_in <= 0:
+                # "inf" / "nan" / "1e999" parse as floats and used to set
+                # an infinite scale that made every wire length unusable.
                 messagebox.showerror(
                     "Enter the distance",
                     "Type the real-world length between the two points "
@@ -11277,9 +11477,9 @@ class CameraWireTool:
                     _add_wire(e, flat=False)
 
         if not self._filtered_wire_indices:
-            placeholder = ("(no wires yet — right-click any device on the map → "
-                           "Draw wire from here)" if not self.wire_routes
-                           else "(no matches for current search)")
+            placeholder = ("No wires yet. Press W, then click a camera."
+                           if not self.wire_routes
+                           else "No wires match the filter.")
             self.wire_listbox.insert(tk.END, placeholder)
             self._wire_listbox_rows.append(None)
             self.wire_listbox.itemconfig(0, foreground="#888888")
@@ -11319,13 +11519,15 @@ class CameraWireTool:
             cost_str = ""
         # Defensive sum — share the same helper used by the total_label
         # branch above so a malformed route can't blank either widget.
-        wire_str = (self._format_length(grand_total_in)
+        # No wires: no length at all (it read "Wires: 0 · —"). Before the
+        # scale is set, say so next to the pixel count.
+        wire_str = (f"  ·  {self._format_length(grand_total_in)}"
                     if self.scale_factor and self.wire_routes
-                    else (f"{int(_route_field_total('length_px'))}px"
-                          if self.wire_routes else "—"))
+                    else (f"  ·  {int(_route_field_total('length_px'))} px "
+                          f"(scale not set)" if self.wire_routes else ""))
         self.total_toolbar_label.config(
             text=f"Devices: {n_dev}  ·  Cameras: {n_cam}  ·  "
-                 f"Wires: {n_wire}  ·  {wire_str}{cost_str}",
+                 f"Wires: {n_wire}{wire_str}{cost_str}",
         )
 
         # Restore the user's place (saved at the top of this method).
@@ -11454,7 +11656,7 @@ class CameraWireTool:
             prefs = {
                 "unit":          self.unit_var.get(),
                 "currency":      self._bom_currency_var.get() or "$",
-                "waste_factor":  float(self._bom_waste_var.get()),
+                "waste_factor":  self._waste_factor(),
                 "tax_rate":      self._tax_rate(),
                 "show_fov":         bool(self._show_fov.get()),
                 "show_dori":        bool(self._show_dori.get()),
@@ -12175,7 +12377,7 @@ class CameraWireTool:
                 ttl_ms=2500)
             return
         try:
-            tree = ET.parse(self.drawio_path)
+            tree = _parse_xml_file(self.drawio_path)
         except (ET.ParseError, OSError) as e:
             log_error(f"Save failed re-parsing {self.drawio_path}", e)
             messagebox.showerror("Save failed",
@@ -13159,9 +13361,11 @@ class CameraWireTool:
 
         row = ttk.Frame(defaults); row.pack(fill=tk.X, padx=8, pady=4)
         ttk.Label(row, text="Default waste factor:", width=18).pack(side=tk.LEFT)
-        ttk.Entry(row, textvariable=self._bom_waste_var,
-                   width=8).pack(side=tk.LEFT)
-        ttk.Label(row, text="(1.10 = +10% material allowance)",
+        pref_waste = ttk.Entry(row, textvariable=self._bom_waste_var,
+                               width=8)
+        pref_waste.pack(side=tk.LEFT)
+        pref_waste.bind("<FocusOut>", self._normalize_waste_entry, add="+")
+        ttk.Label(row, text="(1.10, 10 or 0.10 = +10% extra cable)",
                   foreground="#888888", font="AppHint",
                   ).pack(side=tk.LEFT, padx=8)
 
@@ -13265,19 +13469,36 @@ class CameraWireTool:
         # Scrollable body
         outer = ttk.Frame(dlg)
         outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
-        canvas = tk.Canvas(outer, bg="#1e1e1e", highlightthickness=0)
+        canvas = tk.Canvas(outer, bg="#1e1e1e", highlightthickness=0,
+                           width=self._px(600), height=self._px(420))
         sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
         body = ttk.Frame(canvas)
         body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=body, anchor="nw", width=520)
+        # The list follows the window's width (it was fixed at 520 px, so
+        # long descriptions were cut off, worse at 150 % scaling).
+        body_win = canvas.create_window((0, 0), window=body, anchor="nw",
+                                        width=self._px(600))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(body_win, width=e.width))
         canvas.config(yscrollcommand=sb.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # The mouse wheel scrolls the list anywhere over the dialog.
+        def _wheel(units: int) -> str:
+            with contextlib.suppress(tk.TclError):
+                canvas.yview_scroll(units, "units")
+            return "break"
+        dlg.bind("<MouseWheel>",
+                 lambda e: _wheel(-1 if e.delta > 0 else 1))
+        dlg.bind("<Button-4>", lambda _e: _wheel(-1))
+        dlg.bind("<Button-5>", lambda _e: _wheel(1))
+
         sections = [
             ("Modes", [
                 ("M",      "Move mode — click devices to select/drag"),
-                ("W",      "Wire mode — click points to draw a wire"),
+                ("W",      "Wire mode — click a camera, then along the "
+                           "route; right-click to finish"),
                 ("C",      "Calibrate — set the real-world scale"),
             ]),
             ("Editing", [
@@ -13368,6 +13589,7 @@ class CameraWireTool:
                           foreground="#FFD060",
                           ).grid(sticky=tk.W, padx=(20, 16))
                 ttk.Label(body, text=desc, font="AppBodyLarge",
+                          wraplength=self._px(390), justify=tk.LEFT,
                           ).grid(row=body.grid_size()[1] - 1, column=1,
                                   sticky=tk.W)
 
@@ -13979,9 +14201,53 @@ class CameraWireTool:
 
     def _tax_rate(self) -> float:
         try:
-            return self._as_tax_rate(float(self._bom_tax_var.get()))
+            v = float(self._bom_tax_var.get())
         except (tk.TclError, ValueError):
             return 0.0
+        if not math.isfinite(v) or v < 0:
+            return 0.0
+        return self._as_tax_rate(v)
+
+    @staticmethod
+    def _as_waste_factor(value) -> float | None:
+        """The waste box as a cost multiplier, or None when it can't be
+        read. People type it three ways, all meaning 10 % extra cable:
+        1.10 (the multiplier), 10 (a percentage) or 0.10 (a fraction).
+        0 means no waste. Typing 10 used to make every cable cost ten
+        times as much."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError, tk.TclError):
+            return None
+        if not math.isfinite(v) or v < 0 or v > 100:
+            return None
+        if v == 0:
+            return 1.0
+        if v < 1:
+            return 1.0 + v           # 0.10 → +10 %
+        if v < 2:
+            return v                 # 1.10 → +10 %
+        return 1.0 + v / 100.0       # 10 → +10 %
+
+    def _waste_factor(self) -> float:
+        """The BOM's waste multiplier; 1.10 when the box can't be read."""
+        try:
+            raw = self._bom_waste_var.get()
+        except tk.TclError:
+            return 1.10
+        w = self._as_waste_factor(raw)
+        return 1.10 if w is None else w
+
+    def _normalize_waste_entry(self, _event=None) -> None:
+        """When the user leaves the waste box, show what was typed as
+        the multiplier (10 becomes 1.1)."""
+        try:
+            raw = self._bom_waste_var.get()
+        except tk.TclError:
+            return
+        w = self._as_waste_factor(raw)
+        if w is not None and abs(w - float(raw)) > 1e-9:
+            self._bom_waste_var.set(round(w, 6))
 
     def _normalize_tax_entry(self, _event=None) -> None:
         """When the user leaves the tax box, show what was typed as the
@@ -14191,6 +14457,16 @@ class CameraWireTool:
             self._bom_tax_hint.config(
                 text=f"= {pct:g} %" if pct else "",
                 foreground=("#FF8C42" if pct > 20 else ""))
+            try:
+                typed = self._as_waste_factor(self._bom_waste_var.get())
+            except tk.TclError:
+                typed = None
+            wpct = round((report.waste_factor - 1) * 100, 2)
+            self._bom_waste_hint.config(
+                text=(f"= +{wpct:g} %" if typed is not None
+                      else "? using +10 %"),
+                foreground=("" if typed is not None and wpct <= 50
+                            else "#FF8C42"))
 
         def _rows(tree, tags):
             n = 0
@@ -14262,10 +14538,7 @@ class CameraWireTool:
                                             before=self._bom_totals_label)
 
     def _build_bom_report(self) -> bom_mod.BomReport:
-        try:
-            waste = float(self._bom_waste_var.get())
-        except tk.TclError:
-            waste = 1.10
+        waste = self._waste_factor()
         tax = self._tax_rate()
         risers = self._project.risers if self._project else []
         return bom_mod.rollup(
@@ -14335,8 +14608,8 @@ class CameraWireTool:
             # Friendly empty state instead of a blank table
             self._bom_tree.insert(
                 "", tk.END,
-                values=("—", "(no wire runs yet — draw a wire first)",
-                        "", "", "", ""), tags=("empty",))
+                values=("—", "No wires yet", "", "", "", ""),
+                tags=("empty",))
 
         # Per-symbol inventory (cameras + access + intrusion etc.)
         if hasattr(self, "_bom_devices_tree"):
@@ -14453,8 +14726,7 @@ class CameraWireTool:
                 # narrow Model # column it was cut off mid-sentence.
                 self._bom_models_tree.insert(
                     "", tk.END,
-                    values=("(no models assigned — set models in the "
-                            "Devices tab or right-click a camera)",
+                    values=("None yet: right-click a camera",
                             "", "", "", ""), tags=("empty",))
             else:
                 self._bom_models_tree.insert(
@@ -17006,6 +17278,17 @@ class CameraWireTool:
         tx_var    = tk.DoubleVar(value=draft["tx"])
         ty_var    = tk.DoubleVar(value=draft["ty"])
         view_zoom_var = tk.DoubleVar(value=100.0)   # %
+        # Set while the code (not the user) updates the View % box, so the
+        # rounded number shown doesn't feed back into the real zoom.
+        zoom_sync = {"busy": False}
+
+        def _show_view_zoom():
+            zoom_sync["busy"] = True
+            try:
+                # Whole percent: it showed the raw float (14.1114718…).
+                view_zoom_var.set(round(view["zoom"] * 100))
+            finally:
+                zoom_sync["busy"] = False
 
         def _sync_vars_from_draft():
             scale_var.set(draft["scale"])
@@ -17064,7 +17347,7 @@ class CameraWireTool:
             view["zoom"] = min(zx, zy) * 0.85
             view["ox"] = (cw - ref_bg.width * view["zoom"]) / 2
             view["oy"] = (ch - ref_bg.height * view["zoom"]) / 2
-            view_zoom_var.set(view["zoom"] * 100)
+            _show_view_zoom()
             view["_initialized"] = True
 
         def _draw():
@@ -17337,7 +17620,7 @@ class CameraWireTool:
                 view["ox"] = event.x - (event.x - view["ox"]) * (new_z / old_z)
                 view["oy"] = event.y - (event.y - view["oy"]) * (new_z / old_z)
                 view["zoom"] = new_z
-                view_zoom_var.set(view["zoom"] * 100)
+                _show_view_zoom()
             _sync_vars_from_draft()
             _schedule_redraw(interactive=True)
 
@@ -17524,6 +17807,8 @@ class CameraWireTool:
         zoom_row = ttk.Frame(panel); zoom_row.pack(fill=tk.X, pady=2)
         ttk.Label(zoom_row, text="View %").pack(side=tk.LEFT)
         def _on_zoom_var(*_):
+            if zoom_sync["busy"]:
+                return
             try:
                 z = float(view_zoom_var.get()) / 100.0
             except (tk.TclError, ValueError):
@@ -18305,12 +18590,31 @@ class CameraWireTool:
         # plan at the offset, and shift every drawn coordinate by (OX, OY).
         OX = OY = 0
         _x0, _y0, _x1, _y1 = 0.0, 0.0, float(W), float(H)
+
+        def legend_labels(codes):
+            out = {}
+            for code in codes:
+                count = sum(1 for dd in self.devices
+                            if isinstance(dd, dict) and dd.get("type") == code)
+                out[code] = f'{self._safe_sym(code)["label"]}  ({count})'
+            return out
+
+        def legend_width(labels) -> float:
+            """The legend box's width: as drawn in draw.io, or wider when
+            the longest label would otherwise run past its right edge."""
+            bw_ = self.legend_box["w"] * self.dx_scale
+            f = font(int(C.LEGEND_ROW_H * self.dy_scale * 0.5))
+            _m = ImageDraw.Draw(Image.new("L", (1, 1)))
+            longest = max((_m.textlength(t, font=f) for t in labels.values()),
+                          default=0)
+            return max(bw_, (55 + 10) * self.dx_scale + longest)
+
         if self._show_legend.get() and self.legend_box:
             _lb = self.legend_box
             _lbx, _lby = self._drawio_to_img(_lb["x"], _lb["y"])
-            _lbw = _lb["w"] * self.dx_scale
             _lcodes = [c for c in sorted(self.symbol_types.keys())
                        if c not in self._hidden_types]
+            _lbw = legend_width(legend_labels(_lcodes))
             _lneed_h = (len(_lcodes) * C.LEGEND_ROW_H + 50) * self.dy_scale
             _x0 = min(_x0, _lbx); _y0 = min(_y0, _lby)
             _x1 = max(_x1, _lbx + _lbw); _y1 = max(_y1, _lby + _lneed_h)
@@ -18475,9 +18779,10 @@ class CameraWireTool:
         if self._show_legend.get() and self.legend_box:
             box = self.legend_box
             bx, by = d2i(box["x"], box["y"])
-            bw = box["w"] * self.dx_scale
             codes = [c for c in sorted(self.symbol_types.keys())
                      if c not in self._hidden_types]
+            labels = legend_labels(codes)
+            bw = legend_width(labels)
             row_px = C.LEGEND_ROW_H * self.dy_scale
             needed_h = (len(codes) * C.LEGEND_ROW_H + 50) * self.dy_scale
             draw.rectangle([bx, by, bx + bw, by + needed_h],
@@ -18499,9 +18804,7 @@ class CameraWireTool:
                           font=font(int(iwi * 0.5), bold=True), anchor="mm")
                 tcx, tcy = d2i(
                     box["x"] + 55, box["y"] + 38 + i * C.LEGEND_ROW_H)
-                count = sum(1 for dd in self.devices
-                            if isinstance(dd, dict) and dd.get("type") == code)
-                draw.text((tcx, tcy + ihi / 2), f'{info["label"]}  ({count})',
+                draw.text((tcx, tcy + ihi / 2), labels[code],
                           fill=(0, 0, 0), font=font(int(row_px * 0.5)), anchor="lm")
 
         # ---- Devices (on top of legend), shape + type code (+ optional id).
