@@ -165,6 +165,56 @@ class FloorState:
     anchor_points: list[list[float]] = field(default_factory=list)
     wire_routes: list[dict] = field(default_factory=list)
     annotations: list[dict] = field(default_factory=list)
+    # Region of this floor's raw background image to print in the layout
+    # PDF, [x0, y0, x1, y1] in image px. None = whole sheet.
+    print_area: list[float] | None = None
+
+
+def coerce_print_area(raw) -> list[float] | None:
+    """Normalize a print area to [x0, y0, x1, y1] with x0<x1, y0<y1, or
+    None when absent / malformed / degenerate."""
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(v) for v in raw)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+        return None
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def coerce_device_tags(raw) -> dict:
+    """{device_id: tag} with non-empty string tags only."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            v = f"{v:g}"
+        if isinstance(v, str) and v.strip():
+            out[str(k)] = v.strip()
+    return out
+
+
+def building_of(floor_name: str) -> str:
+    """Building group of a floor, from its name's prefix before ' - '
+    ('New Bldg - 1st Floor' -> 'New Bldg'). Floors without the separator
+    all share the '' group (one building)."""
+    if isinstance(floor_name, str) and " - " in floor_name:
+        return floor_name.split(" - ", 1)[0].strip()
+    return ""
+
+
+def floor_short_name(floor_name: str) -> str:
+    """'New Bldg - 1st Floor' -> '1st Floor'; names without ' - ' as-is."""
+    if isinstance(floor_name, str) and " - " in floor_name:
+        return floor_name.split(" - ", 1)[1].strip()
+    return floor_name if isinstance(floor_name, str) else ""
 
 
 @dataclass
@@ -204,6 +254,11 @@ class ProjectState:
     #                "is_run_point": bool}}
     # All keys optional per entry. Overlaid onto symbol_types after parse.
     symbol_meta: dict = field(default_factory=dict)
+    # Per-device short tag shown as a numbered badge (e.g. a door number
+    # that matches a 'Door List' annotation): {device_id: "16"}.
+    device_tags: dict = field(default_factory=dict)
+    # Free-text note printed on the layout PDF's summary page.
+    pdf_note: str = ""
     scale_factor: float | None = None
     unit: str = "ft-in"
     next_device_id: int = 100
@@ -495,6 +550,7 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
             anchor_points=anchors,
             wire_routes=list(raw_wires) if isinstance(raw_wires, list) else [],
             annotations=list(raw_anns) if isinstance(raw_anns, list) else [],
+            print_area=coerce_print_area(f.get("print_area")),
         ))
     # A v2 file where EVERY floor entry was malformed (all skipped above)
     # would yield a zero-floor project — downstream code indexes
@@ -587,6 +643,8 @@ def _load_v2(data: dict, project_path: str) -> ProjectState:
         default_cable=(data.get("default_cable")
                        if isinstance(data.get("default_cable"), str) else None),
         symbol_meta=symbol_meta,
+        device_tags=coerce_device_tags(data.get("device_tags")),
+        pdf_note=(data.get("pdf_note") if isinstance(data.get("pdf_note"), str) else ""),
         scale_factor=sf,
         unit=unit,
         next_device_id=ndid,
@@ -657,6 +715,8 @@ def save_project(project: ProjectState, project_path: str) -> None:
                 "drawio_file": f.drawio_file,
                 "alignment": _safe_alignment(f.alignment),
                 "anchor_points": _safe_anchors(f.anchor_points),
+                **({"print_area": coerce_print_area(f.print_area)}
+                   if coerce_print_area(getattr(f, "print_area", None)) else {}),
             }
             for f in project.floors
         ],
@@ -703,6 +763,8 @@ def save_project(project: ProjectState, project_path: str) -> None:
             )
             if cleaned
         },
+        "device_tags": coerce_device_tags(project.device_tags),
+        "pdf_note": project.pdf_note if isinstance(project.pdf_note, str) else "",
         "scale_factor": project.scale_factor,
         "unit": project.unit,
         "next_device_id": project.next_device_id,

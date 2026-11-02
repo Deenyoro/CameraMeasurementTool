@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **File → Export readable layout PDF (per floor + key).** One page per
+  floor (Tabloid / Letter / A3) with symbols enlarged to a fixed printed
+  size, a large key with per-floor counts and building-wide totals, door
+  number badges, and the building's door list; plus a summary page (device
+  counts by floor, door lists with where each door's device is, and an
+  editable note saved with the project). Floors are grouped into buildings
+  by the name prefix before " - " (e.g. "New Bldg - 1st Floor").
+- **Door # / tag on devices** — right-click a device → "Set door # / tag…".
+  Shown as a numbered badge on the map; matched against the "N." rows of
+  any annotation whose first line ends in "Door List".
+- **Per-floor print area** — View → "Set print area to current view" /
+  "Clear print area". The layout PDF prints that region (grown to include
+  every visible device and note).
+- Project file: new `device_tags`, `pdf_note` and per-floor `print_area`
+  fields (older files load unchanged).
+
+### Fixed
+
+- **Touchpads can now scroll around the plan.** Two-finger scroll pans
+  (vertical, and horizontal via Shift / sideways swipe); pinch or
+  Ctrl+scroll zooms. Precision-touchpad deltas are detected automatically,
+  and View → "Touchpad mode" makes plain scroll always pan. A classic mouse
+  wheel still zooms.
+
 ## [1.2.4] - 2026-10-28
 
 Patch release: a usability pass on what a field installer sees on a

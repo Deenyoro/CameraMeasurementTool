@@ -35,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -74,6 +75,7 @@ try:
 except ImportError:
     _HAS_EXPORT = False
     export_mod = None  # type: ignore
+from cwt import layout_pdf as layout_mod
 
 try:
     # Hardened XML parser for .drawio files, which often come from
@@ -2523,6 +2525,10 @@ class CameraWireTool:
         # "Next step" guide strip above the canvas (new optional setting
         # show_steps; absent = shown).
         self._show_steps = tk.BooleanVar(value=True)
+        # Touchpad mode: plain scroll pans (two-finger swipe), Ctrl+scroll
+        # / pinch zooms. Off = classic mouse behavior (wheel zooms), though
+        # fine-grained touchpad deltas pan either way.
+        self._touchpad_mode = tk.BooleanVar(value=False)
 
         # Cable types catalog (project-level)
         self.cable_types: dict = {k: dict(v) for k, v in
@@ -2608,6 +2614,7 @@ class CameraWireTool:
             ("show_drops",      self._show_drops),
             ("show_minimap",    self._show_minimap),
             ("show_steps",      self._show_steps),
+            ("touchpad_mode",   self._touchpad_mode),
         ):
             if key in prefs:
                 try:
@@ -4130,6 +4137,9 @@ class CameraWireTool:
         if _HAS_EXPORT:
             file_menu.add_command(label="Export to PDF (map + report)…",
                                   command=self._open_export_dialog)
+        if layout_mod._HAS_REPORTLAB:
+            file_menu.add_command(label="🗎  Export readable layout PDF (per floor + key)…",
+                                  command=self._open_layout_pdf_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close,
                               accelerator="Ctrl+Q")
@@ -4271,6 +4281,14 @@ class CameraWireTool:
                                   command=self._apply_minimap_visibility)
         view_menu.add_checkbutton(label="Show Next-Step Guide",
                                   variable=self._show_steps)
+        view_menu.add_checkbutton(
+            label="Touchpad mode (two-finger scroll pans, pinch / Ctrl+scroll zooms)",
+            variable=self._touchpad_mode)
+        view_menu.add_separator()
+        view_menu.add_command(label="Set print area to current view (this floor)",
+                              command=self._set_print_area_from_view)
+        view_menu.add_command(label="Clear print area (this floor)",
+                              command=self._clear_print_area)
         view_menu.add_separator()
         view_menu.add_command(label="Toggle Fullscreen",
                               command=self._toggle_fullscreen,
@@ -8767,6 +8785,18 @@ class CameraWireTool:
                                 font=("Arial", font_size, "bold"),
                                 fill="#000000", tags=tag)
 
+        # Door # / tag badge at the icon's upper-right.
+        dtag = self._device_tag(did)
+        if dtag:
+            br = max(7, min(16, r * 0.55))
+            bx, by = center_x + r + br * 0.9, center_y - r + br * 0.3
+            self.canvas.create_oval(bx - br, by - br, bx + br, by + br,
+                                    fill="#111111", outline="#FFFFFF",
+                                    width=1, tags=(tag, "dev_tag_badge"))
+            self.canvas.create_text(bx, by, text=dtag,
+                                    font=("Arial", max(6, int(br * 0.95)), "bold"),
+                                    fill="#FFFFFF", tags=(tag, "dev_tag_badge"))
+
         # Optional device-ID label above icon
         if self._show_device_ids.get():
             id_fs = max(C.DEVICE_ID_FONT_MIN,
@@ -10934,7 +10964,39 @@ class CameraWireTool:
         self._update_status()
 
     def _on_mousewheel(self, event) -> None:
-        factor = C.ZOOM_FACTOR if event.delta > 0 else 1 / C.ZOOM_FACTOR
+        """Wheel / touchpad scroll on the canvas.
+
+        Ctrl+scroll (also what a precision touchpad's pinch sends) always
+        zooms. Shift+scroll (and a touchpad's horizontal two-finger swipe,
+        which Tk delivers as Shift+wheel) pans sideways. A plain scroll pans
+        vertically in Touchpad mode, or when the delta isn't a whole wheel
+        notch (precision touchpads send fine-grained deltas); otherwise a
+        classic mouse wheel zooms as before."""
+        delta = getattr(event, "delta", 0) or 0
+        if not delta:
+            return
+        state = getattr(event, "state", 0) or 0
+        ctrl, shift = bool(state & 0x4), bool(state & 0x1)
+        fine = delta % 120 != 0
+        if not ctrl and (shift or fine or self._touchpad_mode.get()):
+            # Scale so one mouse notch moves ~60px; touchpad deltas are
+            # proportional to finger travel so panning tracks smoothly.
+            step = delta / 120.0 * 60.0
+            if shift:
+                self.offset_x += step
+            else:
+                self.offset_y += step
+            self._clamp_pan()
+            self._schedule_redraw()
+            return
+        if fine:
+            # Fine-grained pinch: zoom proportionally instead of a full step.
+            factor = C.ZOOM_FACTOR ** (delta / 120.0)
+        else:
+            factor = C.ZOOM_FACTOR if delta > 0 else 1 / C.ZOOM_FACTOR
+        self._wheel_zoom(event, factor)
+
+    def _wheel_zoom(self, event, factor: float) -> None:
         new_zoom = max(C.ZOOM_MIN, min(self.zoom * factor, C.ZOOM_MAX))
         # Keep the point under the cursor fixed across the zoom — work
         # in ALIGNED-image space so alignment doesn't shift the
@@ -11668,6 +11730,7 @@ class CameraWireTool:
                 "show_drops":       bool(self._show_drops.get()),
                 "show_minimap":     bool(self._show_minimap.get()),
                 "show_steps":       bool(self._show_steps.get()),
+                "touchpad_mode":    bool(self._touchpad_mode.get()),
                 "hidden_types":     sorted(self._hidden_types),
                 "fov_hidden_types": sorted(self._fov_hidden_types),
                 "fov_opacity":      self._fov_opacity,
@@ -13954,6 +14017,11 @@ class CameraWireTool:
                     and self._device_is_transformed(dev)):
                 menu.add_command(label="Reset size & rotation",
                                  command=lambda d=dev: self._reset_device_transform(d))
+            cur_tag = self._device_tag(dev.get("id"))
+            menu.add_command(
+                label=(f"🔢  Door # / tag: {cur_tag}  (edit…)" if cur_tag
+                       else "🔢  Set door # / tag…"),
+                command=lambda d=dev: self._edit_device_tag(d))
             menu.add_separator()
             if info.get("is_camera"):
                 menu.add_command(label="Edit FOV / DORI…",
@@ -19719,6 +19787,426 @@ class CameraWireTool:
                 subprocess.Popen(["xdg-open", os.path.dirname(path) or "."])
         except OSError as e:
             messagebox.showerror("Couldn't open folder", f"{path}\n\n{e}")
+
+    # ============================================================ Door # / tags
+    def _device_tag(self, device_id) -> str:
+        """The door # / tag set on a device ('' if none)."""
+        if self._project is None or not device_id:
+            return ""
+        tags = self._project.device_tags
+        return tags.get(device_id, "") if isinstance(tags, dict) else ""
+
+    def _edit_device_tag(self, dev: dict) -> None:
+        """Prompt for a device's door # / tag (blank clears it)."""
+        from tkinter import simpledialog
+        if self._project is None or not isinstance(dev, dict):
+            return
+        did = dev.get("id")
+        cur = self._device_tag(did)
+        val = simpledialog.askstring(
+            "Door # / tag",
+            f"Door number or short tag for {did} ({dev.get('type')}).\n"
+            "Shown as a numbered badge on the map and in the layout PDF,\n"
+            "and matched against 'N.' rows of a '… Door List' annotation.\n"
+            "Leave blank to clear.",
+            initialvalue=cur, parent=self.root)
+        if val is None:
+            return
+        val = val.strip()[:8]
+        if val == cur:
+            return
+        if not isinstance(self._project.device_tags, dict):
+            self._project.device_tags = {}
+        if val:
+            self._project.device_tags[did] = val
+        else:
+            self._project.device_tags.pop(did, None)
+        self._mark_dirty()
+        self._redraw()
+
+    # ============================================================ Print area
+    def _active_floor_state(self):
+        if self._project is None:
+            return None
+        return self._project.get_floor(self._project.active_floor)
+
+    def _set_print_area_from_view(self) -> None:
+        """Use what's currently visible on the canvas as this floor's
+        print area for the layout PDF."""
+        fl = self._active_floor_state()
+        if fl is None or self.bg_image is None:
+            messagebox.showinfo("Print area", "Open a project floor first.")
+            return
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        pts = [self._canvas_to_img(x, y) for x, y in
+               ((0, 0), (cw, 0), (0, ch), (cw, ch))]
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        area = mf_mod.coerce_print_area([
+            max(0.0, min(xs)), max(0.0, min(ys)),
+            min(float(self.img_w), max(xs)), min(float(self.img_h), max(ys))])
+        if area is None:
+            messagebox.showwarning("Print area",
+                                   "The current view doesn't overlap the floor plan.")
+            return
+        fl.print_area = area
+        self._mark_dirty()
+        self._flash_status(f"Print area set for {fl.name}: "
+                           f"{area[2] - area[0]:.0f}×{area[3] - area[1]:.0f} px. "
+                           "Used by 'Export readable layout PDF'.", ttl_ms=5000)
+
+    def _clear_print_area(self) -> None:
+        fl = self._active_floor_state()
+        if fl is None:
+            return
+        if fl.print_area is not None:
+            fl.print_area = None
+            self._mark_dirty()
+        self._flash_status(f"Print area cleared for {fl.name} — the whole sheet prints.",
+                           ttl_ms=4000)
+
+    # ============================================================ Layout PDF
+    def _open_layout_pdf_dialog(self) -> None:
+        """Readable per-floor PDF: each floor cropped to its print area with
+        symbols at a fixed printed size, a large key with counts, door #
+        badges + door lists, and a summary page."""
+        if not layout_mod._HAS_REPORTLAB:
+            messagebox.showwarning("PDF unavailable",
+                                   "PDF export requires reportlab. `pip install reportlab`.")
+            return
+        if self._project is None:
+            messagebox.showinfo("Layout PDF", "Open a project first.")
+            return
+        proj = self._project
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Export readable layout PDF")
+        dlg.transient(self.root); dlg.grab_set()
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        ttk.Label(dlg, text="Readable layout PDF",
+                  font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 2))
+        ttk.Label(dlg, text=("One page per floor with a large key and counts, door-number "
+                             "badges and door lists, plus a summary page. Each floor prints "
+                             "its print area (View → Set print area to current view), else "
+                             "the whole sheet. Device types hidden on the map are left out."),
+                  wraplength=470, foreground="#7fc4ff",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=12, pady=(0, 8))
+
+        ff = ttk.LabelFrame(dlg, text="Floors")
+        ff.pack(fill=tk.X, padx=12, pady=4)
+        floor_vars = []
+        for n, fl in enumerate(proj.floors):
+            v = tk.BooleanVar(value=True)
+            floor_vars.append((v, fl.id))
+            pa = " (print area set)" if fl.print_area else ""
+            ttk.Checkbutton(ff, text=f"{fl.name}{pa}", variable=v).grid(
+                row=n // 2, column=n % 2, sticky=tk.W, padx=6, pady=1)
+
+        of = ttk.LabelFrame(dlg, text="Options")
+        of.pack(fill=tk.X, padx=12, pady=4)
+        r0 = ttk.Frame(of); r0.pack(fill=tk.X, padx=8, pady=(6, 2))
+        ttk.Label(r0, text="Title:").pack(side=tk.LEFT)
+        title_var = tk.StringVar(value=proj.project_name or os.path.splitext(
+            os.path.basename(self._bundle_path or self.drawio_path))[0])
+        ttk.Entry(r0, textvariable=title_var, width=44).pack(side=tk.LEFT, padx=6)
+        r1 = ttk.Frame(of); r1.pack(fill=tk.X, padx=8, pady=2)
+        ttk.Label(r1, text="Page size:").pack(side=tk.LEFT)
+        size_var = tk.StringVar(value="Tabloid 11x17")
+        ttk.Combobox(r1, textvariable=size_var, state="readonly", width=16,
+                     values=list(layout_mod.PAGE_SIZES)).pack(side=tk.LEFT, padx=6)
+        ttk.Label(r1, text="Symbol size (in):").pack(side=tk.LEFT, padx=(12, 0))
+        sym_var = tk.DoubleVar(value=0.24)
+        ttk.Spinbox(r1, textvariable=sym_var, from_=0.10, to=0.60, increment=0.02,
+                    width=6, format="%.2f").pack(side=tk.LEFT, padx=6)
+        r2 = ttk.Frame(of); r2.pack(fill=tk.X, padx=8, pady=(2, 6))
+        summary_var = tk.BooleanVar(value=True)
+        badges_var = tk.BooleanVar(value=True)
+        wires_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r2, text="Summary page", variable=summary_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r2, text="Door # badges", variable=badges_var).pack(side=tk.LEFT, padx=10)
+        ttk.Checkbutton(r2, text="Show wires", variable=wires_var).pack(side=tk.LEFT)
+
+        nf = ttk.LabelFrame(dlg, text="Summary-page note (saved with the project)")
+        nf.pack(fill=tk.BOTH, padx=12, pady=4)
+        note_txt = tk.Text(nf, height=4, width=60, wrap="word")
+        note_txt.pack(fill=tk.BOTH, padx=8, pady=6)
+        note_txt.insert("1.0", proj.pdf_note or "")
+
+        btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=12, pady=(6, 12))
+
+        def _go():
+            fids = [fid for v, fid in floor_vars if v.get()]
+            if not fids:
+                messagebox.showinfo("Nothing to export", "Pick at least one floor.", parent=dlg)
+                return
+            try:
+                sym_in = max(0.08, min(1.0, float(sym_var.get())))
+            except (tk.TclError, ValueError):
+                sym_in = 0.24
+            note = note_txt.get("1.0", "end").strip()
+            if note != (proj.pdf_note or ""):
+                proj.pdf_note = note
+                self._mark_dirty()
+            opts = dict(floor_ids=fids, title=title_var.get().strip() or "Device Layout",
+                        page_size=size_var.get(), symbol_in=sym_in,
+                        include_summary=summary_var.get(), badges=badges_var.get(),
+                        show_wires=wires_var.get(), note=note)
+            dlg.destroy()
+            base = os.path.splitext(os.path.basename(self._bundle_path or self.drawio_path))[0]
+            path = filedialog.asksaveasfilename(
+                title="Export readable layout PDF", defaultextension=".pdf",
+                initialfile=f"{base}_layout.pdf", filetypes=[("PDF", "*.pdf")])
+            if path:
+                self._run_layout_pdf_export(path, **opts)
+
+        ttk.Button(btns, text="Export PDF", command=_go).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        dlg.bind("<Return>", lambda e: None if isinstance(e.widget, tk.Text) else _go())
+
+    def _render_layout_floor(self, fl, *, map_in, symbol_in, badges, show_wires,
+                             tmpdir):
+        """Render the ACTIVE floor for the layout PDF. Returns the page dict
+        for layout_mod plus this floor's door-list annotations."""
+        from PIL import Image as _PImage, ImageDraw, ImageFont
+
+        def _font(px, bold=True):
+            for nm in ((["arialbd.ttf", "DejaVuSans-Bold.ttf"] if bold
+                        else ["arial.ttf", "DejaVuSans.ttf"])):
+                try:
+                    return ImageFont.truetype(nm, max(6, int(px)))
+                except OSError:
+                    continue
+            return ImageFont.load_default()
+
+        devs = [d for d in self.devices if isinstance(d, dict)
+                and d.get("type") not in self._hidden_types
+                and not self._hidden_by_unwired_filter(d)]
+        notes, door_lists = [], []
+        for a in self.annotations:
+            if not isinstance(a, dict):
+                continue
+            t = (a.get("text") or "").strip()
+            if not t:
+                continue
+            parsed = layout_mod.parse_door_list(t)
+            if parsed:
+                door_lists.append(parsed)
+            else:
+                notes.append(a)
+
+        W, H = self.bg_image.size
+        x0, y0, x1, y1 = fl.print_area or [0, 0, W, H]
+        pad = 60
+        for d in devs:
+            try:
+                cx = (float(d["x"]) + float(d["w"]) / 2) * self.dx_scale
+                cy = (float(d["y"]) + float(d["h"]) / 2) * self.dy_scale
+            except (KeyError, TypeError, ValueError):
+                continue
+            x0, y0 = min(x0, cx - pad), min(y0, cy - pad)
+            x1, y1 = max(x1, cx + pad), max(y1, cy + pad)
+        x0, y0 = max(0, int(x0)), max(0, int(y0))
+        x1, y1 = min(W, int(x1)), min(H, int(y1))
+        in_per_px = min(map_in[0] / max(1, x1 - x0), map_in[1] / max(1, y1 - y0))
+
+        sizes = sorted(max(float(d["w"]) * self.dx_scale, float(d["h"]) * self.dy_scale)
+                       for d in devs) or [30.0]
+        typical = sizes[len(sizes) // 2]
+        sym_scale = max(0.25, min(6.0, (symbol_in / in_per_px) / typical))
+
+        saved_ann = self.annotations
+        self.annotations = []
+        try:
+            img = self._render_map_image(symbol_scale=sym_scale)
+        finally:
+            self.annotations = saved_ann
+        if img is None:
+            raise RuntimeError(f"{fl.name}: no floor-plan image to render.")
+        if img.size != (W, H):
+            # _render_map_image padded for an off-plan legend; legend is off
+            # here, so this only happens with odd inputs — fall back to a
+            # top-left crop of the same size.
+            img = img.crop((0, 0, W, H))
+
+        # White margin so notes parked off the plan still fit on the page.
+        PAD = int(0.8 / in_per_px)
+        padded = _PImage.new("RGB", (W + 2 * PAD, H + 2 * PAD), "white")
+        padded.paste(img, (PAD, PAD))
+        img = padded
+        x0, y0, x1, y1 = x0 + PAD, y0 + PAD, x1 + PAD, y1 + PAD
+        dr = ImageDraw.Draw(img)
+
+        # Map notes at a readable printed size.
+        fpx = max(12, int(0.14 / in_per_px))
+        nfont = _font(fpx)
+        for a in notes:
+            try:
+                cx = float(a["x"]) * self.dx_scale + PAD
+                cy = float(a["y"]) * self.dy_scale + PAD
+            except (KeyError, TypeError, ValueError):
+                continue
+            col = a.get("color") or ANNOTATION_DEFAULT_COLOR
+            text = a["text"].strip()
+            tb = dr.multiline_textbbox((cx, cy), text, font=nfont, anchor="mm", align="center")
+            p = fpx // 4
+            sx = max(0, (p + 4) - tb[0]) - max(0, tb[2] + p + 4 - img.width)
+            sy = max(0, (p + 4) - tb[1]) - max(0, tb[3] + p + 4 - img.height)
+            cx, cy = cx + sx, cy + sy
+            tb = (tb[0] + sx, tb[1] + sy, tb[2] + sx, tb[3] + sy)
+            dr.rectangle([tb[0] - p, tb[1] - p, tb[2] + p, tb[3] + p], fill="white",
+                         outline=col, width=max(2, fpx // 10))
+            dr.multiline_text((cx, cy), text, fill=col, font=nfont, anchor="mm",
+                              align="center")
+            x0, y0 = min(x0, int(tb[0] - 2 * p)), min(y0, int(tb[1] - 2 * p))
+            x1, y1 = max(x1, int(tb[2] + 2 * p)), max(y1, int(tb[3] + 2 * p))
+
+        # Door # badges. Each badge takes the first corner around its device
+        # that doesn't cover another symbol or an earlier badge.
+        tags_here: dict[str, str] = {}
+        sym_px = typical * sym_scale
+        br = max(10, int(0.095 / in_per_px))
+        centers = []
+        for d in devs:
+            try:
+                centers.append(((float(d["x"]) + float(d["w"]) / 2) * self.dx_scale + PAD,
+                                (float(d["y"]) + float(d["h"]) / 2) * self.dy_scale + PAD))
+            except (KeyError, TypeError, ValueError):
+                centers.append(None)
+        boxes = [(cx - sym_px / 2, cy - sym_px / 2, cx + sym_px / 2, cy + sym_px / 2)
+                 for c_ in centers if c_ for cx, cy in [c_]]
+        placed: list[tuple] = []
+
+        def _hits(b):
+            return sum(1 for o in boxes + placed
+                       if b[0] < o[2] and b[2] > o[0] and b[1] < o[3] and b[3] > o[1])
+
+        h = sym_px / 2
+        for d, c_ in zip(devs, centers):
+            tg = self._device_tag(d.get("id"))
+            if not tg or c_ is None:
+                continue
+            tags_here.setdefault(tg, d.get("type"))
+            if not badges:
+                continue
+            cx, cy = c_
+            off = h + br * 1.05
+            cands = [(cx + off, cy - h + br * 0.2), (cx - off, cy - h + br * 0.2),
+                     (cx + off, cy + h - br * 0.2), (cx - off, cy + h - br * 0.2),
+                     (cx, cy + h + br * 1.1), (cx, cy - h - br * 1.1)]
+            bx, by = min(cands, key=lambda p: _hits((p[0] - br, p[1] - br,
+                                                     p[0] + br, p[1] + br)))
+            placed.append((bx - br, by - br, bx + br, by + br))
+            bfont = _font(br * (1.25 if len(tg) <= 2 else 0.95))
+            dr.ellipse([bx - br, by - br, bx + br, by + br], fill="#111111",
+                       outline="white", width=max(2, br // 6))
+            dr.text((bx, by), tg, fill="white", font=bfont, anchor="mm")
+
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(img.width, x1), min(img.height, y1)
+        crop = img.crop((x0, y0, x1, y1))
+        max_px = int(max(map_in) * 400)
+        if max(crop.size) > max_px:
+            k = max_px / max(crop.size)
+            crop = crop.resize((max(1, int(crop.width * k)), max(1, int(crop.height * k))))
+        out = os.path.join(tmpdir, f"layout_{fl.id}.png")
+        crop.save(out)
+        counts: dict[str, int] = {}
+        for d in devs:
+            counts[d["type"]] = counts.get(d["type"], 0) + 1
+        page = {"id": fl.id, "name": fl.name,
+                "building": mf_mod.building_of(fl.name),
+                "short": mf_mod.floor_short_name(fl.name),
+                "image": out, "size": crop.size, "counts": counts, "tags": tags_here}
+        return page, door_lists
+
+    def _run_layout_pdf_export(self, path, *, floor_ids, title, page_size, symbol_in,
+                               include_summary, badges, show_wires, note) -> None:
+        proj = self._project
+        saved = {
+            "wires": self._show_wires.get(), "legend": self._show_legend.get(),
+            "drops": self._show_drops.get(), "fov": self._show_fov.get(),
+            "ids": self._show_device_ids.get(),
+            "only_sel_fov": self._show_only_selected_fov.get(),
+        }
+        orig_active = proj.active_floor
+        self.current_wire_points = []
+        map_in = layout_mod.map_area_inches(page_size)
+        tmpdir = tempfile.mkdtemp(prefix="cwt_layout_")
+        pages, door_lists, skipped = [], {}, []
+        err = None
+        try:
+            self.root.config(cursor="watch"); self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            self._show_legend.set(False); self._show_fov.set(False)
+            self._show_drops.set(False); self._show_device_ids.set(False)
+            self._show_only_selected_fov.set(False)
+            self._show_wires.set(bool(show_wires))
+            for fid in floor_ids:
+                if fid != proj.active_floor:
+                    self._switch_floor(fid)
+                    if proj.active_floor != fid:
+                        fl = proj.get_floor(fid)
+                        skipped.append(fl.name if fl else fid)
+                        continue
+                fl = proj.get_floor(fid)
+                page, dls = self._render_layout_floor(
+                    fl, map_in=map_in, symbol_in=symbol_in, badges=badges,
+                    show_wires=show_wires, tmpdir=tmpdir)
+                pages.append(page)
+                for ttl, rows in dls:
+                    b = page["building"]
+                    door_lists.setdefault(b, {"title": ttl, "rows": []})["rows"] += rows
+        except Exception as e:
+            err = e
+        finally:
+            self._show_wires.set(saved["wires"]); self._show_legend.set(saved["legend"])
+            self._show_drops.set(saved["drops"]); self._show_fov.set(saved["fov"])
+            self._show_device_ids.set(saved["ids"])
+            self._show_only_selected_fov.set(saved["only_sel_fov"])
+            if proj.active_floor != orig_active:
+                self._switch_floor(orig_active)
+            self._redraw()
+            try:
+                self.root.config(cursor="")
+            except tk.TclError:
+                pass
+        try:
+            if err is not None:
+                raise err
+            if not pages:
+                raise RuntimeError("None of the selected floors could be rendered.")
+            # Same door number listed twice (two door-list notes) — keep first.
+            for dl in door_lists.values():
+                seen, rows = set(), []
+                for tag, line in dl["rows"]:
+                    if tag not in seen:
+                        seen.add(tag); rows.append((tag, line))
+                dl["rows"] = sorted(rows, key=lambda r: (not r[0].isdigit(),
+                                                         int(r[0]) if r[0].isdigit() else 0))
+            symbols = {k: self._safe_sym(k)
+                       for k in {t for pg in pages for t in pg["counts"]}}
+            cats = {k: self._category_of(k) for k in symbols}
+            tmp_pdf = path + ".tmp"
+            layout_mod.write_layout_pdf(
+                tmp_pdf, title=title, pages=pages, symbols=symbols, categories=cats,
+                door_lists=door_lists, summary_note=note,
+                include_summary=include_summary, page_size=page_size)
+            os.replace(tmp_pdf, path)
+            msg = f"PDF written:\n{path}"
+            if skipped:
+                msg += "\n\nSkipped (couldn't open): " + ", ".join(skipped)
+            messagebox.showinfo("Exported", msg)
+        except Exception as e:
+            log_error("Layout PDF export failed", e)
+            try:
+                if os.path.exists(path + ".tmp"):
+                    os.unlink(path + ".tmp")
+            except OSError:
+                pass
+            messagebox.showerror("Export failed", str(e))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ============================================================ FOV rendering helper
     def _device_azimuth(self, dev: dict) -> float:
