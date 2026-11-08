@@ -28,7 +28,7 @@ This document contains EVERYTHING needed to understand, maintain, modify, or reb
 
 ## Project Purpose
 
-Estimate the total cable/wire required for a security camera network installation in the **a commercial building** building (Sheet A111B — First Floor Dimension Plan).
+Estimate the total cable/wire required for a security camera network installation in the a commercial building (Sheet A111B — First Floor Dimension Plan).
 
 The workflow:
 1. An architect provided a PDF floor plan

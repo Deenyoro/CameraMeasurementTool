@@ -4,7 +4,7 @@ A Tkinter desktop tool for security-camera installers: load a draw.io floor plan
 place devices, draw multi-point wire routes, calibrate real-world scale, and
 estimate total cable per device + project-wide BOM.
 
-Built for the **a commercial building** project (Sheet A111B,
+Built for the a commercial building project (Sheet A111B,
 First Floor) but works on any draw.io plan.
 
 ## v1.0 features
